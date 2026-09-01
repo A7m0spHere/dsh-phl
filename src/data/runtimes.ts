@@ -1,0 +1,53 @@
+import type { Runtime } from '@/types'
+
+export const runtimeSeed: Runtime[] = [
+  {
+    id: 'node-24',
+    name: 'Node 24',
+    major: 24,
+    version: '24.4.1',
+    lts: false,
+    size: 32_400_000,
+    state: { kind: 'available' },
+  },
+  {
+    id: 'node-22',
+    name: 'Node 22',
+    major: 22,
+    version: '22.11.0',
+    codename: 'Jod',
+    lts: true,
+    size: 31_800_000,
+    state: { kind: 'installed', installedAt: '2026-07-02T09:12:00Z' },
+  },
+  {
+    id: 'node-20',
+    name: 'Node 20',
+    major: 20,
+    version: '20.18.1',
+    codename: 'Iron',
+    lts: true,
+    size: 30_600_000,
+    state: { kind: 'installed', installedAt: '2026-05-19T14:40:00Z' },
+  },
+  {
+    id: 'node-18',
+    name: 'Node 18',
+    major: 18,
+    version: '18.20.5',
+    codename: 'Hydrogen',
+    lts: true,
+    size: 29_100_000,
+    state: { kind: 'installed', installedAt: '2026-03-08T08:05:00Z' },
+  },
+  {
+    id: 'node-system',
+    name: '系统 Node',
+    major: 22,
+    version: '22.9.0',
+    lts: false,
+    size: 0,
+    system: true,
+    state: { kind: 'installed', installedAt: '2026-01-01T00:00:00Z' },
+  },
+]

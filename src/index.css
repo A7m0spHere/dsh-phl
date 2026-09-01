@@ -1,0 +1,322 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * PHL design tokens
+ * All colours are stored as bare HSL triplets so Tailwind can apply
+ * alpha through `hsl(var(--x) / <alpha-value>)`.
+ * ------------------------------------------------------------------ */
+
+@layer base {
+  :root {
+    /* neutral canvas — slightly cool, "desktop tool" rather than SaaS white */
+    --c-canvas: 220 20% 96%;
+    --c-chrome: 220 22% 99%;
+    --c-surface: 0 0% 100%;
+    --c-surface-raised: 0 0% 100%;
+    --c-surface-sunken: 220 20% 97%;
+    --c-surface-hover: 220 24% 95.5%;
+
+    --c-line: 220 16% 90%;
+    --c-line-strong: 220 14% 82%;
+
+    --c-ink: 222 30% 13%;
+    --c-ink-muted: 220 10% 44%;
+    --c-ink-faint: 220 10% 60%;
+
+    --c-shadow: 222 44% 22%;
+
+    --c-ok: 152 62% 38%;
+    --c-warn: 33 92% 46%;
+    --c-danger: 356 70% 51%;
+    --c-info: 212 78% 50%;
+
+    --c-accent-on: 0 0% 100%;
+
+    /* motion */
+    --motion: 1;
+    --e-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --e-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+    /* layout metrics — tuned for information density: this is a developer
+       tool that lives on screen all day, not a marketing page. */
+    --titlebar-h: 36px;
+    --panel-w: 198px;
+    --row-h: 27px;
+    --page-pad: 16px;
+
+    color-scheme: light;
+  }
+
+  .dark {
+    --c-canvas: 224 18% 8%;
+    --c-chrome: 224 18% 10.5%;
+    --c-surface: 222 16% 12.5%;
+    --c-surface-raised: 222 15% 15%;
+    --c-surface-sunken: 224 18% 10%;
+    --c-surface-hover: 222 14% 18%;
+
+    --c-line: 222 12% 21%;
+    --c-line-strong: 222 10% 30%;
+
+    --c-ink: 220 22% 93%;
+    --c-ink-muted: 220 9% 64%;
+    --c-ink-faint: 220 8% 48%;
+
+    --c-shadow: 224 60% 2%;
+
+    --c-ok: 152 55% 46%;
+    --c-warn: 36 90% 56%;
+    --c-danger: 356 72% 60%;
+    --c-info: 210 84% 62%;
+
+    color-scheme: dark;
+  }
+
+  /* ---------------- accent presets ---------------- */
+  :root,
+  [data-accent='azure'] {
+    --c-accent: 219 84% 55%;
+    --c-accent-hover: 219 84% 50%;
+    --c-accent-press: 219 84% 44%;
+    --c-accent-soft: 219 84% 96%;
+    --c-accent-ink: 219 74% 42%;
+  }
+  [data-accent='indigo'] {
+    --c-accent: 250 70% 60%;
+    --c-accent-hover: 250 70% 55%;
+    --c-accent-press: 250 70% 49%;
+    --c-accent-soft: 250 74% 96.5%;
+    --c-accent-ink: 250 62% 48%;
+  }
+  [data-accent='teal'] {
+    --c-accent: 182 68% 37%;
+    --c-accent-hover: 182 68% 33%;
+    --c-accent-press: 182 68% 28%;
+    --c-accent-soft: 182 60% 95%;
+    --c-accent-ink: 182 66% 30%;
+  }
+  [data-accent='moss'] {
+    --c-accent: 148 48% 38%;
+    --c-accent-hover: 148 48% 33%;
+    --c-accent-press: 148 48% 28%;
+    --c-accent-soft: 148 44% 95%;
+    --c-accent-ink: 148 46% 30%;
+  }
+  [data-accent='amber'] {
+    --c-accent: 32 86% 46%;
+    --c-accent-hover: 32 86% 41%;
+    --c-accent-press: 32 86% 36%;
+    --c-accent-soft: 36 88% 95%;
+    --c-accent-ink: 30 80% 38%;
+  }
+  [data-accent='rose'] {
+    --c-accent: 344 74% 52%;
+    --c-accent-hover: 344 74% 47%;
+    --c-accent-press: 344 74% 41%;
+    --c-accent-soft: 344 78% 96.5%;
+    --c-accent-ink: 344 66% 44%;
+  }
+  [data-accent='graphite'] {
+    --c-accent: 220 12% 30%;
+    --c-accent-hover: 220 12% 25%;
+    --c-accent-press: 220 12% 19%;
+    --c-accent-soft: 220 16% 94%;
+    --c-accent-ink: 220 14% 28%;
+  }
+
+  .dark[data-accent='azure'],
+  .dark:not([data-accent]) {
+    --c-accent: 216 88% 62%;
+    --c-accent-hover: 216 88% 67%;
+    --c-accent-press: 216 88% 56%;
+    --c-accent-soft: 216 60% 20%;
+    --c-accent-ink: 216 88% 72%;
+    --c-accent-on: 220 40% 8%;
+  }
+  .dark[data-accent='indigo'] {
+    --c-accent: 250 82% 70%;
+    --c-accent-hover: 250 82% 75%;
+    --c-accent-press: 250 82% 64%;
+    --c-accent-soft: 250 50% 22%;
+    --c-accent-ink: 250 84% 78%;
+    --c-accent-on: 250 40% 10%;
+  }
+  .dark[data-accent='teal'] {
+    --c-accent: 179 62% 47%;
+    --c-accent-hover: 179 62% 52%;
+    --c-accent-press: 179 62% 41%;
+    --c-accent-soft: 180 45% 18%;
+    --c-accent-ink: 179 62% 58%;
+    --c-accent-on: 182 60% 8%;
+  }
+  .dark[data-accent='moss'] {
+    --c-accent: 148 46% 50%;
+    --c-accent-hover: 148 46% 55%;
+    --c-accent-press: 148 46% 44%;
+    --c-accent-soft: 148 38% 17%;
+    --c-accent-ink: 148 48% 60%;
+    --c-accent-on: 150 50% 7%;
+  }
+  .dark[data-accent='amber'] {
+    --c-accent: 36 92% 58%;
+    --c-accent-hover: 36 92% 63%;
+    --c-accent-press: 36 92% 52%;
+    --c-accent-soft: 34 50% 18%;
+    --c-accent-ink: 36 92% 66%;
+    --c-accent-on: 30 60% 8%;
+  }
+  .dark[data-accent='rose'] {
+    --c-accent: 344 80% 64%;
+    --c-accent-hover: 344 80% 69%;
+    --c-accent-press: 344 80% 58%;
+    --c-accent-soft: 344 45% 20%;
+    --c-accent-ink: 344 82% 72%;
+    --c-accent-on: 344 50% 9%;
+  }
+  .dark[data-accent='graphite'] {
+    --c-accent: 220 12% 72%;
+    --c-accent-hover: 220 12% 78%;
+    --c-accent-press: 220 12% 66%;
+    --c-accent-soft: 220 10% 22%;
+    --c-accent-ink: 220 12% 80%;
+    --c-accent-on: 220 20% 10%;
+  }
+
+  /* ---------------- density ---------------- */
+  [data-density='compact'] {
+    --row-h: 24px;
+    --page-pad: 12px;
+  }
+  [data-density='comfortable'] {
+    --row-h: 32px;
+    --page-pad: 24px;
+  }
+
+  * {
+    border-color: hsl(var(--c-line));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-size: 12.5px;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Desktop chrome should not be selectable like a web page; the elements
+       whose text is genuinely worth copying opt back in below. */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable],
+  code,
+  pre,
+  .font-mono,
+  .selectable {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  ::selection {
+    background: hsl(var(--c-accent) / 0.22);
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--c-accent) / 0.7);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* thin, desktop-style scrollbars that only assert themselves on hover */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--c-line-strong)) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--c-ink) / 0.14);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+    transition: background-color 160ms var(--e-out);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--c-ink) / 0.28);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* A hairline that reads as a division rather than a border. */
+  .hairline-b {
+    box-shadow: inset 0 -1px 0 hsl(var(--c-line));
+  }
+  .hairline-t {
+    box-shadow: inset 0 1px 0 hsl(var(--c-line));
+  }
+  .hairline-r {
+    box-shadow: inset -1px 0 0 hsl(var(--c-line));
+  }
+
+  /* Drag region for a future frameless Tauri window. */
+  .drag {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* Very subtle grain/vignette on the canvas — keeps big empty areas from
+     looking flat without resorting to gradients. */
+  .canvas-field {
+    background-image: radial-gradient(
+      120% 100% at 50% 0%,
+      hsl(var(--c-accent) / 0.045) 0%,
+      transparent 62%
+    );
+  }
+}
+
+@layer utilities {
+  .stripes {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      hsl(var(--c-accent) / 0.18) 0 6px,
+      transparent 6px 12px
+    );
+  }
+}
+
+/* Respect the OS-level preference regardless of the in-app setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
