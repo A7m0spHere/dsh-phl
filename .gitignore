@@ -1,0 +1,24 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+dev.log
+.vite/
+.edge-tmp/
+*.png.tmp
+shot-*.png
+
+# rust / tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.njsproj
+*.sln
+*.sw?
+*.tsbuildinfo

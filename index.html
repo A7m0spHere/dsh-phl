@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN" class="phl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>PHL — Harness Instance Manager</title>
+    <script>
+      // Apply the persisted appearance before first paint to avoid a theme flash.
+      try {
+        var raw = localStorage.getItem('phl.ui')
+        var s = raw ? JSON.parse(raw).state : null
+        var theme = (s && s.theme) || 'system'
+        var dark =
+          theme === 'dark' ||
+          (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.classList.toggle('dark', dark)
+        if (s && s.accent) document.documentElement.setAttribute('data-accent', s.accent)
+        if (s && s.density) document.documentElement.setAttribute('data-density', s.density)
+        if (s && s.scale && s.scale !== 100) document.documentElement.style.zoom = s.scale / 100
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
