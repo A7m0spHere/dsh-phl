@@ -3,6 +3,8 @@ dist/
 dist-ssr/
 *.local
 dev.log
+dev-run.log
+.zcode/
 .vite/
 .edge-tmp/
 *.png.tmp
