@@ -28,13 +28,18 @@ export function InstanceTile({
 }) {
   const dark = useIsDark()
   const tone = hueTone(hue, dark)
-  const { t } = useMotion()
+  const { t, springSoft } = useMotion()
   const busy = status === 'starting' || status === 'stopping'
 
   return (
     <motion.div
       layoutId={layoutId}
-      transition={t(0.28)}
+      // A shared element is a spring everywhere else in the app (segmented
+      // pills, nav marker, accent ring); the tile — the one element the eye
+      // follows from list → detail → dock — must agree, or its flight reads
+      // as a different interaction. springSoft is the gentler end so a tile
+      // this size settles without overshooting, and it snaps at motion=off.
+      transition={springSoft}
       className={cn('relative shrink-0 select-none', className)}
       style={{ width: size, height: size }}
     >

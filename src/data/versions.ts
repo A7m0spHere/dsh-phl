@@ -30,7 +30,7 @@ export const versionSeed: DshVersion[] = [
     size: 47_640_000,
     requiresNode: [20, 22],
     notes: ['Profile 支持多份并存', 'WebUI 端口可通过 --port 指定'],
-    state: { kind: 'installed', installedAt: day(15) },
+    state: { kind: 'available' },
   },
   {
     id: 'dsh-0.1.0-rc.6',
@@ -40,7 +40,7 @@ export const versionSeed: DshVersion[] = [
     size: 46_900_000,
     requiresNode: [20, 22],
     notes: ['插件依赖解析改为按实例隔离'],
-    state: { kind: 'installed', installedAt: day(37) },
+    state: { kind: 'available' },
   },
   {
     id: 'dsh-0.1.0-rc.5',
@@ -51,7 +51,7 @@ export const versionSeed: DshVersion[] = [
     requiresNode: [18, 20],
     legacy: true,
     notes: ['已停止维护，仅用于回归测试'],
-    state: { kind: 'installed', installedAt: day(60) },
+    state: { kind: 'available' },
   },
   {
     id: 'dsh-0.1.0-rc.4',

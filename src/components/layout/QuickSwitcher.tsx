@@ -13,7 +13,7 @@ import {
   Square,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { useCatalogStore, useInstanceStore, useUIStore, type Route } from '@/stores'
 import { Kbd } from '@/components/ui'
 import { InstanceTile } from '@/components/instance'
@@ -40,7 +40,7 @@ export function QuickSwitcher() {
   const states = useInstanceStore((s) => s.states)
   const toggle = useInstanceStore((s) => s.toggle)
   const versions = useCatalogStore((s) => s.versions)
-  const { t, overlay, pop, scale } = useMotion()
+  const { overlay, pop, scale } = useMotion()
 
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -181,21 +181,20 @@ export function QuickSwitcher() {
   return (
     <AnimatePresence>
       {open && (
-        <motion.div key="palette" className="fixed inset-0 z-[75] flex items-start justify-center pt-[14vh]">
+        <motion.div key="palette" className={`fixed inset-0 ${MODAL_Z} flex items-start justify-center pt-[14vh]`}>
           <motion.div
             variants={overlay}
             initial="hidden"
             animate="show"
             exit="out"
             onClick={() => setOpen(false)}
-            className="absolute inset-0 bg-canvas/55 backdrop-blur-[2px]"
+            className={MODAL_SCRIM}
           />
           <motion.div
             variants={pop}
             initial="hidden"
             animate="show"
             exit="out"
-            transition={t(0.2)}
             className="relative w-[520px] overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
           >
             <div className="flex items-center gap-2.5 border-b border-line px-3.5 py-3">

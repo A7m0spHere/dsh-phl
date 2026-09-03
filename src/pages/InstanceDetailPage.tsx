@@ -33,6 +33,7 @@ import {
   Input,
   Menu,
   Notice,
+  ProgressBar,
   SectionCard,
   Select,
   Switch,
@@ -41,6 +42,7 @@ import {
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceTile, LaunchTimeline, StatusPill, useInstanceActions } from '@/components/instance'
+import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
 
 /* ------------------------------------------------------------------ *
  * context panel — sibling instances, so switching stays one click away
@@ -108,6 +110,10 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const launch = useInstanceStore((s) => s.launch)
   const dismissError = useInstanceStore((s) => s.dismissError)
   const update = useInstanceStore((s) => s.updateInstance)
+  const restoreSnapshot = useInstanceStore((s) => s.restoreSnapshot)
+  const deleteSnapshot = useInstanceStore((s) => s.deleteSnapshot)
+  const snapshotTransfer = useInstanceStore((s) => s.snapshotTransfers[id])
+  const confirm = useUIStore((s) => s.confirm)
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
   const plugins = useCatalogStore((s) => s.plugins)
@@ -206,10 +212,14 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const failed = status === 'error'
   const outdatedCount = pluginRows.filter((p) => p.outdated).length
 
+  /**
+   * Routed through the catalog store, not `updateInstance`: the enabled state
+   * lives in the profile's `cordis.patch.yml` and is read back from there, so
+   * patching only the in-memory record left the switch reverting on the next
+   * load while DSH kept loading the plugin.
+   */
   const togglePlugin = (pluginId: string, enabled: boolean) => {
-    update(instance.id, {
-      plugins: instance.plugins.map((p) => (p.pluginId === pluginId ? { ...p, enabled } : p)),
-    })
+    void useCatalogStore.getState().setPluginEnabled(instance.id, pluginId, enabled)
   }
 
   const copy = (text: string, label: string) => {
@@ -398,7 +408,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       (() => {
                         const nv = versions.find((v) => v.id === edit.versionId)
                         const nr = runtimes.find((r) => r.id === edit.runtimeId)
-                        return nv && nr && !nv.requiresNode.includes(nr.major)
+                        return nv && nr && nv.requiresNode.length > 0 && !nv.requiresNode.includes(nr.major)
                           ? `${nv.name} 未在 ${nr.name} 上验证过`
                           : null
                       })()
@@ -478,7 +488,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                     <span className="flex items-center gap-2">
                       {runtime?.name ?? instance.runtimeId}
                       <span className="font-mono text-sm text-ink-faint">v{runtime?.version}</span>
-                      {version && runtime && !version.requiresNode.includes(runtime.major) && (
+                      {version && runtime && version.requiresNode.length > 0 && !version.requiresNode.includes(runtime.major) && (
                         <Badge tone="warn">版本不匹配</Badge>
                       )}
                     </span>
@@ -605,6 +615,11 @@ export function InstanceDetailPage({ id }: { id: string }) {
           </SectionCard>
         </motion.div>
 
+        {/* ---- 模型与 API ---- */}
+        <motion.div variants={riseItem}>
+          <ApiBindingCard instance={instance} />
+        </motion.div>
+
         {/* ---- 插件 ---- */}
         <motion.div variants={riseItem}>
           <SectionCard
@@ -681,11 +696,28 @@ export function InstanceDetailPage({ id }: { id: string }) {
             collapsible
             defaultOpen={instance.snapshots.length > 0}
             extra={
-              <Button size="xs" variant="ghost" onClick={actions.snapshot}>
-                创建快照
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={!!snapshotTransfer}
+                onClick={actions.snapshot}
+              >
+                {snapshotTransfer ? '创建中…' : '创建快照'}
               </Button>
             }
           >
+            {snapshotTransfer && (
+              <div className="mb-3 rounded bg-surface-sunken px-3 py-2 ring-1 ring-inset ring-line">
+                <ProgressBar value={snapshotTransfer.progress} active height={4} />
+                <div className="mt-1.5 flex justify-between text-sm text-ink-faint">
+                  <span>正在复制 dsh-home…</span>
+                  <span className="num">
+                    {formatBytes(snapshotTransfer.bytesDone)} /{' '}
+                    {formatBytes(snapshotTransfer.bytesTotal)}
+                  </span>
+                </div>
+              </div>
+            )}
             {instance.snapshots.length === 0 ? (
               <EmptyState
                 compact
@@ -716,13 +748,15 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       <Button
                         size="xs"
                         variant="secondary"
-                        onClick={() =>
-                          toast({
-                            kind: 'info',
-                            title: '回滚在原型中不可用',
-                            message: '接入 PHL Core 后将还原版本、插件与配置。',
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: `回滚到「${snap.label}」`,
+                            message: '当前 dsh-home 里的插件与配置会被快照内容整体替换。',
+                            detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。`,
+                            confirmLabel: '回滚',
                           })
-                        }
+                          if (ok) await restoreSnapshot(instance.id, snap.id)
+                        }}
                       >
                         回滚
                       </Button>
@@ -730,11 +764,15 @@ export function InstanceDetailPage({ id }: { id: string }) {
                         label="删除快照"
                         size="xs"
                         variant="ghost"
-                        onClick={() =>
-                          update(instance.id, {
-                            snapshots: instance.snapshots.filter((s) => s.id !== snap.id),
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: '删除快照',
+                            message: `删除「${snap.label}」？快照目录会从磁盘移除，不可恢复。`,
+                            tone: 'danger',
+                            confirmLabel: '删除',
                           })
-                        }
+                          if (ok) await deleteSnapshot(instance.id, snap.id)
+                        }}
                       >
                         <Trash2 size={11} />
                       </IconButton>

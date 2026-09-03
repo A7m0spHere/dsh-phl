@@ -733,6 +733,27 @@ MVP：
 
 # 15. 后续开发路线
 
+> **当前进度与顺序调整（2026-09-03）**
+>
+> 实际落地顺序已经偏离本节最初的排布，原因是 Plugin Manager 提前实现了。
+>
+> | 模块 | 状态 |
+> |---|---|
+> | Version Manager | ✅ 已接入（GitHub Releases + npm，真实下载 / 校验 / 解包 / 删除） |
+> | Plugin Manager | ✅ 已接入（社区注册表 + 真实安装管线、`cordis.patch.yml` 读写） |
+> | Instance Manager | ✅ 已接入（磁盘持久化，详见 `dsh-phl-instance-manager-plan.md`） |
+> | Runtime Manager | ✅ 已接入（nodejs.org dist 目录 + npmmirror 镜像，SHASUMS256 校验，Windows zip / Unix tar.gz 解包，系统 Node 探测） |
+> | Process / Port、真实启动 | ✅ 已接入（`dsh web --port` 启动、`DSH_HOME` 指向实例目录、端口探测与自动分配、进程树终止、崩溃事件、启动日志） |
+> | Bundle | ✅ 已接入（manifest 级导出/导入：配置 + 插件记录，暂存重命名建树；插件文件经正常管线重装。实例模板为静态产品内容） |
+> | Snapshot | ✅ 已接入（dsh-home 级创建/回滚/删除；回滚复制还原、快照保留可反复使用；运行中拒绝操作；克隆不携带快照历史） |
+> | Diagnostics 诊断 | ✅ 已接入（数据目录可写、版本/Runtime 完整性、实例引用有效性、孤立目录一览、缓存清理；设置页「诊断」分区） |
+> | **高级能力** | ⬅ **下一步**（Source Build / 环境修复 / 兼容性矩阵，见路线图 §13） |
+>
+> **顺序以 `dsh-phl-development-roadmap.md` §14 为准**（Version → Instance → Runtime
+> → Process/Port → Launch）。启动事实来自对 `@deepseek-ai/dsh` 实际源码的核查：
+> 只有 `dsh web` 子命令解析 `--port` 并提供 WebUI，`DSH_HOME` 是官方认可由 launcher
+> 注入的隔离点 —— 因此实例 profile 固定为 `web`，隔离靠每实例独立的 `DSH_HOME`。
+
 ## Phase 0 — DSH Runtime Research
 
 确认：

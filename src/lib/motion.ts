@@ -111,6 +111,13 @@ export function useMotion(): MotionKit {
   }, [scale])
 }
 
-/** Press feedback shared by every clickable surface. */
-export const pressable = (scale: number) =>
-  scale === 0 ? {} : { whileTap: { scale: 0.985 }, transition: { duration: 0.1 * scale, ease: EASE } }
+/**
+ * The single scrim used behind every full-screen modal (dialog, command
+ * palette, guide, discovery). Sharing one class means a modal always dims and
+ * blurs the page the same way, instead of each surface inventing its own
+ * opacity/blur. Applied to an absolutely-positioned backdrop filling the
+ * fixed modal wrapper.
+ */
+export const MODAL_SCRIM = 'absolute inset-0 bg-canvas/60 backdrop-blur-[2px]'
+/** Stacking level for every top-level modal wrapper (they are mutually exclusive). */
+export const MODAL_Z = 'z-[80]'

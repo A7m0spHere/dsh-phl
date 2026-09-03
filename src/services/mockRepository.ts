@@ -1,21 +1,25 @@
-import { instanceSeed, templateSeed, PHL_ROOT } from '@/data/instances'
+import { instanceSeed, templateSeed } from '@/data/instances'
 import { pluginSeed } from '@/data/plugins'
 import { runtimeSeed } from '@/data/runtimes'
 import { versionSeed } from '@/data/versions'
 import { slugify } from '@/lib/format'
+import { useSettingsStore } from '@/stores/settingsStore'
 import type {
   DshVersion,
+  InstalledPlugin,
   Instance,
   InstanceDraft,
   InstanceTemplate,
   LaunchPhase,
   Plugin,
   Runtime,
+  Snapshot,
 } from '@/types'
 import { LAUNCH_PHASES } from '@/types'
 import {
   Cancelled,
   LaunchError,
+  type CopyProgress,
   type CreateProgress,
   type LaunchContext,
   type LaunchOutcome,
@@ -72,6 +76,24 @@ async function ramp(
 
 const rand = (min: number, max: number) => min + Math.random() * (max - min)
 
+/**
+ * The instance tree under PHL's *configured* data root.
+ *
+ * These paths are no longer decorative: the desktop repository still routes
+ * `createInstance` here while the instance module is mock, and the real
+ * plugin installer then creates directories under whatever `dshHome` says.
+ * Hardcoding the prototype's `C:\Users\dev\…` placeholder meant every plugin
+ * install on a real machine wrote to — or failed on — a stranger's path.
+ */
+function instanceRoot(slug: string): string {
+  const root = useSettingsStore.getState().root
+  const sep = root.includes('\\') ? '\\' : '/'
+  return `${root}${sep}instances${sep}${slug}`
+}
+
+const childPath = (root: string, name: string) =>
+  `${root}${root.includes('\\') ? '\\' : '/'}${name}`
+
 /* ------------------------------------------------------------------ *
  * repository
  * ------------------------------------------------------------------ */
@@ -91,7 +113,7 @@ class MockRepository implements PhlRepository {
   }
   async listPlugins() {
     await sleep(110)
-    return structuredClone(pluginSeed)
+    return { plugins: structuredClone(pluginSeed) }
   }
   async listTemplates() {
     await sleep(40)
@@ -107,7 +129,7 @@ class MockRepository implements PhlRepository {
     signal: AbortSignal,
   ): Promise<Instance> {
     const slug = slugify(draft.name)
-    const root = `${PHL_ROOT}\\instances\\${slug}`
+    const root = instanceRoot(slug)
 
     const steps: [CreateProgress['step'], number, string][] = [
       ['create', 380, '写入 instance.json'],
@@ -140,9 +162,10 @@ class MockRepository implements PhlRepository {
       runtimeId: draft.runtimeId!,
       port: draft.port,
       autoPort: draft.autoPort,
-      dshHome: `${root}\\dsh-home`,
-      workspace: `${root}\\workspace`,
-      profile: 'default',
+      dshHome: childPath(root, 'dsh-home'),
+      workspace: childPath(root, 'workspace'),
+      // 与桌面端一致：`dsh web` 启动的就是 profiles/web。
+      profile: 'web',
       createdAt: new Date().toISOString(),
       totalRuntime: 0,
       diskUsage: 24_000_000 + (template?.plugins.length ?? 0) * 8_400_000,
@@ -159,15 +182,15 @@ class MockRepository implements PhlRepository {
   async cloneInstance(source: Instance, name: string, port: number): Promise<Instance> {
     await sleep(900)
     const slug = slugify(name)
-    const root = `${PHL_ROOT}\\instances\\${slug}`
+    const root = instanceRoot(slug)
     return {
       ...structuredClone(source),
       id: `${slug}-${Math.random().toString(36).slice(2, 6)}`,
       name,
       note: `从 ${source.name} 克隆`,
       port,
-      dshHome: `${root}\\dsh-home`,
-      workspace: `${root}\\workspace`,
+      dshHome: childPath(root, 'dsh-home'),
+      workspace: childPath(root, 'workspace'),
       createdAt: new Date().toISOString(),
       lastRunAt: undefined,
       totalRuntime: 0,
@@ -179,6 +202,54 @@ class MockRepository implements PhlRepository {
   async deleteInstance(_id: string): Promise<void> {
     await sleep(560)
   }
+
+  async saveInstance(_instance: Instance): Promise<void> {
+    // Nothing to persist in the browser: the mock instance list only ever
+    // lives for the length of the session.
+  }
+
+  async measureDiskUsage(instance: Instance): Promise<number> {
+    return instance.diskUsage
+  }
+
+  /* ---------------- snapshots ---------------- */
+
+  async createSnapshot(
+    instance: Instance,
+    onProgress: (p: CopyProgress) => void,
+    signal: AbortSignal,
+  ): Promise<Snapshot> {
+    // 模拟本地树拷贝：一段平滑的进度爬坡。
+    const size = 58_000_000
+    await ramp(900, (p) => onProgress({ progress: p, bytesDone: Math.round(size * p), bytesTotal: size }), signal)
+    return {
+      id: `snap-${Date.now()}`,
+      label: `快照 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+      createdAt: new Date().toISOString(),
+      versionId: instance.versionId,
+      runtimeId: instance.runtimeId,
+      pluginCount: instance.plugins.length,
+      size,
+    }
+  }
+
+  async restoreSnapshot(instance: Instance, snapshotId: string): Promise<Instance> {
+    await sleep(900)
+    void snapshotId
+    return instance
+  }
+
+  async deleteSnapshot(instance: Instance, snapshotId: string): Promise<void> {
+    await sleep(300)
+    void snapshotId
+    void instance
+  }
+
+  async listOrphanInstanceDirs(): Promise<{ name: string; size: number }[]> {
+    return []
+  }
+
+  async removeOrphanInstanceDir(_name: string): Promise<void> {}
 
   /* ---------------- launch / stop ---------------- */
 
@@ -198,6 +269,9 @@ class MockRepository implements PhlRepository {
       'allocate-port': 240,
       spawn: 520,
       'await-ready': 860,
+      // The mock catalog has no npm pipeline behind it — the phase only ever
+      // runs on desktop, repairing a version whose deps are missing.
+      'install-deps': 0,
     }
     const total = LAUNCH_PHASES.reduce((a, p) => a + weights[p], 0)
 
@@ -205,6 +279,7 @@ class MockRepository implements PhlRepository {
     let port = instance.port
 
     for (const phase of LAUNCH_PHASES) {
+      if (phase === 'install-deps') continue
       // Preconditions are checked at the top of the phase that owns them, so
       // the failure surfaces with the right label attached to it.
       if (phase === 'resolve-version') {
@@ -226,7 +301,11 @@ class MockRepository implements PhlRepository {
             '前往「运行时」页面安装后重试。',
           )
         }
-        if (ctx.version && !ctx.version.requiresNode.includes(ctx.runtime.major)) {
+        // An empty `requiresNode` means the registry never declared
+        // `engines.node` — that is "unknown", not "nothing is compatible".
+        // Treating it as a constraint rejected every launch on desktop, with
+        // an empty Node list in the message to prove it.
+        if (ctx.version?.requiresNode.length && !ctx.version.requiresNode.includes(ctx.runtime.major)) {
           await sleep(300, signal)
           throw new LaunchError(
             'Runtime 与 DSH 版本不匹配',
@@ -333,6 +412,81 @@ class MockRepository implements PhlRepository {
 
   async removeRuntime(_id: string) {
     await sleep(420)
+  }
+
+  /* ---------------- plugin install pipeline ---------------- */
+
+  /**
+   * Mirrors the real Rust pipeline stage for stage: resolve the tarball
+   * (Preparing), stream it (Downloading), hash it (Verifying), unpack into
+   * the profile and register it in `cordis.patch.yml` (Installing).
+   */
+  async installPlugin(
+    plugin: Plugin,
+    instance: Instance,
+    onProgress: (p: TransferProgress) => void,
+    signal: AbortSignal,
+  ): Promise<{ version: string; registryId?: string }> {
+    const release = plugin.releases[0]
+    const size = release?.size ?? 1_800_000
+    const speed = rand(6_000_000, 11_000_000)
+    const downloadMs = Math.max(1200, (size / speed) * 1000)
+
+    onProgress({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
+    await ramp(900, (p) => onProgress({ stage: 'preparing', progress: p * 0.05, bytesDone: 0, bytesPerSec: 0 }), signal)
+
+    await ramp(
+      downloadMs,
+      (p) =>
+        onProgress({
+          stage: 'downloading',
+          progress: 0.05 + p * 0.7,
+          bytesDone: Math.round(size * p),
+          bytesPerSec: speed * rand(0.82, 1.16),
+        }),
+      signal,
+      (t) => t,
+    )
+
+    onProgress({ stage: 'verifying', progress: 0.78, bytesDone: size, bytesPerSec: 0 })
+    await sleep(520, signal)
+
+    await ramp(
+      820,
+      (p) =>
+        onProgress({ stage: 'installing', progress: 0.78 + p * 0.22, bytesDone: size, bytesPerSec: 0 }),
+      signal,
+    )
+    // Touch the profile the way the Rust step would — the mock instance tree
+    // is virtual, so the delay is the only observable.
+    await sleep(180, signal)
+    void instance
+    return { version: release?.version ?? '0.0.0' }
+  }
+
+  async setPluginEnabled(
+    instance: Instance,
+    installed: InstalledPlugin,
+    enabled: boolean,
+  ): Promise<void> {
+    await sleep(240)
+    void instance
+    void installed
+    void enabled
+  }
+
+  async uninstallPlugin(instance: Instance, installed: InstalledPlugin): Promise<void> {
+    await sleep(520)
+    void instance
+    void installed
+  }
+
+  async latestPluginVersion(plugin: Plugin): Promise<string | null> {
+    await sleep(160)
+    // GitHub-source plugins have no npm dist-tags to consult — the real
+    // bridge returns null for them too.
+    if (plugin.source.kind !== 'npm') return null
+    return plugin.releases[0]?.version ?? null
   }
 }
 

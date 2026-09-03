@@ -1,7 +1,18 @@
 import { create } from 'zustand'
 import { repository, Cancelled } from '@/services'
-import type { DshVersion, InstanceTemplate, Plugin, Runtime } from '@/types'
+import type { DshVersion, InstalledPlugin, InstanceTemplate, Plugin, Runtime } from '@/types'
 import { useUIStore } from './uiStore'
+import { useInstanceStore } from './instanceStore'
+
+/** Live transfer state for one (instance, plugin) install. */
+export interface PluginTransferState {
+  stage: 'preparing' | 'downloading' | 'verifying' | 'installing'
+  progress: number
+  bytesDone: number
+  bytesPerSec: number
+}
+
+export const pluginKey = (instanceId: string, pluginId: string) => `p:${instanceId}:${pluginId}`
 
 interface CatalogState {
   versions: DshVersion[]
@@ -10,8 +21,34 @@ interface CatalogState {
   templates: InstanceTemplate[]
   loaded: boolean
   loading: boolean
+  /**
+   * True when the live plugin registry was unreachable and the catalog came
+   * from the on-disk cache or the bundled copy. The registry tab shows a
+   * notice with the real cause and a retry instead of failing silently.
+   */
+  pluginsOffline: boolean
+  pluginsError?: string
+  /**
+   * Versions have settled (成功或失败都算)。版本目录是最慢的远程源，
+   * 页面骨架屏只等自己关心的模块，不陪别的源干等。
+   */
+  versionsLoaded: boolean
+  /** A version-catalog re-sync (manual or scheduled) is in flight. */
+  versionsSyncing: boolean
+  /** Epoch ms of the last *successful* catalog sync — drives the "上次同步" label. */
+  versionsSyncedAt: number | null
+  /**
+   * Epoch ms of the last sync *attempt*, success or not. The scheduler ticks
+   * on this so a failing network can't turn auto-refresh into a retry loop.
+   */
+  versionsSyncAttemptedAt: number
 
   load: () => Promise<void>
+  /**
+   * Re-pull the remote catalog and merge it into `versions`. `silent` is the
+   * scheduled path: no toasts either way, just fresh data if it arrives.
+   */
+  refreshVersions: (opts?: { silent?: boolean }) => Promise<void>
 
   installVersion: (id: string) => Promise<void>
   cancelVersion: (id: string) => void
@@ -20,6 +57,21 @@ interface CatalogState {
   installRuntime: (id: string) => Promise<void>
   cancelRuntime: (id: string) => void
   removeRuntime: (id: string) => Promise<void>
+
+  /** Live plugin installs keyed by `p:<instanceId>:<pluginId>`. */
+  pluginTransfers: Record<string, PluginTransferState>
+  /**
+   * Resolved newest version per plugin id — `undefined` = not checked yet,
+   * `null` = checked but undeterminable (GitHub-source plugins). Lets the
+   * updates tab query npm only for installed plugins instead of the whole
+   * catalog.
+   */
+  latestVersions: Record<string, string | null>
+  refreshLatestVersions: (instanceId: string) => Promise<void>
+  installPlugin: (instanceId: string, pluginId: string) => Promise<void>
+  cancelPlugin: (instanceId: string, pluginId: string) => void
+  setPluginEnabled: (instanceId: string, pluginId: string, enabled: boolean) => Promise<void>
+  uninstallPlugin: (instanceId: string, pluginId: string) => Promise<void>
 
   versionById: (id: string) => DshVersion | undefined
   runtimeById: (id: string) => Runtime | undefined
@@ -30,6 +82,26 @@ interface CatalogState {
 
 const controllers = new Map<string, AbortController>()
 
+/**
+ * Applies a change to an instance's plugin list against the **current** store
+ * state rather than a snapshot.
+ *
+ * Every plugin mutation awaits a Rust pipeline that can run for minutes, and
+ * the transfer guard is per (instance, plugin) — so two plugins can install
+ * into the same instance concurrently. Rebuilding the list from a snapshot
+ * captured before the await let whichever finished second drop the other's
+ * entry, while its files stayed on disk and in cordis.patch.yml.
+ */
+function patchInstancePlugins(
+  instanceId: string,
+  update: (plugins: InstalledPlugin[]) => InstalledPlugin[],
+) {
+  const store = useInstanceStore.getState()
+  const current = store.byId(instanceId)
+  if (!current) return
+  store.updateInstance(instanceId, { plugins: update(current.plugins) })
+}
+
 export const useCatalogStore = create<CatalogState>()((set, get) => ({
   versions: [],
   runtimes: [],
@@ -37,20 +109,115 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   templates: [],
   loaded: false,
   loading: false,
+  versionsLoaded: false,
+  versionsSyncing: false,
+  versionsSyncedAt: null,
+  versionsSyncAttemptedAt: 0,
+  pluginTransfers: {},
+  pluginsOffline: false,
+  latestVersions: {},
 
   async load() {
     if (get().loading) return
-    set({ loading: true })
-    const [versions, runtimes, plugins, templates] = await Promise.all([
-      repository.listVersions(),
-      repository.listRuntimes(),
-      repository.listPlugins(),
-      repository.listTemplates(),
-    ])
-    set({ versions, runtimes, plugins, templates, loaded: true, loading: false })
+    set({ loading: true, versionsSyncAttemptedAt: Date.now() })
+    const failures: Array<[string, unknown]> = []
+    const swallow = (label: string) => (err: unknown) => {
+      console.warn(`[phl] ${label} load failed:`, err)
+      failures.push([label, err])
+    }
+    try {
+      // Modules land independently: each one is written into state as soon as
+      // it settles, so a slow source never holds the others' data hostage.
+      await Promise.all([
+        repository.listVersions().then(
+          (versions) =>
+            set({ versions, versionsLoaded: true, versionsSyncedAt: Date.now() }),
+          (err) => { swallow('版本目录')(err); set({ versionsLoaded: true }) },
+        ),
+        repository.listRuntimes().then(
+          (runtimes) => set({ runtimes }),
+          swallow('Runtime 列表'),
+        ),
+        repository.listPlugins().then(
+          (catalog) =>
+            set({
+              plugins: catalog.plugins,
+              pluginsOffline: !!catalog.offline,
+              pluginsError: catalog.error,
+            }),
+          swallow('插件市场'),
+        ),
+        repository.listTemplates().then(
+          (templates) => set({ templates }),
+          swallow('实例模板'),
+        ),
+      ])
+      set({ loaded: true })
+      for (const [label, err] of failures) {
+        const detail = err instanceof Error && err.message ? err.message : '无法连接发布源，请检查网络。'
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: `${label}加载失败`,
+          message: detail,
+          action: { label: '重试', run: () => void get().load() },
+        })
+      }
+    } finally {
+      set({ loading: false })
+    }
   },
 
   /* ---------------- versions ---------------- */
+
+  async refreshVersions(opts = {}) {
+    const silent = !!opts.silent
+    const { versionsSyncing, loading } = get()
+    // The startup load already re-pulls the catalog — two concurrent
+    // fetches would just race each other's `set`.
+    if (versionsSyncing || loading) return
+    set({ versionsSyncing: true, versionsSyncAttemptedAt: Date.now() })
+    try {
+      const next = await repository.listVersions()
+      // The new list re-derives every state from a fresh disk scan, which
+      // knows nothing about in-flight transfers: a downloading row would
+      // flicker back to "可安装" until the next progress tick (or forever,
+      // during the pre-first-chunk quiet). Carry those over by id.
+      const keep = new Set(['queued', 'downloading', 'extracting', 'verifying', 'failed'])
+      const prev = new Map(get().versions.map((v) => [v.id, v]))
+      const merged = next.map((v) => {
+        const old = prev.get(v.id)
+        return old && keep.has(old.state.kind) ? { ...v, state: old.state } : v
+      })
+      const added = merged.filter((v) => !prev.has(v.id))
+      set({ versions: merged, versionsLoaded: true, versionsSyncedAt: Date.now() })
+      if (!silent) {
+        useUIStore.getState().toast(
+          added.length
+            ? {
+                kind: 'success',
+                title: added.length === 1 ? `发现新版本 ${added[0].name}` : `发现 ${added.length} 个新版本`,
+                message: added.map((v) => v.name).slice(0, 5).join('、'),
+              }
+            : { kind: 'info', title: '已是最新版本', message: '版本目录已同步，没有发现新版本。' },
+        )
+      }
+    } catch (err) {
+      console.warn('[phl] version catalog refresh failed:', err)
+      if (!silent) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '同步版本目录失败',
+          message:
+            err instanceof Error && err.message
+              ? err.message
+              : '无法连接发布源，请检查网络后重试。',
+          action: { label: '重试', run: () => void get().refreshVersions() },
+        })
+      }
+    } finally {
+      set({ versionsSyncing: false })
+    }
+  },
 
   async installVersion(id) {
     const version = get().versions.find((v) => v.id === id)
@@ -92,11 +259,12 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         patch({ kind: 'available' })
         useUIStore.getState().toast({ kind: 'info', title: `已取消下载 ${version.name}` })
       } else {
-        patch({ kind: 'failed', reason: '下载中断，未能校验完整性' })
+        const reason = err instanceof Error && err.message ? err.message : '下载中断，未能校验完整性'
+        patch({ kind: 'failed', reason })
         useUIStore.getState().toast({
           kind: 'error',
           title: `DSH ${version.name} 安装失败`,
-          message: '下载中断，未能校验完整性。',
+          message: reason,
           action: { label: '重试', run: () => get().installVersion(id) },
         })
       }
@@ -110,7 +278,17 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   },
 
   async removeVersion(id) {
-    await repository.removeVersion(id)
+    try {
+      await repository.removeVersion(id)
+    } catch (err) {
+      console.warn('[phl] removeVersion failed:', err)
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: '删除版本失败',
+        message: err instanceof Error && err.message ? err.message : '版本目录无法移除，可能被其他程序占用。',
+      })
+      return
+    }
     set({
       versions: get().versions.map((v) => (v.id === id ? { ...v, state: { kind: 'available' } } : v)),
     })
@@ -169,6 +347,168 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     })
   },
 
+  /* ---------------- plugins ---------------- */
+
+  /**
+   * Installs a plugin into one instance. Progress lives in `pluginTransfers`
+   * keyed by `p:<instanceId>:<pluginId>` — never on the catalog `Plugin`,
+   * which is shared across instances and may be installing into several
+   * places at once.
+   */
+  async installPlugin(instanceId, pluginId) {
+    const instance = useInstanceStore.getState().byId(instanceId)
+    const plugin = get().pluginById(pluginId)
+    if (!instance || !plugin) return
+    // An existing install means this is an update: the pipeline replaces the
+    // package directory, so only concurrent transfers guard.
+    const key = pluginKey(instanceId, pluginId)
+    if (get().pluginTransfers[key]) return
+
+    const controller = new AbortController()
+    controllers.set(key, controller)
+
+    const patch = (t: PluginTransferState) =>
+      set({ pluginTransfers: { ...get().pluginTransfers, [key]: t } })
+
+    patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
+    try {
+      const { version, registryId } = await repository.installPlugin(
+        plugin,
+        instance,
+        (p) =>
+          patch({
+            stage: p.stage === 'extracting' ? 'installing' : p.stage,
+            progress: p.progress,
+            bytesDone: p.bytesDone,
+            bytesPerSec: p.bytesPerSec,
+          }),
+        controller.signal,
+      )
+      patchInstancePlugins(instanceId, (plugins) =>
+        plugins.some((ip) => ip.pluginId === pluginId)
+          ? plugins.map((ip) =>
+              ip.pluginId === pluginId ? { ...ip, version, registryId, enabled: true } : ip,
+            )
+          : [...plugins, { pluginId, version, registryId, enabled: true }],
+      )
+      useUIStore.getState().toast({
+        kind: 'success',
+        title: `已安装到「${instance.name}」`,
+        message: `${plugin.name} ${version}`,
+      })
+    } catch (err) {
+      if (err instanceof Cancelled) {
+        useUIStore.getState().toast({ kind: 'info', title: `已取消安装 ${plugin.name}` })
+      } else {
+        const reason = err instanceof Error && err.message ? err.message : String(err)
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: `${plugin.name} 安装失败`,
+          message: reason,
+          action: { label: '重试', run: () => void get().installPlugin(instanceId, pluginId) },
+        })
+      }
+    } finally {
+      const rest = { ...get().pluginTransfers }
+      delete rest[key]
+      set({ pluginTransfers: rest })
+      controllers.delete(key)
+    }
+  },
+
+  cancelPlugin(instanceId, pluginId) {
+    controllers.get(pluginKey(instanceId, pluginId))?.abort()
+  },
+
+  /** Resolves the newest published version for every installed plugin once. */
+  async refreshLatestVersions(instanceId) {
+    const instance = useInstanceStore.getState().byId(instanceId)
+    if (!instance) return
+    const pending = instance.plugins.filter(
+      (ip) =>
+        !ip.linked &&
+        get().latestVersions[ip.pluginId] === undefined &&
+        get().pluginById(ip.pluginId),
+    )
+    if (pending.length === 0) return
+    set({
+      latestVersions: {
+        ...get().latestVersions,
+        ...Object.fromEntries(pending.map((ip) => [ip.pluginId, null])),
+      },
+    })
+    const resolved = await Promise.all(
+      pending.map(async (ip) => {
+        const plugin = get().pluginById(ip.pluginId)!
+        try {
+          return [ip.pluginId, await repository.latestPluginVersion(plugin)] as const
+        } catch {
+          return [ip.pluginId, null] as const
+        }
+      }),
+    )
+    set({
+      latestVersions: { ...get().latestVersions, ...Object.fromEntries(resolved) },
+    })
+  },
+
+  /** Flips `disabled` in cordis.patch.yml and mirrors it on the instance. */
+  async setPluginEnabled(instanceId, pluginId, enabled) {
+    const instance = useInstanceStore.getState().byId(instanceId)
+    if (!instance) return
+    const installed = instance.plugins.find((ip) => ip.pluginId === pluginId)
+    if (!installed) return
+    const label = get().pluginById(pluginId)?.name ?? pluginId
+    // Linked plugins are local dev folders — there is nothing to patch on
+    // disk, so only the instance record changes. Everything else *must* reach
+    // disk: gating this on catalog metadata (absent whenever the registry is
+    // unreachable) turned the switch into a no-op that still reported success,
+    // while `cordis.patch.yml` — the file DSH actually reads — went untouched.
+    if (!installed.linked) {
+      try {
+        await repository.setPluginEnabled(instance, installed, enabled)
+      } catch (err) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: `${label} ${enabled ? '启用' : '停用'}失败`,
+          message: err instanceof Error && err.message ? err.message : String(err),
+        })
+        return
+      }
+    }
+    patchInstancePlugins(instanceId, (plugins) =>
+      plugins.map((p) => (p.pluginId === pluginId ? { ...p, enabled } : p)),
+    )
+  },
+
+  /** Removes the package from the profile and the instance record. */
+  async uninstallPlugin(instanceId, pluginId) {
+    const instance = useInstanceStore.getState().byId(instanceId)
+    if (!instance) return
+    const removed = instance.plugins.find((ip) => ip.pluginId === pluginId)
+    if (!removed) return
+    const label = get().pluginById(pluginId)?.name ?? pluginId
+    if (!removed.linked) {
+      try {
+        await repository.uninstallPlugin(instance, removed)
+      } catch (err) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: `${label} 卸载失败`,
+          message: err instanceof Error && err.message ? err.message : String(err),
+        })
+        return
+      }
+    }
+    patchInstancePlugins(instanceId, (plugins) =>
+      plugins.filter((p) => p.pluginId !== pluginId),
+    )
+    useUIStore.getState().toast({
+      kind: 'info',
+      title: `已从「${instance.name}」移除 ${label}`,
+    })
+  },
+
   /* ---------------- lookups ---------------- */
 
   versionById: (id) => get().versions.find((v) => v.id === id),
@@ -177,5 +517,6 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   activeTransfers: () =>
     get().versions.filter((v) => ['downloading', 'extracting', 'verifying', 'queued'].includes(v.state.kind))
       .length +
-    get().runtimes.filter((r) => ['downloading', 'extracting'].includes(r.state.kind)).length,
+    get().runtimes.filter((r) => ['downloading', 'extracting'].includes(r.state.kind)).length +
+    Object.keys(get().pluginTransfers).length,
 }))

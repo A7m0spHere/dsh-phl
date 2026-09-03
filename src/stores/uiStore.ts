@@ -5,7 +5,7 @@ import { persist, createJSONStorage } from 'zustand/middleware'
  * routing
  * ------------------------------------------------------------------ */
 
-export type Tab = 'instances' | 'versions' | 'plugins' | 'runtimes' | 'settings'
+export type Tab = 'instances' | 'versions' | 'plugins' | 'apiConfig' | 'runtimes' | 'settings'
 
 export type Route =
   | { name: 'instances' }
@@ -13,6 +13,7 @@ export type Route =
   | { name: 'create'; cloneFrom?: string }
   | { name: 'versions' }
   | { name: 'plugins' }
+  | { name: 'apiConfig' }
   | { name: 'runtimes' }
   | { name: 'settings' }
 

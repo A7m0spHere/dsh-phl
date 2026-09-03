@@ -7,6 +7,7 @@ import {
   CircleHelp,
   Copy,
   Cpu,
+  KeyRound,
   Minus,
   Moon,
   Package,
@@ -34,6 +35,7 @@ const TABS: { id: Tab; label: string; icon: typeof Boxes }[] = [
   { id: 'instances', label: '实例', icon: Boxes },
   { id: 'versions', label: '版本', icon: Package },
   { id: 'plugins', label: '插件', icon: Blocks },
+  { id: 'apiConfig', label: 'API', icon: KeyRound },
   { id: 'runtimes', label: '运行时', icon: Cpu },
   { id: 'settings', label: '设置', icon: Settings },
 ]

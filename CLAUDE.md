@@ -6,7 +6,10 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
 核心命题：让多个 DSH 版本在同一台机器上共存，且每个实例的运行环境彼此隔离。
 
 形态是 **Tauri 2 桌面应用**（无边框窗口 + 自绘标题栏），不是网页。
-当前阶段：**Phase 1 — 高保真原型**，业务数据走 Mock，不接触真实文件系统与进程。
+当前阶段：核心链路（版本 / 插件 / 实例 / Runtime / 启动 / Bundle / 快照）已真实接入 Rust
+管线，会真实读写磁盘与拉起进程；浏览器模式（`npm run dev`）仍走 Mock，便于纯 UI 开发。
+桌面端启动 DSH 的事实约定：只有 `dsh web` 子命令解析 `--port`，`DSH_HOME` 是隔离注入点，
+实例 profile 固定为 `web`（详见 `src-tauri/src/launch.rs` 模块文档）。
 
 ## 桌面壳约定
 

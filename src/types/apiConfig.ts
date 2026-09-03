@@ -1,0 +1,113 @@
+/**
+ * The global API provider library and its per-instance bindings.
+ *
+ * Mirrors the Rust wire types in `src-tauri/src/api_config.rs`. The library
+ * lives once at `<root>/config/api.json`; each instance stores only a
+ * *binding* (an id reference plus its inheritance mode) — materialization
+ * writes the merged result into the instance's `dsh-home/settings.yaml`.
+ *
+ * Secrets are never part of these shapes: a provider references an
+ * environment-variable *name* (`apiKeyEnv`, DSH's own field), so the key
+ * itself lives in the user's environment or DSH's `.credentials.yaml`.
+ */
+
+export interface ApiModelRef {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+}
+
+/** How DSH reaches the endpoint: the wire protocol in `settings.yaml`. */
+export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic' | ''
+
+export interface ApiProvider {
+  id: string
+  /** The key DSH sees (`llm-pi-ai.providers.<name>`); stable, filesystem-safe. */
+  name: string
+  kind: 'official' | 'aggregator' | 'custom'
+  notes?: string
+  api?: string
+  baseURL?: string
+  /** Environment variable name DSH reads the key from — never the key. */
+  apiKeyEnv: string
+  models: ApiModelRef[]
+  enabled: boolean
+}
+
+/** Points at a provider *by name* (DSH's own key space) + a model. */
+export interface ApiDefaultModel {
+  providerName: string
+  model: string
+  reasoningEffort?: string
+}
+
+export interface ApiConfig {
+  version: 1
+  updatedAt: string
+  defaultProviderId?: string
+  defaultModel?: ApiDefaultModel
+  providers: ApiProvider[]
+}
+
+export type ApiInheritance = 'default' | 'custom' | 'none'
+
+/** The binding stored on an instance (in `instance.json`'s `api` field). */
+export interface ApiBinding {
+  inheritance: ApiInheritance
+  providerIds: string[]
+  defaultModel?: ApiDefaultModel
+  syncedAt?: string
+  syncedHash?: string
+}
+
+export const defaultApiBinding = (): ApiBinding => ({
+  inheritance: 'default',
+  providerIds: [],
+})
+
+export const unmanagedApiBinding = (): ApiBinding => ({
+  inheritance: 'none',
+  providerIds: [],
+})
+
+/**
+ * One instance's *actual* API state as read from its settings.yaml —
+ * mirrors the Rust `InstanceLiveSnapshot`. The file is the truth; the
+ * library only describes what 同步 would write, and 采纳 is the inverse
+ * operation (instance → library) and stays a human decision.
+ */
+export interface InstanceLiveSnapshot {
+  inheritance: ApiInheritance
+  /** Parsed providers + default model as the file currently has them. */
+  live: ApiConfig | null
+  /**
+   * Managed content (bound provider entries, the default model) was
+   * modified or deleted inside the instance. Additions the instance made
+   * are not changes — they are just unmanaged entries.
+   */
+  localChanges: boolean
+  defaultModelChanged: boolean
+  /** Bound providers whose `apiKeyEnv` is set nowhere PHL can observe. */
+  missingKeys: string[]
+}
+
+/** Per-provider divergence classification for the live view. */
+export type ProviderState =
+  /** bound, present in the file, fields match the library */
+  | 'matched'
+  /** bound, but the file's entry differs from the library */
+  | 'modified'
+  /** bound, but the entry is gone from the file */
+  | 'missing'
+  /** in the file, not bound, and not in the library — an instance-side addition */
+  | 'local-only'
+  /** in the file and in the library, but this instance's binding excludes it */
+  | 'unbound'
+
+export interface ProviderLiveView {
+  provider: ApiProvider
+  state: ProviderState
+  /** Field labels (端点/密钥变量/模型) that differ, for the 修改 badge tooltip. */
+  diff: string[]
+}
