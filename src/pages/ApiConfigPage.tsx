@@ -28,7 +28,6 @@ import {
   EmptyState,
   Field,
   Input,
-  Notice,
   SectionCard,
   Select,
   SettingRow,
@@ -37,8 +36,7 @@ import {
   Tooltip,
 } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
-import { PanelDivider, PanelGroup, PanelShell, PanelStat } from '@/components/layout/Panel'
-// (PanelItem is not needed here: the panel is informational, no filters)
+import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 
 /* ------------------------------------------------------------------ *
  * helpers
@@ -50,10 +48,57 @@ const KIND_LABEL: Record<ApiProvider['kind'], string> = {
   custom: '自定义',
 }
 
+const API_CHOICES: { value: string; label: string }[] = [
+  { value: '', label: 'DSH 默认' },
+  { value: 'openai-completions', label: 'completions' },
+  { value: 'openai-responses', label: 'responses' },
+  { value: 'anthropic', label: 'anthropic' },
+]
+
 function formatSynced(iso?: string): string {
   if (!iso) return '从未同步'
   const d = new Date(iso)
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * The wizard's choice-button language (see CreateInstancePage's 用途 grid):
+ * a short enum picks as inline buttons, not a native dropdown. Native
+ * Select stays for long lists (provider/model pickers), same as Settings.
+ */
+function ChoiceGrid<T extends string>({
+  options,
+  value,
+  onChange,
+  cols = 3,
+}: {
+  options: { value: T; label: string }[]
+  value: T
+  onChange: (v: T) => void
+  cols?: 2 | 3 | 4
+}) {
+  return (
+    <div className={cn('grid gap-1.5', cols === 4 ? 'grid-cols-4' : cols === 3 ? 'grid-cols-3' : 'grid-cols-2')}>
+      {options.map((o) => {
+        const active = o.value === value
+        return (
+          <button
+            key={o.value || 'default'}
+            type="button"
+            onClick={() => onChange(o.value)}
+            className={cn(
+              'rounded-md py-1.5 text-center text-sm ring-1 ring-inset transition-all duration-150',
+              active
+                ? 'bg-accent-soft font-medium text-accent-ink ring-accent'
+                : 'bg-surface text-ink-muted ring-line hover:ring-line-strong',
+            )}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 const emptyProviderForm = () => ({
@@ -84,32 +129,115 @@ function providerToForm(p: ApiProvider): ProviderForm {
   }
 }
 
+/** The field body shared by the new-provider card and the row editor. */
+function ProviderFields({
+  form,
+  patch,
+  withEnabled,
+}: {
+  form: ProviderForm
+  patch: (p: Partial<ProviderForm>) => void
+  withEnabled?: boolean
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-x-3 gap-y-3">
+      <Field label="名称">
+        <Input
+          value={form.displayName}
+          onChange={(e) => patch({ displayName: e.target.value })}
+          placeholder="如 DeepSeek 官方"
+        />
+      </Field>
+      <Field
+        label="标识（写入 settings.yaml 的键名）"
+        hint={
+          form.name.trim()
+            ? undefined
+            : `留空则自动使用：${suggestProviderName(form.displayName || 'provider')}`
+        }
+      >
+        <Input
+          value={form.name}
+          onChange={(e) => patch({ name: e.target.value })}
+          placeholder="留空按名称生成"
+          className="font-mono"
+        />
+      </Field>
+      <Field label="类型">
+        <ChoiceGrid
+          options={(Object.keys(KIND_LABEL) as ApiProvider['kind'][]).map((k) => ({
+            value: k,
+            label: KIND_LABEL[k],
+          }))}
+          value={form.kind}
+          onChange={(v) => patch({ kind: v })}
+        />
+      </Field>
+      <Field label="协议">
+        <ChoiceGrid options={API_CHOICES} value={form.api} onChange={(v) => patch({ api: v })} cols={4} />
+      </Field>
+      <Field label="Base URL" hint="留空使用 DSH 内置端点">
+        <Input
+          value={form.baseURL}
+          onChange={(e) => patch({ baseURL: e.target.value })}
+          placeholder="https://…/v1"
+          className="font-mono"
+        />
+      </Field>
+      <Field label="密钥环境变量名" hint="PHL 只记录变量名；密钥留在 DSH 凭据或系统环境中">
+        <Input
+          value={form.apiKeyEnv}
+          onChange={(e) => patch({ apiKeyEnv: e.target.value })}
+          placeholder={suggestEnvName(form.name || form.displayName || 'provider')}
+          className="font-mono"
+        />
+      </Field>
+      <div className="col-span-2">
+        <ModelEditor models={form.models} onChange={(models) => patch({ models })} />
+      </div>
+      <div className="col-span-2">
+        <Field label="备注">
+          <Input value={form.notes} onChange={(e) => patch({ notes: e.target.value })} />
+        </Field>
+      </div>
+      {withEnabled && (
+        <div className="col-span-2">
+          <SettingRow
+            title="启用"
+            description="停用后此供应商不再下发给继承全局配置的实例"
+            control={<Switch checked={form.enabled} onChange={(v) => patch({ enabled: v })} />}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ------------------------------------------------------------------ *
- * provider editor (inline, expanding)
+ * new-provider row card (same row language as provider rows)
  * ------------------------------------------------------------------ */
 
-function ProviderCard({
-  provider,
-  isDefault,
-  usedBy,
-  onDelete,
-  onEdit,
-}: {
-  provider: ApiProvider
-  isDefault: boolean
-  usedBy: number
-  onDelete: () => void
-  onEdit: (patch: Partial<ApiProvider>) => void
-}) {
-  const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState<ProviderForm>(() => providerToForm(provider))
-  const { t, riseItem } = useMotion()
-
+function NewProviderCard({ onCancel }: { onCancel: () => void }) {
+  const config = useApiConfigStore((s) => s.config)
+  const addProvider = useApiConfigStore((s) => s.addProvider)
+  const saving = useApiConfigStore((s) => s.saving)
+  const toast = useUIStore((s) => s.toast)
+  const { riseItem } = useMotion()
+  const [form, setForm] = useState<ProviderForm>(emptyProviderForm())
   const patch = (p: Partial<ProviderForm>) => setForm((f) => ({ ...f, ...p }))
 
-  const save = () => {
-    const name = (form.name.trim() || suggestProviderName(form.displayName)).toLowerCase()
-    onEdit({
+  const save = async () => {
+    const displayName = form.displayName.trim()
+    const name = (form.name.trim() || suggestProviderName(displayName)).toLowerCase()
+    if (!displayName) {
+      toast({ kind: 'error', title: '请填写供应商名称' })
+      return
+    }
+    if (config?.providers.some((p) => p.name === name)) {
+      toast({ kind: 'error', title: '供应商标识重复', message: `${name} 已存在。` })
+      return
+    }
+    const created = await addProvider({
       name,
       kind: form.kind,
       notes: form.notes.trim() || undefined,
@@ -117,161 +245,47 @@ function ProviderCard({
       baseURL: form.baseURL.trim() || undefined,
       apiKeyEnv: form.apiKeyEnv.trim() || suggestEnvName(name),
       models: form.models.filter((m) => m.id.trim()),
-      enabled: form.enabled,
+      enabled: true,
     })
-    setEditing(false)
+    if (created) {
+      onCancel()
+      toast({ kind: 'success', title: `已添加到全局库：${name}`, message: '在下方实例行或实例详情页里下发给需要的实例。' })
+    }
   }
 
   return (
-    <motion.li variants={riseItem} layout="position" transition={t(0.24)}>
-      <div
-        className={cn(
-          'group/row relative overflow-hidden rounded-lg bg-surface px-3.5 py-3 ring-1 ring-inset transition-[box-shadow,background-color] duration-200',
-          'ring-line hover:ring-line-strong/70',
-        )}
-      >
-        <div className="flex items-center gap-3">
-          <span
-            className={cn(
-              'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
-              provider.enabled ? 'bg-accent-soft text-accent-ink' : 'bg-surface-sunken text-ink-faint',
-            )}
-          >
-            <KeyRound size={16} />
+    <motion.div variants={riseItem}>
+      <div className="overflow-hidden rounded-lg bg-surface ring-1 ring-inset ring-line">
+        <div className="flex items-center gap-3 px-3.5 pt-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">
+            <Plus size={16} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-md font-medium text-ink">{provider.name}</span>
-              <Badge tone={provider.kind === 'official' ? 'ok' : provider.kind === 'aggregator' ? 'accent' : 'neutral'}>
-                {KIND_LABEL[provider.kind]}
-              </Badge>
-              {isDefault && <Badge tone="accent">默认</Badge>}
-              {!provider.enabled && <Badge tone="neutral">已停用</Badge>}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
-              <Tooltip content={`密钥由环境变量 ${provider.apiKeyEnv}（或 DSH 凭据）提供，PHL 不存储密钥本身`}>
-                <span className="font-mono">{provider.apiKeyEnv}</span>
-              </Tooltip>
-              <span className="text-ink-faint/50">·</span>
-              <span>{provider.baseURL || '默认端点'}</span>
-              <span className="text-ink-faint/50">·</span>
-              <span>{provider.models.length} 个模型</span>
-              {usedBy > 0 && (
-                <>
-                  <span className="text-ink-faint/50">·</span>
-                  <span className="text-accent-ink">{usedBy} 个实例绑定</span>
-                </>
-              )}
-            </div>
+            <span className="text-md font-medium text-ink">新建供应商</span>
+            <p className="text-sm text-ink-faint">加入全局库后，可下发给任意托管实例</p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            {!editing ? (
-              <>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100"
-                  onClick={() => setEditing((v) => !v)}
-                >
-                  <Pencil size={12} />
-                  编辑
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100"
-                  onClick={onDelete}
-                >
-                  <Trash2 size={12} />
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button size="sm" variant="secondary" onClick={() => setEditing(false)}>
-                  <X size={12} />
-                  取消
-                </Button>
-                <Button size="sm" variant="primary" onClick={save}>
-                  <Check size={12} />
-                  保存
-                </Button>
-              </>
-            )}
+            <Button size="sm" variant="secondary" onClick={onCancel}>
+              <X size={12} />
+              取消
+            </Button>
+            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+              <Check size={12} />
+              {saving ? '保存中…' : '保存到全局库'}
+            </Button>
           </div>
         </div>
-
-        <AnimatePresence initial={false}>
-          {editing && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={t(0.24)}
-              className="overflow-hidden"
-            >
-              <div className="mt-3 grid grid-cols-2 gap-3 border-t border-line pt-3">
-                <Field label="供应商标识（写入 settings.yaml 的键名）">
-                  <Input
-                    value={form.name}
-                    onChange={(e) => patch({ name: e.target.value })}
-                    placeholder={suggestProviderName(form.displayName || 'provider')}
-                    className="font-mono"
-                  />
-                </Field>
-                <Field label="类型">
-                  <Select value={form.kind} onChange={(e) => patch({ kind: e.target.value as ApiProvider['kind'] })}>
-                    <option value="official">官方</option>
-                    <option value="aggregator">中转</option>
-                    <option value="custom">自定义</option>
-                  </Select>
-                </Field>
-                <Field label="协议">
-                  <Select value={form.api} onChange={(e) => patch({ api: e.target.value })}>
-                    <option value="">DSH 默认</option>
-                    <option value="openai-completions">openai-completions</option>
-                    <option value="openai-responses">openai-responses</option>
-                    <option value="anthropic">anthropic</option>
-                  </Select>
-                </Field>
-                <Field label="Base URL" hint="留空使用 DSH 内置端点">
-                  <Input
-                    value={form.baseURL}
-                    onChange={(e) => patch({ baseURL: e.target.value })}
-                    placeholder="https://…/v1"
-                    className="font-mono"
-                  />
-                </Field>
-                <Field
-                  label="密钥环境变量名"
-                  hint="PHL 只记录变量名；密钥留在 DSH 凭据或系统环境中"
-                >
-                  <Input
-                    value={form.apiKeyEnv}
-                    onChange={(e) => patch({ apiKeyEnv: e.target.value })}
-                    className="font-mono"
-                  />
-                </Field>
-                <Field label="备注">
-                  <Input value={form.notes} onChange={(e) => patch({ notes: e.target.value })} />
-                </Field>
-                <div className="col-span-2">
-                  <ModelEditor models={form.models} onChange={(models) => patch({ models })} />
-                </div>
-                <div className="col-span-2">
-                  <SettingRow
-                    title="启用"
-                    description="停用后此供应商不会下发到继承全局配置的实例"
-                    control={<Switch checked={form.enabled} onChange={(v) => patch({ enabled: v })} />}
-                  />
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="border-t border-line px-3.5 py-3">
+          <ProviderFields form={form} patch={patch} />
+        </div>
       </div>
-    </motion.li>
+    </motion.div>
   )
 }
+
+/* ------------------------------------------------------------------ *
+ * model editor
+ * ------------------------------------------------------------------ */
 
 function ModelEditor({
   models,
@@ -284,17 +298,13 @@ function ModelEditor({
     <div>
       <div className="mb-1.5 flex items-center justify-between">
         <span className="text-sm font-medium text-ink-muted">模型</span>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => onChange([...models, { id: '' }])}
-        >
+        <Button size="sm" variant="ghost" onClick={() => onChange([...models, { id: '' }])}>
           <Plus size={12} />
           添加
         </Button>
       </div>
       {models.length === 0 ? (
-        <div className="rounded-md bg-surface-sunken px-3 py-2 text-sm text-ink-faint ring-1 ring-inset ring-line">
+        <div className="rounded-md bg-surface-sunken px-3 py-2 text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
           不填任何模型时，DSH 使用其内置目录
         </div>
       ) : (
@@ -341,6 +351,152 @@ function ModelEditor({
 }
 
 /* ------------------------------------------------------------------ *
+ * provider row
+ * ------------------------------------------------------------------ */
+
+function ProviderCard({
+  provider,
+  isDefault,
+  usedBy,
+  onDelete,
+  onEdit,
+}: {
+  provider: ApiProvider
+  isDefault: boolean
+  usedBy: number
+  onDelete: () => void
+  onEdit: (patch: Partial<ApiProvider>) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [form, setForm] = useState<ProviderForm>(() => providerToForm(provider))
+  const { t, riseItem } = useMotion()
+
+  // Rows carry the same layout="position" + rise-in language as version /
+  // runtime rows; entering edit mode re-reads the saved values so a stale
+  // draft from a cancelled session never shows up.
+  const openEdit = () => {
+    setForm(providerToForm(provider))
+    setEditing(true)
+  }
+
+  const save = () => {
+    const name = (form.name.trim() || suggestProviderName(form.displayName)).toLowerCase()
+    onEdit({
+      name,
+      kind: form.kind,
+      notes: form.notes.trim() || undefined,
+      api: form.api || undefined,
+      baseURL: form.baseURL.trim() || undefined,
+      apiKeyEnv: form.apiKeyEnv.trim() || suggestEnvName(name),
+      models: form.models.filter((m) => m.id.trim()),
+      enabled: form.enabled,
+    })
+    setEditing(false)
+  }
+
+  return (
+    <motion.li variants={riseItem} layout="position" transition={t(0.24)}>
+      <div
+        className={cn(
+          'group/row relative overflow-hidden rounded-lg bg-surface px-3.5 py-3 ring-1 ring-inset transition-[box-shadow,background-color] duration-200',
+          editing ? 'ring-accent/40' : 'ring-line hover:ring-line-strong/70',
+        )}
+      >
+        <div className="flex items-center gap-3">
+          <span
+            className={cn(
+              'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors',
+              provider.enabled ? 'bg-accent-soft text-accent-ink' : 'bg-surface-sunken text-ink-faint',
+            )}
+          >
+            <KeyRound size={16} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-md font-medium text-ink">{provider.name}</span>
+              <Badge tone={provider.kind === 'official' ? 'ok' : provider.kind === 'aggregator' ? 'accent' : 'neutral'}>
+                {KIND_LABEL[provider.kind]}
+              </Badge>
+              {isDefault && <Badge tone="accent">默认</Badge>}
+              {!provider.enabled && <Badge tone="neutral">已停用</Badge>}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
+              <Tooltip content={`密钥由环境变量 ${provider.apiKeyEnv}（或 DSH 凭据）提供，PHL 不存储密钥本身`}>
+                <span className="font-mono">{provider.apiKeyEnv}</span>
+              </Tooltip>
+              <span className="text-ink-faint/50">·</span>
+              <span>{provider.baseURL || '默认端点'}</span>
+              <span className="text-ink-faint/50">·</span>
+              <span>{provider.models.length} 个模型</span>
+              {usedBy > 0 && (
+                <>
+                  <span className="text-ink-faint/50">·</span>
+                  <span className="text-accent-ink">{usedBy} 个实例绑定</span>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {!editing ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100"
+                  onClick={openEdit}
+                >
+                  <Pencil size={12} />
+                  编辑
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100"
+                  onClick={onDelete}
+                >
+                  <Trash2 size={12} />
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button size="sm" variant="secondary" onClick={() => setEditing(false)}>
+                  <X size={12} />
+                  取消
+                </Button>
+                <Button size="sm" variant="primary" onClick={save}>
+                  <Check size={12} />
+                  保存
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <AnimatePresence initial={false}>
+          {editing && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={t(0.24)}
+              className="overflow-hidden"
+            >
+              <div className="mt-3 border-t border-line pt-3">
+                <ProviderFields
+                  form={form}
+                  patch={(p) => setForm((f) => ({ ...f, ...p }))}
+                  withEnabled
+                />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </motion.li>
+  )
+}
+
+/* ------------------------------------------------------------------ *
  * panel
  * ------------------------------------------------------------------ */
 
@@ -359,23 +515,28 @@ export function ApiConfigPanel() {
       <PanelGroup title="配置库">
         <PanelStat label="供应商" value={`${config?.providers.length ?? 0} 个`} />
         <PanelStat label="托管实例" value={`${managed.length} / ${instances.length}`} />
-        <PanelStat
-          label="有本地改动"
-          value={dirty ? `${dirty} 个` : '无'}
-        />
+        <PanelStat label="有本地改动" value={dirty ? `${dirty} 个` : '无'} />
       </PanelGroup>
-      <PanelDivider />
-      <div className="px-2.5">
-        <Button
-          size="sm"
-          variant="secondary"
-          className="w-full justify-center"
-          onClick={() => navigate({ name: 'apiConfig' })}
-        >
-          <Plus size={12} />
-          管理全局配置
-        </Button>
-      </div>
+
+      {(config?.providers.length ?? 0) > 0 && (
+        <>
+          <PanelDivider />
+          <PanelGroup title="供应商">
+            {config!.providers.map((p) => (
+              <PanelItem
+                key={p.id}
+                groupId="api-providers"
+                icon={<KeyRound size={14} />}
+                label={p.name}
+                count={p.models.length || undefined}
+                active={false}
+                onClick={() => navigate({ name: 'apiConfig' })}
+              />
+            ))}
+          </PanelGroup>
+        </>
+      )}
+
       <div className="mt-auto p-3">
         <div className="flex items-start gap-2 rounded-lg bg-surface-sunken p-3 text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
           <KeyRound size={13} className="mt-[2px] shrink-0" />
@@ -387,7 +548,7 @@ export function ApiConfigPanel() {
 }
 
 /* ------------------------------------------------------------------ *
- * instance bindings section
+ * instance bindings row
  * ------------------------------------------------------------------ */
 
 function InstanceBindingRow({
@@ -455,7 +616,18 @@ function InstanceBindingRow({
   }
 
   return (
-    <div className="flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0">
+    <div className="flex items-center gap-3 border-t border-line px-4 py-2.5 transition-colors first:border-t-0 hover:bg-surface-hover/50">
+      <span
+        className={cn(
+          'h-[7px] w-[7px] shrink-0 rounded-full',
+          binding.inheritance === 'none'
+            ? 'bg-ink-faint/40'
+            : localChanges
+              ? 'bg-warn'
+              : 'bg-ok',
+        )}
+        aria-hidden
+      />
       <span className="min-w-0 flex-1">
         <span className="text-base text-ink">{name}</span>
         <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
@@ -476,7 +648,7 @@ function InstanceBindingRow({
                   </Badge>
                 ))}
               <span>· 同步于 {formatSynced(binding.syncedAt)}</span>
-              {localChanges && <span className="text-warn-ink">· 有本地改动</span>}
+              {localChanges && <span className="text-warn">· 有本地改动</span>}
             </>
           )}
         </span>
@@ -525,7 +697,6 @@ export function ApiConfigPage() {
   const config = useApiConfigStore((s) => s.config)
   const loaded = useApiConfigStore((s) => s.loaded)
   const saving = useApiConfigStore((s) => s.saving)
-  const addProvider = useApiConfigStore((s) => s.addProvider)
   const updateProvider = useApiConfigStore((s) => s.updateProvider)
   const removeProvider = useApiConfigStore((s) => s.removeProvider)
   const setDefaults = useApiConfigStore((s) => s.setDefaults)
@@ -537,19 +708,18 @@ export function ApiConfigPage() {
   // snapshots land — a count frozen at page-load would be a lie by the
   // first 采纳/同步.
   const snapshots = useApiConfigStore((s) => s.snapshots)
-  const instanceStates = useInstanceStore((s) => s.states)
   const instances = useInstanceStore((s) => s.instances)
+  const instanceStates = useInstanceStore((s) => s.states)
   const confirm = useUIStore((s) => s.confirm)
   const toast = useUIStore((s) => s.toast)
-  const { stagger, t } = useMotion()
+  const { stagger } = useMotion()
 
   const [adding, setAdding] = useState(false)
-  const [newForm, setNewForm] = useState<ProviderForm>(emptyProviderForm())
   const [importTarget, setImportTarget] = useState('')
 
   // Live badges are library-relative too: a provider rename is invisible to
-  // `bindingsKey`, so the effect also rides the library's updatedAt stamp —
-  // every save (including adoption and provider edits) re-snapshots the list.
+  // `bindingsKey`, so the effect also rides the library identity — every
+  // save (adoption and provider edits included) re-snapshots the list.
   const bindingsKey = useMemo(
     () => instances.map((i) => `${i.id}:${i.api?.inheritance}:${i.api?.syncedHash ?? ''}`).join('|'),
     [instances],
@@ -626,12 +796,7 @@ export function ApiConfigPage() {
     const old = config?.providers.find((p) => p.id === id)
     // Renaming the env-var reference orphans the key DSH already stored under
     // the old name — make that choice explicit rather than silent.
-    if (
-      old &&
-      patch.apiKeyEnv &&
-      patch.apiKeyEnv !== old.apiKeyEnv &&
-      usedByCount(id) > 0
-    ) {
+    if (old && patch.apiKeyEnv && patch.apiKeyEnv !== old.apiKeyEnv && usedByCount(id) > 0) {
       const ok = await confirm({
         title: '更换密钥环境变量',
         message: `${usedByCount(id)} 个已绑定实例此前按 ${old.apiKeyEnv} 解析密钥。改名后需要在 DSH 中为新变量重新配置一次密钥，除非系统环境里已有同名变量。`,
@@ -640,10 +805,24 @@ export function ApiConfigPage() {
       })
       if (!ok) return
     }
+    // A rename leaves the old-named entry inside instance files (they carry
+    // no old-name marker) — where it resurfaces as "本地新增" and invites a
+    // mistaken 采纳. Same discipline as the env-var rename: warn first.
     if (
+      old &&
       patch.name &&
-      config?.providers.some((p) => p.id !== id && p.name === patch.name)
+      patch.name !== old.name &&
+      instances.some((i) => i.api && i.api.inheritance !== 'none' && i.api.syncedHash)
     ) {
+      const ok = await confirm({
+        title: '重命名供应商标识',
+        message: '已下发到实例的条目仍用旧名保留——下次同步会把新名写入，而旧名条目会被识别为"本地新增"。如只是想改显示信息，请改备注而不是标识。',
+        detail: `${old.name} → ${patch.name}`,
+        confirmLabel: '仍然重命名',
+      })
+      if (!ok) return
+    }
+    if (patch.name && config?.providers.some((p) => p.id !== id && p.name === patch.name)) {
       toast({ kind: 'error', title: '供应商标识重复', message: `settings.yaml 按名称键控，${patch.name} 已被占用。` })
       return
     }
@@ -663,30 +842,6 @@ export function ApiConfigPage() {
     if (ok) await removeProvider(id)
   }
 
-  const onSaveNew = async () => {
-    const displayName = newForm.displayName.trim()
-    const name = (newForm.name.trim() || suggestProviderName(displayName)).toLowerCase()
-    if (!displayName) {
-      toast({ kind: 'error', title: '请填写供应商名称' })
-      return
-    }
-    if (config?.providers.some((p) => p.name === name)) {
-      toast({ kind: 'error', title: '供应商标识重复', message: `${name} 已存在。` })
-      return
-    }
-    const created = await addProvider({
-      name,
-      kind: newForm.kind,
-      notes: newForm.notes.trim() || undefined,
-      api: newForm.api || undefined,
-      baseURL: newForm.baseURL.trim() || undefined,
-      apiKeyEnv: newForm.apiKeyEnv.trim() || suggestEnvName(name),
-      models: newForm.models.filter((m) => m.id.trim()),
-      enabled: true,
-    })
-    if (created) setAdding(false)
-  }
-
   const onImport = async () => {
     if (!importTarget) return
     const seeded = await importFromInstance(importTarget)
@@ -695,7 +850,7 @@ export function ApiConfigPage() {
       toast({
         kind: 'success',
         title: '已从实例导入',
-        message: `${seeded.providers.length} 个供应商进入全局库。保存后生效——先检查名称与密钥变量。`,
+        message: `${seeded.providers.length} 个供应商已进入全局库，可继续编辑名称与密钥变量。`,
       })
     }
   }
@@ -704,7 +859,7 @@ export function ApiConfigPage() {
     return (
       <PageShell title="模型与 API" subtitle="维护一份全局供应商配置，按实例下发到 DSH。">
         <div className="space-y-2">
-          {[0, 1].map((i) => (
+          {[0, 1, 2].map((i) => (
             <Skeleton key={i} className="h-[92px]" />
           ))}
         </div>
@@ -713,148 +868,92 @@ export function ApiConfigPage() {
   }
 
   const providerCount = config?.providers.length ?? 0
+  const isEmpty = providerCount === 0 && !adding
 
   return (
     <PageShell
       title="模型与 API"
       subtitle="在这里配置一次，新建实例开箱即用；存量实例可随时同步或接管。密钥由 DSH 管理，PHL 只引用环境变量名。"
       actions={
-        providerCount > 0 ? (
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={saving}
-            onClick={() => setAdding((v) => !v)}
-          >
+        providerCount > 0 && !adding ? (
+          <Button size="sm" variant="primary" disabled={saving} onClick={() => setAdding(true)}>
             <Plus size={12} />
             新增供应商
           </Button>
         ) : undefined
       }
     >
-      {providerCount === 0 && (
-        <Notice tone="info" title="还没有全局配置库">
-          <div className="flex flex-wrap items-center gap-2">
-            <span>两种起步方式：</span>
-            <Button size="sm" variant="primary" onClick={() => setAdding(true)}>
-              <Plus size={12} />
-              新建供应商
-            </Button>
-            {instances.length > 0 && (
-              <>
-                <span>或</span>
-                <Select
-                  value={importTarget}
-                  onChange={(e) => setImportTarget(e.target.value)}
-                  className="w-[180px]"
-                >
-                  <option value="">从实例导入…</option>
-                  {instances.map((i) => (
-                    <option key={i.id} value={i.id}>
-                      {i.name}
-                    </option>
-                  ))}
-                </Select>
-                <Button size="sm" variant="secondary" disabled={!importTarget} onClick={() => void onImport()}>
-                  <CloudDownload size={12} />
-                  导入
-                </Button>
-              </>
-            )}
+      <motion.div variants={stagger()} initial="hidden" animate="show" className="space-y-2">
+        {isEmpty ? (
+          <div>
+            <EmptyState
+              icon={<KeyRound size={20} />}
+              title="还没有全局配置库"
+              description="新建一个供应商，或从已经配置好的实例导入——导入会读取该实例当前的 settings.yaml。"
+              action={
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button variant="primary" onClick={() => setAdding(true)}>
+                    <Plus size={13} />
+                    新建供应商
+                  </Button>
+                  {instances.length > 0 && (
+                    <>
+                      <Select
+                        value={importTarget}
+                        onChange={(e) => setImportTarget(e.target.value)}
+                        className="w-[180px]"
+                      >
+                        <option value="">从实例导入…</option>
+                        {instances.map((i) => (
+                          <option key={i.id} value={i.id}>
+                            {i.name}
+                          </option>
+                        ))}
+                      </Select>
+                      <Button variant="secondary" disabled={!importTarget} onClick={() => void onImport()}>
+                        <CloudDownload size={13} />
+                        导入
+                      </Button>
+                    </>
+                  )}
+                </div>
+              }
+            />
           </div>
-        </Notice>
-      )}
+        ) : (
+          <>
+            <AnimatePresence initial={false}>
+              {adding && (
+                <NewProviderCard key="new" onCancel={() => setAdding(false)} />
+              )}
+            </AnimatePresence>
 
-      <AnimatePresence initial={false}>
-        {adding && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={t(0.24)}
-            className="overflow-hidden"
-          >
-            <SectionCard title="新建供应商" className="mb-4">
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="名称">
-                  <Input
-                    value={newForm.displayName}
-                    onChange={(e) => setNewForm((f) => ({ ...f, displayName: e.target.value }))}
-                    placeholder="如 DeepSeek 官方"
+            {providerCount > 0 && (
+              <motion.ul variants={stagger()} initial="hidden" animate="show" className="space-y-2">
+                {(config?.providers ?? []).map((p) => (
+                  <ProviderCard
+                    key={p.id}
+                    provider={p}
+                    isDefault={config?.defaultProviderId === p.id}
+                    usedBy={usedByCount(p.id)}
+                    onDelete={() => void onDeleteProvider(p.id)}
+                    onEdit={(patch) => void onEditProvider(p.id, patch)}
                   />
-                </Field>
-                <Field label="标识（settings.yaml 键名）" hint={suggestProviderName(newForm.displayName || 'provider')}>
-                  <Input
-                    value={newForm.name}
-                    onChange={(e) => setNewForm((f) => ({ ...f, name: e.target.value }))}
-                    placeholder="留空按名称生成"
-                    className="font-mono"
-                  />
-                </Field>
-                <Field label="类型">
-                  <Select
-                    value={newForm.kind}
-                    onChange={(e) => setNewForm((f) => ({ ...f, kind: e.target.value as ApiProvider['kind'] }))}
-                  >
-                    <option value="official">官方</option>
-                    <option value="aggregator">中转</option>
-                    <option value="custom">自定义</option>
-                  </Select>
-                </Field>
-                <Field label="协议">
-                  <Select value={newForm.api} onChange={(e) => setNewForm((f) => ({ ...f, api: e.target.value }))}>
-                    <option value="">DSH 默认</option>
-                    <option value="openai-completions">openai-completions</option>
-                    <option value="openai-responses">openai-responses</option>
-                    <option value="anthropic">anthropic</option>
-                  </Select>
-                </Field>
-                <Field label="Base URL" hint="留空使用 DSH 内置端点">
-                  <Input
-                    value={newForm.baseURL}
-                    onChange={(e) => setNewForm((f) => ({ ...f, baseURL: e.target.value }))}
-                    placeholder="https://…/v1"
-                    className="font-mono"
-                  />
-                </Field>
-                <Field label="密钥环境变量名" hint="PHL 不存密钥，DSH 按此变量解析">
-                  <Input
-                    value={newForm.apiKeyEnv}
-                    onChange={(e) => setNewForm((f) => ({ ...f, apiKeyEnv: e.target.value }))}
-                    placeholder={suggestEnvName(newForm.name || newForm.displayName || 'provider')}
-                    className="font-mono"
-                  />
-                </Field>
-                <div className="col-span-2">
-                  <ModelEditor
-                    models={newForm.models}
-                    onChange={(models) => setNewForm((f) => ({ ...f, models }))}
-                  />
-                </div>
-                <div className="col-span-2 flex justify-end gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => setAdding(false)}>
-                    取消
-                  </Button>
-                  <Button variant="primary" size="sm" disabled={saving} onClick={() => void onSaveNew()}>
-                    {saving ? '保存中…' : '保存到全局库'}
-                  </Button>
-                </div>
-              </div>
-            </SectionCard>
-          </motion.div>
+                ))}
+              </motion.ul>
+            )}
+          </>
         )}
-      </AnimatePresence>
+      </motion.div>
 
       {providerCount > 0 && (
-        <SectionCard title="默认模型" description="下发给所有「继承全局」实例的默认配置" className="mb-4">
+        <SectionCard title="默认模型" description="下发给所有「继承全局」实例的默认配置" className="mt-4">
           <SettingRow
             title="默认供应商"
             control={
               <Select
                 value={config?.defaultProviderId ?? ''}
-                onChange={(e) =>
-                  void setDefaults(e.target.value || undefined, config?.defaultModel)
-                }
+                onChange={(e) => void setDefaults(e.target.value || undefined, config?.defaultModel)}
                 className="w-[220px]"
               >
                 <option value="">未选择</option>
@@ -880,28 +979,11 @@ export function ApiConfigPage() {
         </SectionCard>
       )}
 
-      {providerCount > 0 ? (
-        <motion.ul variants={stagger()} initial="hidden" animate="show" className="space-y-2">
-          {(config?.providers ?? []).map((p) => (
-            <ProviderCard
-              key={p.id}
-              provider={p}
-              isDefault={config?.defaultProviderId === p.id}
-              usedBy={usedByCount(p.id)}
-              onDelete={() => void onDeleteProvider(p.id)}
-              onEdit={(patch) => void onEditProvider(p.id, patch)}
-            />
-          ))}
-        </motion.ul>
-      ) : (
-        !adding && <EmptyState icon={<KeyRound size={20} />} title="全局库为空" description="新建一个供应商，或从已配置好的实例导入。" />
-      )}
-
       {providerCount > 0 && (
         <SectionCard
           title="实例绑定"
           description="展示每个实例当前真实生效的配置。实例内改动会被保留；同步按全局库覆盖（覆盖前有确认），采纳把实例配置合入全局库。"
-          className="mt-6"
+          className="mt-4"
           extra={
             cleanTargets.length > 0 ? (
               <Button size="xs" variant="secondary" disabled={!!syncing} onClick={() => void onBulkSync()}>
@@ -925,7 +1007,7 @@ export function ApiConfigPage() {
 }
 
 /* ------------------------------------------------------------------ *
- * default-model picker (provider + model + effort)
+ * default-model picker (provider + model)
  * ------------------------------------------------------------------ */
 
 function DefaultModelPicker({
@@ -962,9 +1044,7 @@ function DefaultModelPicker({
       {provider && (
         <Select
           value={value?.model ?? ''}
-          onChange={(e) =>
-            value && onChange({ ...value, model: e.target.value })
-          }
+          onChange={(e) => value && onChange({ ...value, model: e.target.value })}
           className="w-[200px]"
         >
           {provider.models.length === 0 && <option value="">（无模型清单）</option>}
@@ -978,4 +1058,3 @@ function DefaultModelPicker({
     </div>
   )
 }
-
