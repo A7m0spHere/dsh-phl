@@ -4,6 +4,7 @@ import {
   Boxes,
   CirclePause,
   CirclePlay,
+  FileUp,
   LayoutGrid,
   Plus,
   Rows3,
@@ -13,6 +14,14 @@ import {
 } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
+import {
+  chooseBundleFile,
+  importInstanceBundle,
+  readInstanceBundle,
+  type RemoteInstanceManifest,
+} from '@/lib/desktop'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
 import {
   useCatalogStore,
   useInstanceStore,
@@ -147,7 +156,77 @@ export function InstancesPage() {
   const setLayout = useUIStore((s) => s.setLayout)
   const showDock = useUIStore((s) => s.showLaunchDock)
   const navigate = useUIStore((s) => s.navigate)
+  const confirm = useUIStore((s) => s.confirm)
+  const suggestPort = useInstanceStore((s) => s.suggestPort)
+  const admitInstance = useInstanceStore((s) => s.admitInstance)
   const { stagger } = useMotion()
+
+  const importBundle = async () => {
+    const ui = useUIStore.getState()
+    const path = await chooseBundleFile()
+    if (!path) return
+    let preview: Awaited<ReturnType<typeof readInstanceBundle>>
+    try {
+      preview = await readInstanceBundle(path)
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '无法读取 Bundle',
+        message: err instanceof Error ? err.message : String(err),
+      })
+      return
+    }
+    const ok = await confirm({
+      title: `导入「${preview.name}」`,
+      message: `版本 ${preview.versionId} · Runtime ${preview.runtimeId} · 端口 ${preview.port} · ${preview.pluginCount} 条插件记录。`,
+      detail: 'Bundle 携带配置与插件记录；插件文件请在导入后通过插件页重新安装。',
+      confirmLabel: '导入',
+    })
+    if (!ok) return
+
+    // Identity fields are the importer's (fresh id, free port); the Rust side
+    // overwrites the environment fields with the bundle's own values.
+    const manifest: RemoteInstanceManifest = {
+      id: newInstanceId(preview.name),
+      name: preview.name,
+      note: null,
+      kind: 'sandbox',
+      hue: 0,
+      versionId: preview.versionId,
+      runtimeId: preview.runtimeId,
+      port: suggestPort(),
+      autoPort: true,
+      profile: 'web',
+      createdAt: new Date().toISOString(),
+      lastRunAt: null,
+      totalRuntime: 0,
+      favorite: false,
+      env: {},
+      args: [],
+      // Same promise as the create wizard: an imported instance boots
+      // configured. The Rust import applies it through the shared path.
+      api: { inheritance: 'default', providerIds: [] },
+    }
+    try {
+      const root = useSettingsStore.getState().root
+      const record = await importInstanceBundle(root, path, manifest)
+      admitInstance(instanceFromRecord(record))
+      ui.toast({
+        kind: 'success',
+        title: `已导入「${record.name}」`,
+        message:
+          preview.pluginCount > 0
+            ? `包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`
+            : undefined,
+      })
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '导入 Bundle 失败',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -194,10 +273,16 @@ export function InstancesPage() {
           title="实例"
           subtitle="每个实例固定自己的 DSH 版本、Runtime、插件与 DSH_HOME，可以同时运行、互不污染。"
           actions={
-            <Button variant="primary" onClick={() => navigate({ name: 'create' })}>
-              <Plus size={13} />
-              新建实例
-            </Button>
+            <>
+              <Button variant="secondary" onClick={() => void importBundle()}>
+                <FileUp size={13} />
+                导入 Bundle
+              </Button>
+              <Button variant="primary" onClick={() => navigate({ name: 'create' })}>
+                <Plus size={13} />
+                新建实例
+              </Button>
+            </>
           }
           toolbar={
             <>

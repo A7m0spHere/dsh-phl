@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react'
+import { Fragment, useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Archive,
@@ -6,6 +6,7 @@ import {
   Download,
   HardDrive,
   Package,
+  RefreshCw,
   RotateCcw,
   Search,
   Trash2,
@@ -158,15 +159,25 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               <span className="font-mono text-md font-medium text-ink">{version.name}</span>
               {version.latest && <Badge tone="accent">最新</Badge>}
               {version.channel === 'nightly' && <Badge tone="warn">Nightly</Badge>}
+              {version.channel === 'alpha' && <Badge tone="warn">Alpha</Badge>}
               {version.legacy && <Badge tone="neutral">Legacy</Badge>}
               {installed && <Badge tone="ok">已安装</Badge>}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
-              <span>{formatDate(version.releasedAt)}</span>
-              <span className="text-ink-faint/50">·</span>
-              <span>{formatBytes(version.size)}</span>
-              <span className="text-ink-faint/50">·</span>
-              <span>Node {version.requiresNode.join(' / ')}</span>
+              {[
+                version.releasedAt ? <span key="date">{formatDate(version.releasedAt)}</span> : null,
+                version.size > 0 ? <span key="size">{formatBytes(version.size)}</span> : null,
+                version.requiresNode.length > 0 ? (
+                  <span key="node">Node {version.requiresNode.join(' / ')}</span>
+                ) : null,
+              ]
+                .filter(Boolean)
+                .map((item, i) => (
+                  <Fragment key={`meta-${i}`}>
+                    {i > 0 && <span className="text-ink-faint/50">·</span>}
+                    {item}
+                  </Fragment>
+                ))}
               {usedBy.length > 0 && (
                 <>
                   <span className="text-ink-faint/50">·</span>
@@ -273,9 +284,18 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
  * page
  * ------------------------------------------------------------------ */
 
+/** "14:32" — the sync label only cares about time of day. */
+function formatClock(ms: number) {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 export function VersionsPage() {
   const versions = useCatalogStore((s) => s.versions)
-  const loaded = useCatalogStore((s) => s.loaded)
+  const loaded = useCatalogStore((s) => s.versionsLoaded)
+  const syncing = useCatalogStore((s) => s.versionsSyncing)
+  const syncedAt = useCatalogStore((s) => s.versionsSyncedAt)
+  const refreshVersions = useCatalogStore((s) => s.refreshVersions)
   const instances = useInstanceStore((s) => s.instances)
   const filter = useViewStore((s) => s.versionFilter)
   const query = useViewStore((s) => s.versionQuery)
@@ -313,6 +333,24 @@ export function VersionsPage() {
     <PageShell
       title="DSH 版本"
       subtitle="多个版本可以同时安装在本机。实例固定引用其中一个，升级不会覆盖旧版本。"
+      actions={
+        <>
+          {syncedAt !== null && (
+            <span className="mr-1 text-sm text-ink-faint">
+              上次同步 {syncing ? '中…' : formatClock(syncedAt)}
+            </span>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void refreshVersions()}
+            disabled={syncing}
+          >
+            <RefreshCw size={12} className={cn(syncing && 'animate-spin')} />
+            {syncing ? '同步中' : '同步更新'}
+          </Button>
+        </>
+      }
     >
       {orphaned.length > 0 && (
         <Notice tone="warn" title="有实例引用了未安装的版本" className="mb-4">

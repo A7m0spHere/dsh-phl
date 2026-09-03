@@ -3,11 +3,14 @@ import { MotionConfig } from 'motion/react'
 import { desktop } from '@/lib/desktop'
 import { useHotkeys } from '@/lib/hooks'
 import {
+  useApiConfigStore,
   useCatalogStore,
   useInstanceStore,
   useSettingsStore,
   useUIStore,
   useWizardStore,
+  initDesktopRoot,
+  maybeOfferRootChoice,
 } from '@/stores'
 import { DialogHost, Toaster } from '@/components/ui'
 import { TitleBar } from '@/components/layout/TitleBar'
@@ -18,6 +21,7 @@ import { GuideOverlay } from '@/components/layout/GuideOverlay'
 export default function App() {
   const loadInstances = useInstanceStore((s) => s.load)
   const loadCatalog = useCatalogStore((s) => s.load)
+  const loadApiConfig = useApiConfigStore((s) => s.load)
   const navigate = useUIStore((s) => s.navigate)
   const back = useUIStore((s) => s.back)
   const setPaletteOpen = useUIStore((s) => s.setPaletteOpen)
@@ -27,9 +31,46 @@ export default function App() {
   const motionLevel = useUIStore((s) => s.motion)
 
   useEffect(() => {
-    void loadCatalog()
-    void loadInstances()
-  }, [loadCatalog, loadInstances])
+    // The real data root must be known before the catalog queries the
+    // filesystem for installed versions. Both loaders can now genuinely fail
+    // (they reach the disk), so the chain needs a handler — an unhandled
+    // rejection here left the pages on their skeletons with no explanation.
+    void initDesktopRoot()
+      .then(() => Promise.all([loadCatalog(), loadInstances(), loadApiConfig()]))
+      .catch((err) => {
+        console.error('[phl] startup load failed:', err)
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '加载失败',
+          message: err instanceof Error && err.message ? err.message : String(err),
+          action: {
+            label: '重试',
+            run: () => {
+              void loadCatalog()
+              void loadInstances()
+              void loadApiConfig()
+            },
+          },
+        })
+      })
+  }, [loadCatalog, loadInstances, loadApiConfig])
+
+  // Version catalog auto-sync. Deliberately cheap: one coarse timer that only
+  // compares clocks on each tick, and no-ops while the window is hidden — so
+  // a tray-minimized PHL does zero background work. The interval is user-
+  // configurable (0 = off) precisely because of the overhead concern.
+  const versionRefreshMinutes = useSettingsStore((s) => s.versionRefreshMinutes)
+  useEffect(() => {
+    if (!versionRefreshMinutes) return
+    const id = setInterval(() => {
+      if (document.hidden) return
+      const cat = useCatalogStore.getState()
+      if (Date.now() - cat.versionsSyncAttemptedAt >= versionRefreshMinutes * 60_000) {
+        void cat.refreshVersions({ silent: true })
+      }
+    }, 15_000)
+    return () => clearInterval(id)
+  }, [versionRefreshMinutes])
 
   // The Tauri window starts hidden so the user never sees an unpainted frame.
   // Reveal it after the first paint, once the theme class is already applied.
@@ -102,11 +143,18 @@ export default function App() {
 
   // First run opens the guide. It is the answer to "what is this thing" —
   // an instance manager is not self-evident from a list of cards.
+  const guideSeen = useSettingsStore((s) => s.guideSeen)
   useEffect(() => {
     if (useSettingsStore.getState().guideSeen) return
     const id = window.setTimeout(() => useUIStore.getState().setGuideOpen(true), 450)
     return () => window.clearTimeout(id)
   }, [])
+
+  // The one-time storage-location prompt waits until the guide is out of the
+  // way — two full-screen first-run surfaces at once would fight over focus.
+  useEffect(() => {
+    if (guideSeen) void maybeOfferRootChoice()
+  }, [guideSeen])
 
   useHotkeys([
     { key: 'k', ctrl: true, global: true, run: () => setPaletteOpen(!paletteOpen) },

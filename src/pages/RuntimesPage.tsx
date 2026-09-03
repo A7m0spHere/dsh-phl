@@ -116,7 +116,14 @@ export function RuntimesPage() {
                         {r.system && <Badge tone="outline">系统 PATH</Badge>}
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-sm text-ink-faint">
-                        {installed ? (r.system ? '由系统提供' : `已安装 · ${formatBytes(r.size)}`) : `未安装 · ${formatBytes(r.size)}`}
+                        {/* 真实目录没有安装前体积，未知时不显示「0 B」。 */}
+                        {installed
+                          ? r.system
+                            ? '由系统提供'
+                            : `已安装${r.size > 0 ? ` · ${formatBytes(r.size)}` : ''}`
+                          : r.size > 0
+                            ? `未安装 · ${formatBytes(r.size)}`
+                            : '未安装'}
                         {users.length > 0 && (
                           <>
                             <span className="text-ink-faint/50">·</span>
@@ -173,7 +180,11 @@ export function RuntimesPage() {
                           <div className="mt-1.5 flex justify-between text-sm text-ink-faint">
                             <span>
                               {state.kind === 'downloading'
-                                ? `${formatBytes(state.bytesDone)} / ${formatBytes(r.size)}`
+                                ? // 目录不发布体积；Rust 拿到的 content-length 体现在 progress 里，
+                                  // 分母由 已完成字节 ÷ 进度 反推，比显示「0 B」诚实。
+                                  state.progress > 0
+                                  ? `${formatBytes(state.bytesDone)} / ${formatBytes(state.bytesDone / state.progress)}`
+                                  : `${formatBytes(state.bytesDone)}（总大小未知）`
                                 : '正在解压…'}
                             </span>
                             <span className="num">

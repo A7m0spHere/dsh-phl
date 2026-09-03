@@ -1,6 +1,7 @@
 import { create } from 'zustand'
-import { repository, Cancelled, LaunchError, type CreateProgress } from '@/services'
-import type { Instance, InstanceDraft, InstanceRuntimeState } from '@/types'
+import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
+import { isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
+import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
 import { useCatalogStore } from './catalogStore'
 import { useUIStore } from './uiStore'
 
@@ -14,6 +15,11 @@ interface InstanceState {
   setFocus: (id: string) => void
 
   createProgress: CreateProgress | null
+  /**
+   * Live snapshot copies keyed by instance id. Snapshot creation is a local
+   * tree copy that can run for a while on a plugin-heavy instance.
+   */
+  snapshotTransfers: Record<string, CopyProgress>
 
   load: () => Promise<void>
 
@@ -22,15 +28,25 @@ interface InstanceState {
   stop: (id: string) => Promise<void>
   toggle: (id: string) => void
 
+  createSnapshot: (id: string) => Promise<Snapshot | null>
+  restoreSnapshot: (id: string, snapshotId: string) => Promise<void>
+  deleteSnapshot: (id: string, snapshotId: string) => Promise<void>
+
   createInstance: (draft: InstanceDraft) => Promise<Instance | null>
   cancelCreate: () => void
   cloneInstance: (id: string, name: string) => Promise<Instance | null>
+  /** Registers an instance created outside the create flow (bundle import). */
+  admitInstance: (instance: Instance) => void
   updateInstance: (id: string, patch: Partial<Instance>) => void
   deleteInstance: (id: string) => Promise<void>
   toggleFavorite: (id: string) => void
   dismissError: (id: string) => void
-  /** Rewrites every instance path when the user moves PHL's data root. */
-  relocate: (fromRoot: string, toRoot: string) => void
+  /**
+   * Fills in `diskUsage` by measuring the real trees. Memory-only: the size
+   * is observed, not configuration, so it must not be written back into
+   * `instance.json`.
+   */
+  measureDiskUsage: () => Promise<void>
 
   byId: (id: string) => Instance | undefined
   stateOf: (id: string) => InstanceRuntimeState
@@ -42,8 +58,56 @@ interface InstanceState {
 const STOPPED: InstanceRuntimeState = { status: 'stopped' }
 
 const launchControllers = new Map<string, AbortController>()
+const snapshotControllers = new Map<string, AbortController>()
 let createController: AbortController | null = null
 let loadStarted = false
+let exitListenerBound = false
+
+/**
+ * 插件安装正在往实例的 node_modules 里写文件；此刻拷贝它（快照）或换掉它
+ * （回滚）都会得到撕裂的结果。Rust 看不到这些传输，只能在这里拦。
+ */
+function pluginInstallActive(id: string): boolean {
+  const transfers = useCatalogStore.getState().pluginTransfers
+  return Object.keys(transfers).some((key) => key.startsWith(`p:${id}:`))
+}
+
+/**
+ * One event for every way a process can die. The Rust watcher removes its map
+ * entry and emits; here the instance state folds back to stopped and the run
+ * time is banked. A manual stop already resolved the state before the event
+ * arrives, so this is a no-op on that path.
+ */
+function bindExitListener(
+  set: (partial: Partial<InstanceState>) => void,
+  get: () => InstanceState,
+) {
+  if (exitListenerBound || !isDesktop) return
+  exitListenerBound = true
+  void onInstanceExited(({ instanceId, code }) => {
+    const state = get().stateOf(instanceId)
+    if (state.status !== 'running' && state.status !== 'stopping') return
+    const crashed = state.status === 'running' && code !== 0
+    const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
+    set({ states: { ...get().states, [instanceId]: STOPPED } })
+    const instance = get().byId(instanceId)
+    if (instance && ranFor > 0) {
+      get().updateInstance(instanceId, {
+        totalRuntime: instance.totalRuntime + ranFor,
+        lastRunAt: new Date().toISOString(),
+      })
+    }
+    if (crashed) {
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: `${instance?.name ?? instanceId} 进程异常退出`,
+        message: `退出码 ${code ?? '未知'}。日志在实例目录的 logs/ 下。`,
+      })
+    } else if (state.status === 'running') {
+      useUIStore.getState().toast({ kind: 'info', title: `${instance?.name ?? instanceId} 已退出` })
+    }
+  })
+}
 
 export const useInstanceStore = create<InstanceState>()((set, get) => ({
   instances: [],
@@ -52,27 +116,25 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   focusId: null,
   setFocus: (focusId) => set({ focusId }),
   createProgress: null,
+  snapshotTransfers: {},
 
   async load() {
     // StrictMode mounts effects twice in development; loading once keeps the
     // seeded runtime states from being reset under the user.
     if (get().loaded || loadStarted) return
     loadStarted = true
-    const instances = await repository.listInstances()
-    // Seed one already-running instance so the prototype opens on a live
-    // system rather than a cold one.
-    const states: Record<string, InstanceRuntimeState> = {}
-    for (const i of instances) states[i.id] = { status: 'stopped' }
-    const prod = instances.find((i) => i.id === 'production')
-    if (prod) {
-      states[prod.id] = {
-        status: 'running',
-        pid: 21744,
-        startedAt: Date.now() - 3 * 3600_000 - 812_000,
-        progress: 1,
-      }
+    bindExitListener(set, get)
+    try {
+      const instances = await repository.listInstances()
+      const states: Record<string, InstanceRuntimeState> = {}
+      for (const i of instances) states[i.id] = { status: 'stopped' }
+      set({ instances, states, loaded: true })
+    } catch (err) {
+      // Leaving the latch set would wedge instance loading for the rest of
+      // the session with no way back — a retry has to remain possible.
+      loadStarted = false
+      throw err
     }
-    set({ instances, states, loaded: true })
   },
 
   /* ---------------- lifecycle ---------------- */
@@ -104,17 +166,25 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         controller.signal,
       )
 
-      patch({ status: 'running', progress: 1, pid: outcome.pid, startedAt: Date.now() })
-      set({
-        instances: get().instances.map((i) =>
-          i.id === id ? { ...i, lastRunAt: new Date().toISOString(), port: outcome.port } : i,
-        ),
+      patch({
+        status: 'running',
+        progress: 1,
+        pid: outcome.pid,
+        startedAt: Date.now(),
+        webUrl: outcome.webUrl,
       })
+      // The allocated port and the run timestamp are real configuration now —
+      // memory-only updates used to lose the port on restart.
+      get().updateInstance(id, { lastRunAt: new Date().toISOString(), port: outcome.port })
+      // DSH guards the WebUI behind a per-boot token in the printed URL; the
+      // bare host:port just says "authentication required", so every link
+      // prefers the captured URL and only falls back when the log had none.
+      const webTarget = outcome.webUrl ?? `http://localhost:${outcome.port}`
       ui.toast({
         kind: 'success',
         title: `${instance.name} 已就绪`,
         message: `WebUI 运行在 localhost:${outcome.port}`,
-        action: { label: '打开', run: () => void 0 },
+        action: { label: '打开', run: () => void openExternal(webTarget) },
       })
     } catch (err) {
       if (err instanceof Cancelled) {
@@ -159,13 +229,10 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       /* stopping is not cancellable in the prototype */
     }
 
-    set({
-      states: { ...get().states, [id]: STOPPED },
-      instances: get().instances.map((i) =>
-        i.id === id
-          ? { ...i, totalRuntime: i.totalRuntime + ranFor, lastRunAt: new Date().toISOString() }
-          : i,
-      ),
+    set({ states: { ...get().states, [id]: STOPPED } })
+    get().updateInstance(id, {
+      totalRuntime: instance.totalRuntime + ranFor,
+      lastRunAt: new Date().toISOString(),
     })
     useUIStore.getState().toast({ kind: 'info', title: `${instance.name} 已停止` })
   },
@@ -175,6 +242,105 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     if (status === 'running') void get().stop(id)
     else if (status === 'starting') get().cancelLaunch(id)
     else void get().launch(id)
+  },
+
+  /* ---------------- snapshots ---------------- */
+
+  async createSnapshot(id) {
+    const instance = get().byId(id)
+    if (!instance || snapshotControllers.has(id)) return null
+    const status = get().stateOf(id).status
+    if (status === 'running' || status === 'starting' || status === 'stopping') {
+      useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再创建快照' })
+      return null
+    }
+    if (pluginInstallActive(id)) {
+      useUIStore
+        .getState()
+        .toast({ kind: 'info', title: '有插件正在安装', message: '等插件安装完成后再创建快照。' })
+      return null
+    }
+    const controller = new AbortController()
+    snapshotControllers.set(id, controller)
+    const patchTransfer = (p: CopyProgress) =>
+      set({ snapshotTransfers: { ...get().snapshotTransfers, [id]: p } })
+    patchTransfer({ progress: 0, bytesDone: 0, bytesTotal: 0 })
+    try {
+      const snap = await repository.createSnapshot(instance, patchTransfer, controller.signal)
+      // snapshots 是磁盘派生的列表；saveInstance 的 manifest 不含它，落内存即可。
+      get().updateInstance(id, { snapshots: [snap, ...instance.snapshots] })
+      useUIStore.getState().toast({ kind: 'success', title: '已创建快照', message: snap.label })
+      return snap
+    } catch (err) {
+      if (err instanceof Cancelled) {
+        useUIStore.getState().toast({ kind: 'info', title: '已取消创建快照' })
+      } else {
+        useUIStore
+          .getState()
+          .toast({
+            kind: 'error',
+            title: '创建快照失败',
+            message: err instanceof Error ? err.message : String(err),
+          })
+      }
+      return null
+    } finally {
+      snapshotControllers.delete(id)
+      const transfers = { ...get().snapshotTransfers }
+      delete transfers[id]
+      set({ snapshotTransfers: transfers })
+    }
+  },
+
+  async restoreSnapshot(id, snapshotId) {
+    const instance = get().byId(id)
+    if (!instance) return
+    const status = get().stateOf(id).status
+    if (status === 'running' || status === 'starting' || status === 'stopping') {
+      useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再还原快照' })
+      return
+    }
+    if (pluginInstallActive(id)) {
+      useUIStore
+        .getState()
+        .toast({ kind: 'info', title: '有插件正在安装', message: '等插件安装完成后再回滚。' })
+      return
+    }
+    try {
+      const fresh = await repository.restoreSnapshot(instance, snapshotId)
+      // 还原换掉了整个 dsh-home：插件列表由磁盘反推，必须以还原后的为准。
+      get().updateInstance(id, { plugins: fresh.plugins })
+      useUIStore
+        .getState()
+        .toast({ kind: 'success', title: '已还原快照', message: '插件与配置已回到快照时的状态。' })
+    } catch (err) {
+      useUIStore
+        .getState()
+        .toast({
+          kind: 'error',
+          title: '还原快照失败',
+          message: err instanceof Error ? err.message : String(err),
+        })
+    }
+  },
+
+  async deleteSnapshot(id, snapshotId) {
+    const instance = get().byId(id)
+    if (!instance) return
+    try {
+      await repository.deleteSnapshot(instance, snapshotId)
+      get().updateInstance(id, {
+        snapshots: instance.snapshots.filter((s) => s.id !== snapshotId),
+      })
+    } catch (err) {
+      useUIStore
+        .getState()
+        .toast({
+          kind: 'error',
+          title: '删除快照失败',
+          message: err instanceof Error ? err.message : String(err),
+        })
+    }
   },
 
   /* ---------------- CRUD ---------------- */
@@ -238,14 +404,54 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     return clone
   },
 
+  admitInstance(instance) {
+    if (get().instances.some((i) => i.id === instance.id)) return
+    set({
+      instances: [...get().instances, instance],
+      states: { ...get().states, [instance.id]: STOPPED },
+    })
+  },
+
   updateInstance(id, patch) {
-    set({ instances: get().instances.map((i) => (i.id === id ? { ...i, ...patch } : i)) })
+    const before = get().byId(id)
+    if (!before) return
+    const next = { ...before, ...patch }
+    set({ instances: get().instances.map((i) => (i.id === id ? next : i)) })
+    // The manifest on disk is the instance's identity, so an edit that only
+    // reaches memory is an edit the user loses on restart.
+    void repository.saveInstance(next).catch((err) => {
+      // Revert only the keys this call changed. Restoring the whole
+      // pre-await snapshot would also undo edits that landed *and saved*
+      // while this write was in flight — the same snapshot-versus-current
+      // hazard `patchInstancePlugins` exists to avoid.
+      const reverted: Partial<Instance> = {}
+      for (const key of Object.keys(patch) as (keyof Instance)[]) {
+        Object.assign(reverted, { [key]: before[key] })
+      }
+      set({
+        instances: get().instances.map((i) => (i.id === id ? { ...i, ...reverted } : i)),
+      })
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: `保存「${before.name}」的修改失败`,
+        message: err instanceof Error && err.message ? err.message : String(err),
+      })
+    })
   },
 
   async deleteInstance(id) {
     const instance = get().byId(id)
     if (!instance) return
     launchControllers.get(id)?.abort()
+    // A snapshot copy in flight is reading the very tree that is about to
+    // vanish — abort it and drop its progress row.
+    snapshotControllers.get(id)?.abort()
+    snapshotControllers.delete(id)
+    const transfers = { ...get().snapshotTransfers }
+    delete transfers[id]
+    if (transfers[id] !== undefined || get().snapshotTransfers[id] !== undefined) {
+      set({ snapshotTransfers: transfers })
+    }
     await repository.deleteInstance(id)
     const states = { ...get().states }
     delete states[id]
@@ -259,9 +465,11 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   },
 
   toggleFavorite(id) {
-    set({
-      instances: get().instances.map((i) => (i.id === id ? { ...i, favorite: !i.favorite } : i)),
-    })
+    // Routed through `updateInstance` so it persists: `favorite` is a real
+    // manifest field, and a raw `set()` here meant the star silently
+    // disappeared on the next launch.
+    const current = get().byId(id)
+    if (current) get().updateInstance(id, { favorite: !current.favorite })
   },
 
   dismissError(id) {
@@ -269,15 +477,21 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     set({ states: { ...get().states, [id]: STOPPED } })
   },
 
-  relocate(fromRoot, toRoot) {
-    if (!fromRoot || fromRoot === toRoot) return
-    const swap = (path: string) =>
-      path.startsWith(fromRoot) ? toRoot + path.slice(fromRoot.length) : path
+  async measureDiskUsage() {
+    const sizes = await Promise.all(
+      get().instances.map(async (i) => {
+        try {
+          return [i.id, await repository.measureDiskUsage(i)] as const
+        } catch {
+          return [i.id, i.diskUsage] as const
+        }
+      }),
+    )
+    const measured = new Map(sizes)
     set({
       instances: get().instances.map((i) => ({
         ...i,
-        dshHome: swap(i.dshHome),
-        workspace: swap(i.workspace),
+        diskUsage: measured.get(i.id) ?? i.diskUsage,
       })),
     })
   },

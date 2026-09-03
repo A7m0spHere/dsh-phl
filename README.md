@@ -3,11 +3,16 @@
 > **PHL — DSH Instance & Runtime Manager**
 > 一个独立实现的、PCL 风格的 DeepSeek Harness 实例与运行时管理器。
 
-当前仓库处于 **Phase 1：纯前端高保真原型**，但已经是一个真正的 **Tauri 2 桌面应用**（无边框窗口、自绘标题栏、
-原生窗口控制与安装包）。所有业务数据来自 Mock Repository，启动、下载、创建都是模拟过程，不会真正操作文件系统或进程。
-这一阶段的目标只有一个：
+桌面端的四个核心模块已经是**真实实现**（Rust 管线，真实读写磁盘），启动 / 停止进程与端口管理仍是模拟流程。
+浏览器模式（`npm run dev`）下一切数据来自 Mock Repository，方便纯 UI 开发。
 
-> 验证「实例是第一公民」这一产品模型是否成立。
+| 模块 | 状态 |
+|---|---|
+| Version Manager | ✅ 真实：GitHub Releases + npm 目录，下载 / sha512 校验 / 解包 / 删除 |
+| Plugin Manager | ✅ 真实：社区注册表，安装进实例 profile 的 `node_modules` 与 `cordis.patch.yml` |
+| Instance Manager | ✅ 真实：磁盘上的 `instance.json`，重启不丢、删除即清理、插件列表由磁盘反推 |
+| Runtime Manager | ✅ 真实：nodejs.org dist 目录（支持 npmmirror 镜像），SHASUMS256 校验后解包 |
+| Process / Port、真实启动 | ✅ 真实：`dsh web --port` 启动、端口探测与自动分配、进程树终止、崩溃事件、启动日志 |
 
 ---
 
@@ -87,8 +92,8 @@ npm run icon
 ```text
 src/                     前端
 ├── types/        领域模型：Instance / Version / Runtime / Plugin
-├── data/         Mock 种子数据（不在 JSX 中硬编码）
-├── services/     Repository 接口 + Mock 实现（未来替换为 Tauri / PHL Core）
+├── data/         种子与目录数据（浏览器 Mock 用；桌面端数据来自 Rust）
+├── services/     Repository 接口 + Mock 实现 + Tauri 实现（services/index.ts 决定来源）
 ├── stores/       Zustand：ui / catalog / instance / view / wizard / settings
 ├── lib/          cn / format / hue / motion / hooks / desktop
 ├── components/
@@ -98,8 +103,11 @@ src/                     前端
 └── pages/        Instances / InstanceDetail / Create / Versions / Plugins / Runtimes / Settings
 
 src-tauri/               桌面壳
-├── src/lib.rs    窗口生命周期：延迟显示、关闭拦截
-├── capabilities/ 权限声明（仅开放自绘标题栏所需的窗口能力）
+├── src/lib.rs     窗口生命周期 + 命令注册
+├── src/versions.rs / plugins.rs / instances.rs / runtimes.rs
+│                  Version / Plugin / Instance / Runtime 的真实实现
+│                  （目录抓取、下载、完整性校验、磁盘读写与清理）
+├── capabilities/  权限声明（仅开放自绘标题栏所需的窗口能力）
 └── tauri.conf.json
 
 scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 同一套几何）
@@ -108,8 +116,8 @@ scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 同一�
 抽象方向：
 
 ```text
-UI  →  Repository  →  Mock Data        （现在）
-UI  →  Repository  →  PHL Core / Tauri （Phase 2+）
+UI  →  Repository  →  Tauri / Rust     （桌面端：版本、插件、实例、Runtime）
+UI  →  Repository  →  Mock Data        （浏览器模式；桌面端仍为 mock 的模块）
 ```
 
 `src/services/index.ts` 是唯一决定数据来源的地方，替换实现时页面与 Store 无需改动。
@@ -123,17 +131,21 @@ UI  →  Repository  →  PHL Core / Tauri （Phase 2+）
             └─ 底部启动坞（仅实例页）
 ```
 
-## 已实现的原型能力
+## 已实现的能力
 
 - 实例列表（卡片 / 列表两种视图）、筛选、排序、搜索
-- 实例详情：运行环境、隔离路径、插件、快照、统计、删除
+- 实例持久化（真实）：`<root>/instances/<id>/`，重启不丢；创建 / 克隆 / 删除 / 改名 / 端口与 env 修改全部落盘
+- 实例详情：运行环境、隔离路径、插件（由磁盘 `node_modules` 反推）、快照、统计、删除
 - 创建实例向导：基本信息 → DSH 版本 → Runtime → 模板与端口 → 确认，附创建进度
-- 模拟启动流程：7 个阶段的实时进度与阶段说明
-- 真实的失败路径：版本未安装 / Runtime 未安装 / Node 版本不匹配 / 端口冲突
-- 版本管理：多版本共存、下载进度与速度、取消、重试、删除保护
-- Runtime 管理：Node 多版本、系统 Node、使用方提示
-- 插件管理：以实例为作用域的安装 / 启用 / 更新 / 兼容性标注
-- 设置：外观（主题、强调色、密度、动效强度）、下载、存储占用、高级、关于
+- 版本管理（真实）：npm + GitHub Releases 目录、下载进度与速度、sha512 校验、取消、删除保护
+- Runtime 管理（真实）：nodejs.org dist 目录（支持 npmmirror 镜像）、SHASUMS256 校验、Windows zip / Unix tar.gz 解包、系统 Node 探测
+- 插件管理（真实）：社区注册表、npm / GitHub / 直链来源、安装进实例 profile 并注册 `cordis.patch.yml`
+- 存储视图（真实）：实例与 Runtime 占用按磁盘实测，孤立目录扫描与一键回收
+- Bundle 导出 / 导入（真实）：实例配置与插件记录打包为 JSON 清单；导入走与创建同款的暂存 + 重命名管线，插件文件不进 Bundle、通过插件页重新安装
+- 快照（真实）：创建 / 回滚 / 删除 —— 复制实例的 dsh-home（插件与配置），回滚后快照保留、可反复还原；运行中的实例拒绝快照操作
+- 诊断（真实）：数据目录可写、DSH 版本与 Runtime 完整性、实例引用有效性、孤立目录与下载缓存一览；缓存一键清理
+- 真实启动：解析版本与 Runtime → 端口探测 / 自动分配 → 以实例自己的 `DSH_HOME` 启动 `dsh web` → 端口就绪探测 → 打开 WebUI；停止即终止进程树，崩溃自动反馈到 UI，启动日志落在实例 `logs/` 下
+- 设置：外观（主题、强调色、密度、动效强度）、下载源、存储、高级、关于
 - 快速跳转（Ctrl+K）、快捷键、Toast、确认与输入对话框、空状态与错误态
 
 ## 快捷键
@@ -162,5 +174,6 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 
 ## 下一步
 
-Phase 2 起接入真实能力，顺序参见 `dsh-phl-development-roadmap.md`：
-Version Manager → Runtime Manager → Instance Manager → Process / Port Manager → 真实启动。
+核心链路（版本 → 插件 → 实例 → Runtime → 启动 → Bundle → 快照 → 诊断）已全部真实接入。剩余：
+Source Build、环境修复等更高级的能力（路线图 §13），以及持续的真机打磨。
+实例模板为静态产品内容（形状预设），不需要后端模块。

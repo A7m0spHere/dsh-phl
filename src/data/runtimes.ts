@@ -18,7 +18,7 @@ export const runtimeSeed: Runtime[] = [
     codename: 'Jod',
     lts: true,
     size: 31_800_000,
-    state: { kind: 'installed', installedAt: '2026-07-02T09:12:00Z' },
+    state: { kind: 'available' },
   },
   {
     id: 'node-20',
@@ -28,7 +28,7 @@ export const runtimeSeed: Runtime[] = [
     codename: 'Iron',
     lts: true,
     size: 30_600_000,
-    state: { kind: 'installed', installedAt: '2026-05-19T14:40:00Z' },
+    state: { kind: 'available' },
   },
   {
     id: 'node-18',
@@ -38,7 +38,7 @@ export const runtimeSeed: Runtime[] = [
     codename: 'Hydrogen',
     lts: true,
     size: 29_100_000,
-    state: { kind: 'installed', installedAt: '2026-03-08T08:05:00Z' },
+    state: { kind: 'available' },
   },
   {
     id: 'node-system',

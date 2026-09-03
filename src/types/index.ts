@@ -1,3 +1,4 @@
+export * from './apiConfig'
 export * from './instance'
 export * from './version'
 export * from './runtime'

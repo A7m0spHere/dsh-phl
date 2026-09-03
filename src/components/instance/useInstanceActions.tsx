@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import {
   Copy,
   FolderOpen,
+  Package,
   Pencil,
   Play,
   Square,
@@ -11,6 +12,8 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import type { MenuItem } from '@/components/ui'
+import { chooseSaveFile, exportInstanceBundle, openExternal, revealPath } from '@/lib/desktop'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { useInstanceStore, useUIStore } from '@/stores'
 import type { Instance } from '@/types'
 
@@ -61,11 +64,13 @@ export function useInstanceActions(instance: Instance | undefined) {
 
   const remove = useCallback(async () => {
     if (!instance) return
-    if (store.stateOf(instance.id).status === 'running') {
+    const status = store.stateOf(instance.id).status
+    // starting/stopping 也不放行：删除会和正在中止的启动过程赛跑。
+    if (status !== 'stopped' && status !== 'error') {
       ui.toast({
         kind: 'warn',
-        title: '实例正在运行',
-        message: '请先停止实例，再执行删除。',
+        title: '实例忙',
+        message: '请先停止实例（或等启动 / 停止结束），再执行删除。',
       })
       return
     }
@@ -85,58 +90,67 @@ export function useInstanceActions(instance: Instance | undefined) {
     }
   }, [instance, store, ui])
 
+  /**
+   * Snapshots are not implemented yet — `instance.json` carries no snapshot
+   * list, so a record written here is dropped the moment the instance is read
+   * back from disk. Saying so is the only honest option: it previously
+   * reported success and promised a rollback point that did not exist, and
+   * the rollback button beside it already admits it does nothing.
+   */
   const snapshot = useCallback(async () => {
-    if (!instance) return
-    const label = await ui.prompt({
-      title: '创建快照',
-      label: '快照名称',
-      defaultValue: `${new Date().toLocaleDateString('zh-CN')} 基线`,
-      helper: '记录当前 DSH 版本、Runtime、插件版本与配置，可随时回滚。',
-      confirmLabel: '创建',
-    })
-    if (!label) return
-    store.updateInstance(instance.id, {
-      snapshots: [
-        ...instance.snapshots,
-        {
-          id: `snap-${Date.now()}`,
-          label,
-          createdAt: new Date().toISOString(),
-          versionId: instance.versionId,
-          runtimeId: instance.runtimeId,
-          pluginCount: instance.plugins.length,
-          size: instance.diskUsage,
-        },
-      ],
-    })
-    ui.toast({ kind: 'success', title: `已创建快照「${label}」` })
-  }, [instance, store, ui])
+    if (!instance || !id) return
+    await store.createSnapshot(id)
+  }, [instance, id, store])
 
   const copyPort = useCallback(() => {
     if (!instance) return
-    const url = `http://localhost:${instance.port}`
+    const url = webUrl()
     void navigator.clipboard?.writeText(url)
     ui.toast({ kind: 'info', title: '已复制访问地址', message: url, duration: 2600 })
   }, [instance, ui])
 
   const revealFolder = useCallback(() => {
     if (!instance) return
-    ui.toast({
-      kind: 'info',
-      title: '在原型中不可用',
-      message: `接入 PHL Core 后将打开 ${instance.dshHome}`,
-      duration: 3200,
+    const root = useSettingsStore.getState().root
+    // 正斜杠在 explorer / open / xdg-open 下都有效，不用按平台拼接。
+    void revealPath([root, 'instances', instance.id].join('/')).catch((err) => {
+      ui.toast({
+        kind: 'error',
+        title: '无法打开实例目录',
+        message: err instanceof Error ? err.message : String(err),
+      })
     })
   }, [instance, ui])
 
+  const webUrl = (): string => {
+    // The launch-captured URL carries DSH's per-boot auth token; the bare
+    // host:port only works if the log line was never found.
+    const state = useInstanceStore.getState().stateOf(instance!.id)
+    return state.webUrl ?? `http://localhost:${instance!.port}`
+  }
+
   const openWebUI = useCallback(() => {
     if (!instance) return
-    ui.toast({
-      kind: 'info',
-      title: '在原型中不可用',
-      message: `接入 PHL Core 后将打开 localhost:${instance.port}`,
-      duration: 3200,
-    })
+    void openExternal(webUrl())
+  }, [instance])
+
+  const exportBundle = useCallback(async () => {
+    if (!instance) return
+    const root = useSettingsStore.getState().root
+    const dest = await chooseSaveFile('导出 PHL Bundle', `${instance.name}.phl-bundle.json`, [
+      { name: 'PHL Bundle', extensions: ['json'] },
+    ])
+    if (!dest) return
+    try {
+      await exportInstanceBundle(root, instance.id, dest)
+      ui.toast({ kind: 'success', title: '已导出 Bundle', message: dest })
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '导出 Bundle 失败',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
   }, [instance, ui])
 
   const menuItems = useMemo<MenuItem[]>(() => {
@@ -166,6 +180,7 @@ export function useInstanceActions(instance: Instance | undefined) {
       },
       { id: 'rename', label: '重命名', icon: <Pencil size={13} />, onSelect: rename },
       { id: 'clone', label: '克隆实例', icon: <Copy size={13} />, onSelect: clone },
+      { id: 'export', label: '导出 Bundle', icon: <Package size={13} />, onSelect: exportBundle },
       { id: 'snapshot', label: '创建快照', icon: <Camera size={13} />, onSelect: snapshot },
       {
         id: 'folder',
@@ -185,5 +200,5 @@ export function useInstanceActions(instance: Instance | undefined) {
     ]
   }, [instance, id, store, rename, clone, snapshot, remove, revealFolder, openWebUI])
 
-  return { clone, rename, remove, snapshot, copyPort, revealFolder, openWebUI, menuItems }
+  return { clone, rename, remove, snapshot, copyPort, revealFolder, openWebUI, exportBundle, menuItems }
 }

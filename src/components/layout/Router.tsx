@@ -6,6 +6,7 @@ import { InstanceDetailPage, InstanceDetailPanel } from '@/pages/InstanceDetailP
 import { CreateInstancePage, CreateInstancePanel } from '@/pages/CreateInstancePage'
 import { VersionsPage, VersionsPanel } from '@/pages/VersionsPage'
 import { PluginsPage, PluginsPanel } from '@/pages/PluginsPage'
+import { ApiConfigPage, ApiConfigPanel } from '@/pages/ApiConfigPage'
 import { RuntimesPage, RuntimesPanel } from '@/pages/RuntimesPage'
 import { SettingsPage, SettingsPanel } from '@/pages/SettingsPage'
 
@@ -21,6 +22,8 @@ function renderPage(route: Route) {
       return <VersionsPage />
     case 'plugins':
       return <PluginsPage />
+    case 'apiConfig':
+      return <ApiConfigPage />
     case 'runtimes':
       return <RuntimesPage />
     case 'settings':
@@ -40,6 +43,8 @@ function renderPanel(route: Route) {
       return <VersionsPanel />
     case 'plugins':
       return <PluginsPanel />
+    case 'apiConfig':
+      return <ApiConfigPanel />
     case 'runtimes':
       return <RuntimesPanel />
     case 'settings':

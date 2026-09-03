@@ -1,4 +1,5 @@
 import type { InstalledPlugin } from './plugin'
+import type { ApiBinding, ApiInheritance } from './apiConfig'
 
 /**
  * The Instance is PHL's first-class citizen. Everything an environment needs
@@ -10,6 +11,7 @@ export type InstanceStatus = 'stopped' | 'starting' | 'running' | 'stopping' | '
 export type LaunchPhase =
   | 'resolve-version'
   | 'resolve-runtime'
+  | 'install-deps'
   | 'prepare-home'
   | 'link-plugins'
   | 'allocate-port'
@@ -19,6 +21,7 @@ export type LaunchPhase =
 export const LAUNCH_PHASES: LaunchPhase[] = [
   'resolve-version',
   'resolve-runtime',
+  'install-deps',
   'prepare-home',
   'link-plugins',
   'allocate-port',
@@ -29,6 +32,7 @@ export const LAUNCH_PHASES: LaunchPhase[] = [
 export const LAUNCH_PHASE_LABEL: Record<LaunchPhase, string> = {
   'resolve-version': '解析 DSH 版本',
   'resolve-runtime': '准备 Node Runtime',
+  'install-deps': '安装版本依赖',
   'prepare-home': '挂载 DSH_HOME',
   'link-plugins': '装载插件',
   'allocate-port': '分配端口',
@@ -44,6 +48,8 @@ export interface InstanceRuntimeState {
   progress?: number
   pid?: number
   startedAt?: number
+  /** Authenticated `dsh web` URL captured at launch; WebUI links prefer it. */
+  webUrl?: string
   error?: { title: string; detail: string; hint?: string }
 }
 
@@ -77,6 +83,11 @@ export interface Instance {
   env: Record<string, string>
   args: string[]
   snapshots: Snapshot[]
+  /**
+   * Binding to the global API library; null/undefined = manifests from before
+   * the feature (treated as unmanaged until the user binds it explicitly).
+   */
+  api?: ApiBinding | null
 }
 
 export interface Snapshot {
@@ -113,4 +124,7 @@ export interface InstanceDraft {
   autoPort: boolean
   port: number
   copyFromId?: string | null
+  /** Create-time API takeover: 'default' inherits the global library,
+   * 'none' leaves the instance to its own DSH config. */
+  apiInheritance: ApiInheritance
 }

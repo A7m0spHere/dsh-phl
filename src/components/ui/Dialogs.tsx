@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { AlertTriangle } from 'lucide-react'
-import { useMotion } from '@/lib/motion'
+import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { useUIStore } from '@/stores/uiStore'
 import { Button } from './Button'
 import { Field, Input } from './Field'
@@ -9,7 +9,7 @@ import { Field, Input } from './Field'
 export function DialogHost() {
   const dialog = useUIStore((s) => s.dialog)
   const close = useUIStore((s) => s.closeDialog)
-  const { t, pop, overlay } = useMotion()
+  const { pop, overlay } = useMotion()
 
   const [value, setValue] = useState('')
   const [typed, setTyped] = useState('')
@@ -56,21 +56,20 @@ export function DialogHost() {
   return (
     <AnimatePresence>
       {dialog && (
-        <motion.div key="dialog" className="fixed inset-0 z-[80] flex items-center justify-center p-8">
+        <motion.div key="dialog" className={`fixed inset-0 ${MODAL_Z} flex items-center justify-center p-8`}>
           <motion.div
             variants={overlay}
             initial="hidden"
             animate="show"
             exit="out"
             onClick={() => close(dialog.kind === 'confirm' ? false : null)}
-            className="absolute inset-0 bg-canvas/55 backdrop-blur-[2px]"
+            className={MODAL_SCRIM}
           />
           <motion.div
             variants={pop}
             initial="hidden"
             animate="show"
             exit="out"
-            transition={t(0.22)}
             role="dialog"
             aria-modal
             className="relative w-[380px] overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"

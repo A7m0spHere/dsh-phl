@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { hueTone } from '@/lib/hue'
-import { useMotion } from '@/lib/motion'
+import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { useIsDark, useSettingsStore, useUIStore } from '@/stores'
 import { Badge, Button, Chip } from '@/components/ui'
 import { InstanceTile } from '@/components/instance/InstanceTile'
@@ -197,8 +197,8 @@ function StartArt() {
       </div>
 
       <div className="rounded-lg bg-warn/[0.08] p-3 text-sm leading-relaxed text-ink-muted ring-1 ring-inset ring-warn/20">
-        当前版本是<b className="text-ink">原型</b>：数据是模拟的，启动、下载、创建都只是演示流程，
-        不会真的改动你的磁盘或启动进程。
+        版本、插件、实例、Runtime 与启动都已是<b className="text-ink">真实实现</b>：下载与安装会写入磁盘，
+        启动会拉起真实的 DSH 进程并占用所选端口，停止会终止整个进程树。
       </div>
     </div>
   )
@@ -266,14 +266,14 @@ export function GuideOverlay() {
       {open && (
         <motion.div
           key="guide"
-          className="fixed inset-0 z-[78] flex items-center justify-center p-6"
+          className={`fixed inset-0 ${MODAL_Z} flex items-center justify-center p-6`}
         >
           <motion.div
             variants={overlay}
             initial="hidden"
             animate="show"
             exit="out"
-            className="absolute inset-0 bg-canvas/75 backdrop-blur-[3px]"
+            className={MODAL_SCRIM}
           />
 
           <motion.div
@@ -281,7 +281,6 @@ export function GuideOverlay() {
             initial="hidden"
             animate="show"
             exit="out"
-            transition={t(0.24)}
             role="dialog"
             aria-modal
             className="relative flex max-h-full w-[520px] flex-col overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
