@@ -6,6 +6,7 @@ import {
   FolderOpen,
   HardDrive,
   Info,
+  Keyboard,
   Palette,
   Settings2,
   SlidersHorizontal,
@@ -58,12 +59,14 @@ import {
 } from '@/components/ui'
 import { PageShell, PageSection } from '@/components/layout/Page'
 import { PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
+import { ShortcutsSection } from '@/components/settings/ShortcutsSection'
 import { Logo } from '@/components/layout/Logo'
 
 const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: 'general', label: '通用', icon: <Settings2 size={13} /> },
   { id: 'downloads', label: '下载', icon: <Download size={13} /> },
   { id: 'appearance', label: '外观', icon: <Palette size={13} /> },
+  { id: 'shortcuts', label: '快捷键', icon: <Keyboard size={13} /> },
   { id: 'storage', label: '存储', icon: <HardDrive size={13} /> },
   { id: 'diagnostics', label: '诊断', icon: <Stethoscope size={13} /> },
   { id: 'advanced', label: '高级', icon: <SlidersHorizontal size={13} /> },
@@ -690,6 +693,8 @@ export function SettingsPage() {
             </PageSection>
           </>
         )}
+
+        {section === 'shortcuts' && <ShortcutsSection />}
 
         {section === 'storage' && (
           <>

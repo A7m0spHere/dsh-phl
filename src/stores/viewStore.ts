@@ -15,6 +15,7 @@ export type SettingsSection =
   | 'general'
   | 'downloads'
   | 'appearance'
+  | 'shortcuts'
   | 'storage'
   | 'diagnostics'
   | 'advanced'

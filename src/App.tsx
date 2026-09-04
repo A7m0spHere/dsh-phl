@@ -1,16 +1,16 @@
 import { useEffect } from 'react'
 import { MotionConfig } from 'motion/react'
 import { desktop } from '@/lib/desktop'
-import { useHotkeys } from '@/lib/hooks'
+import { shortcutById, useGlobalShortcut } from '@/lib/shortcuts'
 import {
   useApiConfigStore,
   useCatalogStore,
   useInstanceStore,
   useSettingsStore,
   useUIStore,
-  useWizardStore,
   initDesktopRoot,
   maybeOfferRootChoice,
+  bindHistorySync,
 } from '@/stores'
 import { DialogHost, Toaster } from '@/components/ui'
 import { TitleBar } from '@/components/layout/TitleBar'
@@ -78,6 +78,12 @@ export default function App() {
     const raf = requestAnimationFrame(() => void desktop.ready())
     return () => cancelAnimationFrame(raf)
   }, [])
+
+  // History traversal that the app does not initiate itself — native
+  // Alt+←/→ and mouse side buttons, which WebView2 handles out of the box —
+  // arrives as popstate. This bind keeps the in-app mirror stacks in step
+  // with the address bar.
+  useEffect(() => bindHistorySync(), [])
 
   // Closing the window is the app's decision, not the OS's: Rust hands the
   // request back so we can warn about instances that are still running.
@@ -170,25 +176,22 @@ export default function App() {
     if (guideSeen) void maybeOfferRootChoice()
   }, [guideSeen])
 
-  useHotkeys([
-    { key: 'k', ctrl: true, global: true, run: () => setPaletteOpen(!paletteOpen) },
-    {
-      key: 'n',
-      ctrl: true,
-      run: () => {
-        useWizardStore.getState().reset()
-        navigate({ name: 'create' })
-      },
+  // The global bindings live in the shared shortcut catalogue
+  // (`lib/shortcuts.ts`), which also drives the settings reference — so the
+  // list on screen and what actually fires can never drift apart.
+  useGlobalShortcut(shortcutById('palette'), () => setPaletteOpen(!paletteOpen))
+  useGlobalShortcut(
+    shortcutById('go-back'),
+    () => {
+      // Esc is a "get me out" gesture: walk the drill path when there is
+      // one, otherwise step up from a detail/wizard to its section.
+      if (useUIStore.getState().navBack.length > 0) back()
+      else useUIStore.getState().up()
     },
-    {
-      key: 'escape',
-      run: () => {
-        if (paletteOpen || dialogOpen) return
-        back()
-      },
-    },
-    { key: ',', ctrl: true, run: () => navigate({ name: 'settings' }) },
-  ])
+    // A dialog or the palette owns Escape while it is open.
+    !paletteOpen && !dialogOpen,
+  )
+  useGlobalShortcut(shortcutById('settings'), () => navigate({ name: 'settings' }))
 
   return (
     <MotionConfig reducedMotion={motionLevel === 'off' ? 'always' : 'never'}>

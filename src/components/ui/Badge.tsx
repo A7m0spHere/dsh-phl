@@ -51,9 +51,16 @@ export function Chip({ children, className }: { children: ReactNode; className?:
   )
 }
 
-export function Kbd({ children }: { children: ReactNode }) {
+export function Kbd({ children, active }: { children: ReactNode; active?: boolean }) {
   return (
-    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-xs bg-surface-sunken px-1 font-sans text-2xs text-ink-faint ring-1 ring-inset ring-line">
+    <kbd
+      className={cn(
+        'inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-xs px-1 font-sans text-2xs ring-1 ring-inset',
+        active
+          ? 'bg-accent-soft text-accent-ink ring-accent/30'
+          : 'bg-surface-sunken text-ink-faint ring-line',
+      )}
+    >
       {children}
     </kbd>
   )
