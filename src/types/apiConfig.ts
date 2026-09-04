@@ -39,8 +39,17 @@ export interface ApiProvider {
   notes?: string
   api?: string
   baseURL?: string
-  /** Environment variable name DSH reads the key from — never the key. */
+  /** Environment variable name DSH reads the key from — what lands in
+   * settings.yaml. Every provider needs one. */
   apiKeyEnv: string
+  /**
+   * Optional locally stored key. cc-switch model: the user pastes a real key,
+   * PHL owns delivering it — at instance launch it is injected into the DSH
+   * child's environment as `apiKeyEnv` (system/instance env always win). The
+   * secret lives only in the local api.json and the process env; no instance
+   * directory file ever contains it.
+   */
+  apiKey?: string
   models: ApiModelRef[]
   enabled: boolean
 }

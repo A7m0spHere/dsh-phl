@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Check,
   CloudDownload,
   Download,
+  Eye,
+  EyeOff,
   KeyRound,
   Loader2,
   Pencil,
@@ -17,6 +19,7 @@ import {
 import { cn } from '@/lib/cn'
 import { classifyInstance, planAdoption } from '@/lib/apiDiff'
 import { fetchProviderModels, isDesktop } from '@/lib/desktop'
+import { VENDOR_PRESETS, type VendorPreset } from '@/data/vendorPresets'
 import { useMotion } from '@/lib/motion'
 import {
   suggestEnvName,
@@ -107,12 +110,59 @@ function ChoiceGrid<T extends string>({
   )
 }
 
+/**
+ * The API key box. cc-switch's arrangement, stated honestly: paste the real
+ * key and PHL keeps it in its local config library (a plaintext file — same
+ * exposure as cc-switch's SQLite or Cherry's DB; this is a personal desktop
+ * tool, not a secret manager). At instance launch it is injected into the
+ * DSH child process as the provider's env var; instance directories never
+ * contain it. Leaving it empty is a valid choice when the variable already
+ * exists in the system env or in DSH's own credentials.
+ */
+function ApiKeyField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [show, setShow] = useState(false)
+  return (
+    <Field
+      label="API Key"
+      hint={
+        value.trim()
+          ? '将保存在 PHL 本地配置中，实例启动时自动注入 DSH 环境；系统环境变量若存在同名值则优先'
+          : '可选：直接粘贴密钥；若已在系统环境或 DSH 凭据中配置，留空即可'
+      }
+    >
+      <div className="flex items-center gap-1.5">
+        <Input
+          type={show ? 'text' : 'password'}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="sk-…"
+          className="flex-1 font-mono"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={() => setShow((v) => !v)}
+          aria-label={show ? '隐藏密钥' : '显示密钥'}
+        >
+          {show ? <EyeOff size={13} /> : <Eye size={13} />}
+        </Button>
+      </div>
+    </Field>
+  )
+}
+
 const emptyProviderForm = () => ({
   name: '',
   displayName: '',
-  kind: 'aggregator' as ApiProvider['kind'],
+  // The type selector was removed (a manual entry *is* the custom kind;
+  // presets carry their own). A preset pick overwrites this.
+  kind: 'custom' as ApiProvider['kind'],
   api: 'openai-completions',
   baseURL: '',
+  apiKey: '',
   apiKeyEnv: '',
   notes: '',
   models: [] as ApiModelRef[],
@@ -121,6 +171,19 @@ const emptyProviderForm = () => ({
 
 type ProviderForm = ReturnType<typeof emptyProviderForm>
 
+function presetToForm(p: VendorPreset): ProviderForm {
+  return {
+    ...emptyProviderForm(),
+    name: p.providerName,
+    displayName: p.providerName,
+    kind: p.kind,
+    api: p.api,
+    baseURL: p.baseURL,
+    apiKeyEnv: p.apiKeyEnv,
+    notes: p.notes,
+  }
+}
+
 function providerToForm(p: ApiProvider): ProviderForm {
   return {
     name: p.name,
@@ -128,6 +191,7 @@ function providerToForm(p: ApiProvider): ProviderForm {
     kind: p.kind,
     api: p.api ?? '',
     baseURL: p.baseURL ?? '',
+    apiKey: p.apiKey ?? '',
     apiKeyEnv: p.apiKeyEnv,
     notes: p.notes ?? '',
     models: p.models,
@@ -169,19 +233,11 @@ function ProviderFields({
           className="font-mono"
         />
       </Field>
-      <Field label="类型">
-        <ChoiceGrid
-          options={(Object.keys(KIND_LABEL) as ApiProvider['kind'][]).map((k) => ({
-            value: k,
-            label: KIND_LABEL[k],
-          }))}
-          value={form.kind}
-          onChange={(v) => patch({ kind: v })}
-        />
-      </Field>
-      <Field label="协议">
-        <ChoiceGrid options={API_CHOICES} value={form.api} onChange={(v) => patch({ api: v })} cols={4} />
-      </Field>
+      <div className="col-span-2">
+        <Field label="协议">
+          <ChoiceGrid options={API_CHOICES} value={form.api} onChange={(v) => patch({ api: v })} cols={4} />
+        </Field>
+      </div>
       <Field label="Base URL" hint="留空使用 DSH 内置端点">
         <Input
           value={form.baseURL}
@@ -190,7 +246,7 @@ function ProviderFields({
           className="font-mono"
         />
       </Field>
-      <Field label="密钥环境变量名" hint="PHL 只记录变量名；密钥留在 DSH 凭据或系统环境中">
+      <Field label="密钥环境变量名" hint="DSH 从这个变量读 key；也是本地 key 注入时的变量名">
         <Input
           value={form.apiKeyEnv}
           onChange={(e) => patch({ apiKeyEnv: e.target.value })}
@@ -198,6 +254,9 @@ function ProviderFields({
           className="font-mono"
         />
       </Field>
+      <div className="col-span-2">
+        <ApiKeyField value={form.apiKey} onChange={(v) => patch({ apiKey: v })} />
+      </div>
       <div className="col-span-2">
         <ModelEditor
           models={form.models}
@@ -208,6 +267,7 @@ function ProviderFields({
             apiKeyEnv:
               form.apiKeyEnv.trim() ||
               suggestEnvName(form.name || form.displayName || 'provider'),
+            apiKey: form.apiKey,
           }}
         />
       </div>
@@ -233,14 +293,47 @@ function ProviderFields({
  * new-provider row card (same row language as provider rows)
  * ------------------------------------------------------------------ */
 
-function NewProviderCard({ onCancel }: { onCancel: () => void }) {
+function NewProviderCard({
+  onCancel,
+  initialPresetId,
+  presetMode,
+}: {
+  onCancel: () => void
+  /** Preset applied when the card mounts (the empty-state "从预设新建" entry). */
+  initialPresetId?: string
+  /** Gallery mode: the custom form only appears after 自定义 is clicked. */
+  presetMode?: boolean
+}) {
   const config = useApiConfigStore((s) => s.config)
   const addProvider = useApiConfigStore((s) => s.addProvider)
   const saving = useApiConfigStore((s) => s.saving)
   const toast = useUIStore((s) => s.toast)
   const { t, riseItem } = useMotion()
-  const [form, setForm] = useState<ProviderForm>(emptyProviderForm())
+  const [form, setForm] = useState<ProviderForm>(() => {
+    const p = VENDOR_PRESETS.find((x) => x.id === initialPresetId)
+    return p ? presetToForm(p) : emptyProviderForm()
+  })
+  const [presetId, setPresetId] = useState(initialPresetId ?? (presetMode ? '' : 'custom'))
   const patch = (p: Partial<ProviderForm>) => setForm((f) => ({ ...f, ...p }))
+
+  const applyPreset = (id: string) => {
+    setPresetId(id)
+    const preset = VENDOR_PRESETS.find((p) => p.id === id)
+    if (preset) {
+      setForm(presetToForm(preset))
+      toast({
+        kind: 'info',
+        title: `已填入 ${preset.label} 预设`,
+        message: '填好 API Key 后，点「获取可用模型」拉取你账号下的模型清单。',
+        duration: 4000,
+      })
+    } else {
+      // Returning to 自定义 resets only the template-owned fields; anything
+      // already typed into 备注/模型 by the user is intentionally preserved
+      // — wiping a half-filled form on a mis-click is worse than leftovers.
+      setForm((f) => ({ ...f, name: '', displayName: '', kind: 'custom', api: 'openai-completions', baseURL: '', apiKey: '', apiKeyEnv: '', notes: '' }))
+    }
+  }
 
   const save = async () => {
     const displayName = form.displayName.trim()
@@ -260,6 +353,7 @@ function NewProviderCard({ onCancel }: { onCancel: () => void }) {
       api: form.api || undefined,
       baseURL: form.baseURL.trim() || undefined,
       apiKeyEnv: form.apiKeyEnv.trim() || suggestEnvName(name),
+      apiKey: form.apiKey.trim() || undefined,
       models: form.models.filter((m) => m.id.trim()),
       enabled: true,
     })
@@ -291,11 +385,74 @@ function NewProviderCard({ onCancel }: { onCancel: () => void }) {
             </Button>
           </div>
         </div>
+        {/* Preset strip: pick a mainstream provider to prefill, or 自定义 for a
+            blank form. Selecting a preset fills every field but keeps them
+            editable — a preset is a starting value, not a lock. */}
+        <div className="border-t border-line px-3.5 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-sm font-medium text-ink-muted">从预设开始</span>
+            <span className="text-sm text-ink-faint">选择厂商自动填入地址与模型，仍可修改</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <PresetChip active={presetId === 'custom'} onClick={() => applyPreset('custom')}>
+              自定义
+            </PresetChip>
+            {VENDOR_PRESETS.map((p) => (
+              <PresetChip key={p.id} active={presetId === p.id} onClick={() => applyPreset(p.id)}>
+                {p.label}
+              </PresetChip>
+            ))}
+          </div>
+          {presetId && presetId !== 'custom' && (() => {
+            const sel = VENDOR_PRESETS.find((p) => p.id === presetId)
+            return sel?.consoleUrl ? (
+              <p className="mt-2 text-sm text-ink-faint">
+                密钥在{' '}
+                <a
+                  href={sel.consoleUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-accent-ink underline-offset-2 hover:underline"
+                >
+                  {sel.notes.split(' · ').pop()}
+                </a>{' '}
+                创建后填入 DSH，或在下方临时输入
+              </p>
+            ) : null
+          })()}
+        </div>
         <div className="border-t border-line px-3.5 py-3">
           <ProviderFields form={form} patch={patch} />
         </div>
       </div>
     </motion.div>
+  )
+}
+
+/** A pill in the preset strip — same visual language as the wizard's choice
+ *  grid, single-select, with an explicit "自定义" as the escape hatch. */
+function PresetChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'rounded-full px-2.5 py-1 text-sm ring-1 ring-inset transition-all duration-150',
+        active
+          ? 'bg-accent-soft font-medium text-accent-ink ring-accent'
+          : 'bg-surface text-ink-muted ring-line hover:ring-line-strong',
+      )}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -317,7 +474,7 @@ function ModelEditor({
 }: {
   models: ApiModelRef[]
   onChange: (m: ApiModelRef[]) => void
-  fetchCtx?: { api?: string; baseURL: string; apiKeyEnv: string }
+  fetchCtx?: { api?: string; baseURL: string; apiKeyEnv: string; apiKey?: string }
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [listing, setListing] = useState<RemoteModel[] | null>(null)
@@ -351,7 +508,11 @@ function ModelEditor({
 
   const doFetch = async (force = false) => {
     if (!fetchCtx || !isDesktop) return
-    const cacheKey = `${fetchCtx.baseURL.trim()}|${fetchCtx.apiKeyEnv}`
+    // Listings are account-specific, so the cache key carries *which*
+    // credential produced them (temp paste wins over the stored key, and a
+    // bare env resolution is a third identity of its own).
+    const who = tempKey.trim() ? 'temp' : fetchCtx.apiKey?.trim() ? 'saved' : 'env'
+    const cacheKey = `${fetchCtx.baseURL.trim()}|${fetchCtx.apiKeyEnv}|${fetchCtx.api ?? ''}|${who}`
     // A pasted temp key means a different account than whoever filled the
     // cache last: its listings are never reusable from cache.
     const cached = !tempKey.trim() && discoveryCache.get(cacheKey)
@@ -371,7 +532,9 @@ function ModelEditor({
         baseURL: fetchCtx.baseURL,
         api: fetchCtx.api,
         apiKeyEnv: fetchCtx.apiKeyEnv,
-        apiKey: tempKey.trim() || undefined,
+        // The form's just-typed / stored key is tried first; the backend
+        // still falls back to the environment when both are blank.
+        apiKey: tempKey.trim() || fetchCtx.apiKey?.trim() || undefined,
       })
       if (seq !== fetchSeq.current) return
       discoveryCache.set(cacheKey, out)
@@ -686,6 +849,7 @@ function ProviderCard({
       api: form.api || undefined,
       baseURL: form.baseURL.trim() || undefined,
       apiKeyEnv: form.apiKeyEnv.trim() || suggestEnvName(name),
+      apiKey: form.apiKey.trim() || undefined,
       models: form.models.filter((m) => m.id.trim()),
       enabled: form.enabled,
     })
@@ -719,9 +883,17 @@ function ProviderCard({
               {!provider.enabled && <Badge tone="neutral">已停用</Badge>}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
-              <Tooltip allowOverflow content={`密钥由环境变量 ${provider.apiKeyEnv}（或 DSH 凭据）提供，PHL 不存储密钥本身`}>
+              <Tooltip
+                allowOverflow
+                content={
+                  provider.apiKey
+                    ? `密钥已存于 PHL 本地配置，启动实例时注入为环境变量 ${provider.apiKeyEnv}；系统/实例环境已有同名值时以其为准`
+                    : `DSH 从环境变量 ${provider.apiKeyEnv} 读取密钥（或由 DSH 凭据提供）；可在编辑中直接填入密钥`
+                }
+              >
                 <span className="font-mono">{provider.apiKeyEnv}</span>
               </Tooltip>
+              {provider.apiKey && <Badge tone="ok">本机密钥</Badge>}
               <span className="text-ink-faint/50">·</span>
               <span>{provider.baseURL || '默认端点'}</span>
               <span className="text-ink-faint/50">·</span>
@@ -838,7 +1010,7 @@ export function ApiConfigPanel() {
       <div className="mt-auto p-3">
         <div className="flex items-start gap-2 rounded-lg bg-surface-sunken p-3 text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
           <KeyRound size={13} className="mt-[2px] shrink-0" />
-          <span>PHL 只保存供应商地址与模型清单；API 密钥留在 DSH 或系统环境变量中，不出现在 PHL 的存储里。</span>
+          <span>密钥可填入 PHL（保存在本机配置目录，启动实例时注入，不写入实例目录），也可只填环境变量名、由系统环境或 DSH 凭据提供。</span>
         </div>
       </div>
     </PanelShell>
@@ -952,7 +1124,7 @@ function InstanceBindingRow({
         </span>
       </span>
       {snapshot && snapshot.missingKeys.length > 0 && (
-        <Tooltip allowOverflow content={`环境变量未设置：${snapshot.missingKeys.join('、')}。密钥需在该实例的 DSH 中配置一次。`}>
+        <Tooltip allowOverflow content={`以下密钥变量既无系统环境值、供应商也未在 PHL 内存密钥：${snapshot.missingKeys.join('、')}。请在对应供应商里填入密钥，或配置同名环境变量。`}>
           <Badge tone="warn">密钥待配置</Badge>
         </Tooltip>
       )}
@@ -1171,7 +1343,7 @@ export function ApiConfigPage() {
   return (
     <PageShell
       title="模型与 API"
-      subtitle="在这里配置一次，新建实例开箱即用；存量实例可随时同步或接管。密钥由 DSH 管理，PHL 只引用环境变量名。"
+      subtitle="在这里配置一次，新建实例开箱即用；存量实例可随时同步或接管。密钥可直接填入（存本机、启动时注入），也可引用已有环境变量。"
       actions={
         providerCount > 0 && !adding ? (
           <Button size="sm" variant="primary" disabled={saving} onClick={() => setAdding(true)}>

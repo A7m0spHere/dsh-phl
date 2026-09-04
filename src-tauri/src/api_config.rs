@@ -86,9 +86,21 @@ pub struct Provider {
         skip_serializing_if = "Option::is_none"
     )]
     pub base_url: Option<String>,
-    /// Name of the environment variable DSH reads the key from. Required so a
-    /// library entry can never smuggle a literal secret into `api.json`.
+    /// Name of the environment variable DSH reads the key from — the
+    /// *address* of the secret. Every provider needs one: it is what lands
+    /// in `settings.yaml` as `apiKeyEnv`, and where launch-injection puts a
+    /// locally stored key.
     pub api_key_env: String,
+    /// An optional locally stored key. The product decision followed
+    /// cc-switch here: users paste a real key into the form and the tool
+    /// owns delivering it — at launch we inject it into the DSH child's
+    /// environment as this provider's `apiKeyEnv` (only when neither the
+    /// system nor the instance already defines that variable). settings.yaml
+    /// still carries just the variable name, so no instance directory ever
+    /// holds the secret; the local `api.json` does, in plaintext, exactly
+    /// like cc-switch's SQLite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelRef>,
     #[serde(default = "default_true")]
@@ -499,6 +511,9 @@ async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String> {
             // conventional variable name the user can point at later.
             api_key_env: get_str("apiKeyEnv")
                 .unwrap_or_else(|| format!("DSH_{}_API_KEY", name.to_uppercase().replace(['-', '.'], "_"))),
+            // A live settings.yaml never contains the key itself (DSH keeps
+            // it in credentials/env), so an import can only produce a name.
+            api_key: None,
             models,
             enabled: true,
         });
@@ -697,6 +712,45 @@ async fn instance_env(root: &Path, instance_id: &str) -> HashMap<String, String>
     serde_json::from_str::<EnvProbe>(&raw).map(|p| p.env).unwrap_or_default()
 }
 
+/// The provider ids a binding pulls from the library. Selection lives here
+/// so the snapshot's missing-key check and launch-time key injection cannot
+/// drift from what `resolve_sections` actually writes.
+pub(crate) fn bound_provider_ids(config: &ApiConfig, binding: &ApiBinding) -> Vec<String> {
+    match binding.inheritance.as_str() {
+        "default" => config
+            .providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.id.clone())
+            .collect(),
+        "custom" => binding.provider_ids.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// `(envVarName, key)` pairs the launcher should inject for this binding:
+/// bound providers with a locally stored, non-blank key. The launcher still
+/// checks the inherited environment itself — a real system/instance variable
+/// always beats the stored copy.
+pub(crate) fn provider_launch_keys(
+    config: &ApiConfig,
+    binding: &ApiBinding,
+) -> Vec<(String, String)> {
+    let ids = bound_provider_ids(config, binding);
+    config
+        .providers
+        .iter()
+        .filter(|p| ids.iter().any(|id| id == &p.id))
+        .filter_map(|p| {
+            let key = p.api_key.as_deref()?.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((p.api_key_env.clone(), key.to_string()))
+        })
+        .collect()
+}
+
 /* ---------------------------- live snapshot ----------------------------- */
 
 /// Everything the frontend needs to render one instance's *actual* API state
@@ -787,20 +841,14 @@ async fn snapshot_inner(
 
     let mut missing_keys: Vec<String> = Vec::new();
     if managed {
-        // Env presence is a property of the binding, not of sync history.
+        // A key is "present" when the library stores one for this provider
+        // (launch injects it) or the environment already defines the
+        // referenced variable — instance env counts too.
         let env_extra = instance_env(root, instance_id).await;
-        let ids: Vec<String> = match binding.inheritance.as_str() {
-            "default" => config
-                .providers
-                .iter()
-                .filter(|p| p.enabled)
-                .map(|p| p.id.clone())
-                .collect(),
-            _ => binding.provider_ids.clone(),
-        };
-        for id in ids {
+        for id in bound_provider_ids(config, binding) {
             let Some(p) = config.providers.iter().find(|p| p.id == id) else { continue };
-            if std::env::var(&p.api_key_env).is_err() && !env_extra.contains_key(&p.api_key_env) {
+            let stored = p.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false);
+            if !stored && std::env::var(&p.api_key_env).is_err() && !env_extra.contains_key(&p.api_key_env) {
                 missing_keys.push(p.api_key_env.clone());
             }
         }
@@ -896,6 +944,7 @@ mod tests {
             api: Some("openai-completions".into()),
             base_url: Some(format!("https://{name}.example/v1")),
             api_key_env: env.into(),
+            api_key: None,
             models: vec![ModelRef {
                 id: format!("{name}-model"),
                 name: None,
@@ -1277,6 +1326,55 @@ mod tests {
         };
         assert!(sync_inner(&dir, &b, &config()).await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launch_keys_follow_the_binding_and_blankness() {
+        let mut c = config();
+        // deepseek has a stored key (with incidental whitespace), zen a blank one.
+        c.providers.iter_mut().for_each(|p| {
+            p.api_key = Some(match p.id.as_str() {
+                "p-deepseek" => "  sk-live  ".into(),
+                _ => "   ".into(),
+            })
+        });
+        let keys = provider_launch_keys(&c, &ApiBinding::default());
+        assert_eq!(keys, vec![("DEEPSEEK_API_KEY".to_string(), "sk-live".to_string())],
+            "blank stored keys are no keys; names are trimmed of the value only");
+
+        // custom binding only pulls what it selects.
+        let custom = ApiBinding {
+            inheritance: "custom".into(),
+            provider_ids: vec!["p-zen".into()],
+            ..Default::default()
+        };
+        assert!(provider_launch_keys(&c, &custom).is_empty());
+
+        // unmanaged bindings expose nothing to inject.
+        let none = ApiBinding { inheritance: "none".into(), ..Default::default() };
+        assert!(provider_launch_keys(&c, &none).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stored_key_satisfies_missing_env() {
+        let (root, dir) = temp_root_with_instance("stored-key");
+        let mut c = config();
+        // Unique names so the test machine's environment cannot collide.
+        c.providers.iter_mut().for_each(|p| {
+            p.api_key_env = format!("PHL_TEST_UNSET_{}", p.name.to_uppercase());
+        });
+        c.providers[0].api_key = Some("sk-present".into());
+        std::fs::create_dir_all(api_config_path(&root).parent().unwrap()).unwrap();
+        std::fs::write(api_config_path(&root), serde_json::to_string(&c).unwrap()).unwrap();
+        let b = ApiBinding::default();
+        let applied = sync_inner(&dir, &b, &c).await.unwrap();
+        let snap = snapshot_inner(&root, "stored-key", &applied, &c).await.unwrap();
+        assert_eq!(
+            snap.missing_keys,
+            vec![format!("PHL_TEST_UNSET_{}", c.providers[1].name.to_uppercase())],
+            "the provider with a stored key must not read as missing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
