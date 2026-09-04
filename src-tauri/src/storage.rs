@@ -12,13 +12,13 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::instances::{copy_tree, dir_size, SkipRule};
+use crate::instances::{copy_tree_with_progress, dir_size, SkipRule};
 use crate::versions::Transfers;
 
 /// Every subdirectory of the root that carries PHL data, in migration order.
 /// `cache` is disposable but still moved, so the freed space actually arrives
 /// on the new drive instead of re-accumulating on the old one.
-const DATA_DIRS: [&str; 4] = ["instances", "versions", "runtimes", "cache"];
+const DATA_DIRS: [&str; 5] = ["instances", "versions", "runtimes", "config", "cache"];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +33,7 @@ pub struct RootDataSummary {
     pub instances: DirSummary,
     pub versions: DirSummary,
     pub runtimes: DirSummary,
+    pub config: DirSummary,
     pub cache: DirSummary,
     pub has_data: bool,
 }
@@ -52,6 +53,7 @@ pub fn root_data_summary(root: String) -> RootDataSummary {
         instances: dir("instances"),
         versions: dir("versions"),
         runtimes: dir("runtimes"),
+        config: dir("config"),
         cache: dir("cache"),
         has_data: false,
     };
@@ -59,6 +61,7 @@ pub fn root_data_summary(root: String) -> RootDataSummary {
         has_data: summary.instances.entries > 0
             || summary.versions.entries > 0
             || summary.runtimes.entries > 0
+            || summary.config.entries > 0
             || summary.cache.entries > 0,
         ..summary
     }
@@ -139,6 +142,29 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         .await
         .map_err(|e| format!("无法创建目标目录: {e}"))?;
 
+    // Resolve aliases, `..`, drive-letter casing and directory junctions before
+    // checking ancestry. Lexical prefixes alone do not identify real paths.
+    let from = std::fs::canonicalize(from).map_err(|e| e.to_string())?;
+    let to = std::fs::canonicalize(to).map_err(|e| e.to_string())?;
+    if from.starts_with(&to) || to.starts_with(&from) {
+        return Err("新旧目录不能互为父子".into());
+    }
+    // Check every destination before moving the first directory. A conflict
+    // in config/ must not strand instances/ in the other root.
+    for kind in DATA_DIRS {
+        if !from.join(kind).exists() {
+            continue;
+        }
+        let dst = to.join(kind);
+        if dst.exists() {
+            let mut entries = std::fs::read_dir(&dst)
+                .map_err(|e| format!("无法检查目标目录 {}: {e}", dst.display()))?;
+            if entries.next().transpose().map_err(|e| e.to_string())?.is_some() {
+                return Err(format!("目标已存在非空目录 {} —— 请改用一个空目录", dst.display()));
+            }
+        }
+    }
+
     let mut moved: Vec<String> = Vec::new();
     let mut bytes_moved = 0u64;
 
@@ -181,7 +207,7 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         if tokio::fs::rename(&src, &dst).await.is_ok() {
             moved.push(kind.into());
             bytes_moved += bytes;
-            let _ = on_progress(MoveProgress {
+            on_progress(MoveProgress {
                 kind: kind.into(),
                 progress: 1.0,
                 bytes_done: bytes,
@@ -190,39 +216,13 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             continue;
         }
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
-        let worker_flag = Arc::clone(flag);
-        let src2 = src.clone();
-        let dst2 = dst.clone();
-        let worker = std::thread::spawn(move || {
-            let mut done = 0u64;
-            let result =
-                copy_tree(&src2, &dst2, &worker_flag, &mut done, bytes, &tx, SkipRule::Nothing);
-            let _ = tx.blocking_send(result.map(|()| (bytes, bytes)));
-        });
-
-        let mut copy_result = Ok(());
-        while let Some(message) = rx.recv().await {
-            match message {
-                Ok((done, total)) => {
-                    let _ = on_progress(MoveProgress {
-                        kind: kind.into(),
-                        progress: if total > 0 {
-                            (done as f64 / total as f64).min(1.0)
-                        } else {
-                            1.0
-                        },
-                        bytes_done: done,
-                        bytes_total: total,
-                    });
-                }
-                Err(e) => {
-                    copy_result = Err(e);
-                    break;
-                }
-            }
-        }
-        let _ = worker.join();
+        let copy_result = copy_tree_with_progress(
+            src.clone(), dst.clone(), Arc::clone(flag), SkipRule::Nothing,
+            &|p| on_progress(MoveProgress {
+                kind: kind.into(), progress: p.progress,
+                bytes_done: p.bytes_done, bytes_total: p.bytes_total,
+            }),
+        ).await;
         // The cancel check must precede the error check: copy_tree reports
         // cancellation as an Err("cancelled"), but a cancelled migration is a
         // normal outcome, not a failure.
@@ -236,7 +236,13 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
                 cancelled: true,
             });
         }
-        copy_result?;
+        if let Err(error) = copy_result {
+            // Keep the source intact and allow the user to retry the copy.
+            tokio::fs::remove_dir_all(&dst)
+                .await
+                .map_err(|e| format!("{error}；清理未完成的目标目录失败: {e}"))?;
+            return Err(error);
+        }
         tokio::fs::remove_dir_all(&src)
             .await
             .map_err(|e| format!("内容已复制到新目录，但删除源目录失败（可稍后手动删除）: {e}"))?;
@@ -249,4 +255,82 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         bytes: bytes_moved,
         cancelled: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestRoot(PathBuf);
+    impl TestRoot {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "phl-storage-{}-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TestRoot {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[tokio::test]
+    async fn config_only_root_is_detected_and_migrated() {
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        std::fs::create_dir_all(from.join("config")).unwrap();
+        std::fs::write(from.join("config/api.json"), b"test-config").unwrap();
+        let summary = root_data_summary(from.to_string_lossy().into_owned());
+        assert!(summary.has_data);
+        assert_eq!(summary.config.entries, 1);
+        let result = move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.unwrap();
+        assert_eq!(result.moved, vec!["config"]);
+        assert_eq!(std::fs::read(to.join("config/api.json")).unwrap(), b"test-config");
+        assert!(!from.join("config").exists());
+    }
+
+    #[tokio::test]
+    async fn late_destination_conflict_leaves_all_sources_untouched() {
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        for kind in ["instances", "config"] {
+            std::fs::create_dir_all(from.join(kind)).unwrap();
+            std::fs::write(from.join(kind).join("data"), b"original").unwrap();
+        }
+        std::fs::create_dir_all(to.join("config")).unwrap();
+        std::fs::write(to.join("config/api.json"), b"existing").unwrap();
+        assert!(move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.is_err());
+        assert!(from.join("instances/data").exists());
+        assert!(from.join("config/data").exists());
+        assert!(!to.join("instances").exists());
+        assert_eq!(std::fs::read(to.join("config/api.json")).unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn dotdot_alias_cannot_move_a_root_into_itself() {
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        std::fs::create_dir_all(from.join("instances")).unwrap();
+        std::fs::create_dir_all(root.0.join("alias")).unwrap();
+        let to = root.0.join("alias/../old/nested");
+        assert!(move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.is_err());
+        assert!(from.join("instances").exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_moving_preserves_config() {
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        std::fs::create_dir_all(from.join("config")).unwrap();
+        let result = move_root_inner(&Arc::new(AtomicBool::new(true)), &from, &root.0.join("new"), &|_| {}).await.unwrap();
+        assert!(result.cancelled);
+        assert!(result.moved.is_empty());
+        assert!(from.join("config").exists());
+    }
 }

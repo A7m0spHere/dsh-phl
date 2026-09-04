@@ -1022,7 +1022,7 @@ async fn run_install(
             .send(ProgressEvent::Verifying)
             .map_err(|e| e.to_string())?;
         let node = pick_npm_capable_node(root).unwrap_or_else(|| PathBuf::from("node"));
-        if let Err(e) = install_version_deps(&node, &dest, &registry_base, flag, |_| {}).await {
+        if let Err(e) = install_version_deps(&node, &dest, registry_base, flag, |_| {}).await {
             let _ = tokio::fs::remove_dir_all(&dest).await;
             return Err(if e == "cancelled" {
                 e

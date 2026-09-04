@@ -3,6 +3,8 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import { PHL_ROOT } from '@/data/instances'
 import { chooseDirectory, defaultRoot, isDesktop, rootDataSummary } from '@/lib/desktop'
 import { useUIStore } from './uiStore'
+import { normalizeRoot } from '@/lib/paths'
+export { normalizeRoot } from '@/lib/paths'
 
 /**
  * Preferences that belong to PHL Core rather than to the UI shell. They are
@@ -80,9 +82,6 @@ const defaults = {
   developerMode: false,
   isolateNodeModules: true,
 }
-
-/** Trim trailing separators so joined paths never double up. */
-export const normalizeRoot = (raw: string) => raw.trim().replace(/[\\/]+$/, '')
 
 export const useSettingsStore = create<SettingsState>()(
   persist(

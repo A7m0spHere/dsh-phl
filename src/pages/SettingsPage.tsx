@@ -34,6 +34,7 @@ import {
   ACCENTS,
   normalizeRoot,
   useCatalogStore,
+  useApiConfigStore,
   useInstanceStore,
   useIsDark,
   useSettingsStore,
@@ -294,6 +295,7 @@ export function SettingsPage() {
     await Promise.all([
       useInstanceStore.getState().reload(),
       useCatalogStore.getState().load(),
+      useApiConfigStore.getState().load(),
     ]).catch((err) => {
       ui.toast({
         kind: 'error',
@@ -381,11 +383,14 @@ export function SettingsPage() {
     const next = normalizeRoot(rootDraft)
     if (!next || next === settings.root) return
     const live = useInstanceStore.getState()
-    if (live.runningCount() > 0 || useCatalogStore.getState().activeTransfers() > 0) {
+    if (Object.values(live.states).some((s) => ['running', 'starting', 'stopping'].includes(s.status))
+      || live.hasPendingWrites() || live.createProgress || Object.keys(live.snapshotTransfers).length
+      || useApiConfigStore.getState().saving || useApiConfigStore.getState().syncing
+      || useCatalogStore.getState().activeTransfers() > 0) {
       ui.toast({
         kind: 'warn',
         title: '暂时无法更改数据目录',
-        message: '请先停止所有实例，并等待进行中的下载完成。',
+        message: '请先停止所有实例，并等待下载、快照和配置保存完成。',
       })
       return
     }
@@ -403,6 +408,7 @@ export function SettingsPage() {
         summary.instances.entries && `${summary.instances.entries} 个实例`,
         summary.versions.entries && `${summary.versions.entries} 个版本`,
         summary.runtimes.entries && `${summary.runtimes.entries} 个 Runtime`,
+        summary.config.entries && 'API 配置库',
       ].filter(Boolean)
       const move = await ui.confirm({
         title: '立即迁移现有数据？',

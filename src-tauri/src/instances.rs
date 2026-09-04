@@ -606,37 +606,9 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     // staging name so a cancelled copy cannot look like a real snapshot.
     let dest = staging.join("dsh-home");
     tokio::fs::create_dir_all(&dest).await.map_err(|e| e.to_string())?;
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
-    let from = dsh_home.clone();
-    let to = dest.clone();
-    let worker_flag = Arc::clone(flag);
-    let worker = std::thread::spawn(move || {
-        let total = dir_size_skipping(&from);
-        let mut done = 0u64;
-        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx, SkipRule::RunStateAtRoot);
-        let _ = tx.blocking_send(result.map(|()| (total, total)));
-    });
-
-    let mut copy_result = Ok(());
-    let mut bytes_total = 0u64;
-    while let Some(message) = rx.recv().await {
-        match message {
-            Ok((bytes_done, total)) => {
-                bytes_total = total;
-                let progress = if total > 0 {
-                    (bytes_done as f64 / total as f64).min(1.0)
-                } else {
-                    1.0
-                };
-                on_progress(CloneProgress { progress, bytes_done, bytes_total: total });
-            }
-            Err(e) => {
-                copy_result = Err(e);
-                break;
-            }
-        }
-    }
-    let _ = worker.join();
+    let copy_result = copy_tree_with_progress(
+        dsh_home.clone(), dest, Arc::clone(flag), SkipRule::RunStateAtRoot, on_progress,
+    ).await;
     // Cancellation is reported by `copy_tree` as Err("cancelled"), so the
     // cancel branch has to come *first*: propagating the error before it left
     // the staging tree — a full copy of dsh-home, potentially gigabytes —
@@ -646,10 +618,13 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err("cancelled".into());
     }
-    if let Err(e) = copy_result {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(e);
-    }
+    let bytes_total = match copy_result {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(e);
+        }
+    };
 
     let snapshot = SnapshotFile {
         id: snap_id,
@@ -965,42 +940,10 @@ async fn run_clone(
     let staging = instances_root(root).join(format!(".phl-new-{id}"));
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
-    let from = source.clone();
-    let to = staging.clone();
-    let worker_flag = Arc::clone(flag);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
-    std::thread::spawn(move || {
-        let total = dir_size_skipping(&from);
-        let mut done = 0u64;
-        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx, SkipRule::RunStateAtRoot);
-        let _ = tx.blocking_send(result.map(|()| (total, total)));
-    });
-
-    let mut copy_result = Ok(());
-    while let Some(message) = rx.recv().await {
-        match message {
-            Ok((bytes_done, bytes_total)) => {
-                let progress = if bytes_total > 0 {
-                    (bytes_done as f64 / bytes_total as f64).min(1.0)
-                } else {
-                    1.0
-                };
-                let _ = on_progress.send(CloneProgress {
-                    progress,
-                    bytes_done,
-                    bytes_total,
-                });
-            }
-            Err(e) => {
-                copy_result = Err(e);
-                break;
-            }
-        }
-        if flag.load(Ordering::SeqCst) {
-            copy_result = Err("cancelled".into());
-            break;
-        }
-    }
+    let copy_result = copy_tree_with_progress(
+        source.clone(), staging.clone(), Arc::clone(flag), SkipRule::RunStateAtRoot,
+        &|progress| { let _ = on_progress.send(progress); },
+    ).await;
 
     if let Err(e) = copy_result {
         let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -1098,6 +1041,39 @@ pub(crate) fn dir_size_skipping(dir: &Path) -> u64 {
     total
 }
 
+/// Shared by cloning, snapshots and cross-drive relocation. Completion comes
+/// from the worker result, never from a closed progress channel. Awaiting the
+/// worker also ensures cancellation cannot race staging-directory cleanup.
+pub(crate) async fn copy_tree_with_progress<F: Fn(CloneProgress) + Send + Sync>(
+    from: PathBuf,
+    to: PathBuf,
+    flag: Arc<AtomicBool>,
+    skip: SkipRule,
+    on_progress: &F,
+) -> Result<u64, String> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
+    let worker = tokio::task::spawn_blocking(move || {
+        if flag.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        let total = match skip {
+            SkipRule::Nothing => dir_size(&from),
+            SkipRule::RunStateAtRoot => dir_size_skipping(&from),
+        };
+        let mut done = 0;
+        copy_tree(&from, &to, &flag, &mut done, total, &tx, skip)?;
+        if flag.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        Ok(done)
+    });
+    while let Some(message) = rx.recv().await {
+        let (bytes_done, bytes_total) = message?;
+        on_progress(CloneProgress {
+            progress: if bytes_total == 0 { 1.0 } else { (bytes_done as f64 / bytes_total as f64).min(1.0) },
+            bytes_done,
+            bytes_total,
+        });
+    }
+    worker.await.map_err(|e| format!("复制线程异常退出: {e}"))?
+}
+
 pub(crate) fn copy_tree(
     from: &Path,
     to: &Path,
@@ -1109,21 +1085,27 @@ pub(crate) fn copy_tree(
 ) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取复制源目录失败: {e}"))?;
         if flag.load(Ordering::SeqCst) {
             return Err("cancelled".into());
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if skip.skips(&name) {
+        let name = entry.file_name();
+        if skip.skips(&name.to_string_lossy()) {
             continue;
         }
         let src = entry.path();
         let dst = to.join(&name);
-        let Ok(meta) = entry.metadata() else { continue };
+        let meta = entry.metadata().map_err(|e| format!("读取复制源属性失败 {}: {e}", src.display()))?;
+        // A relocation deletes the source afterwards. Silently skipping a
+        // link (or following it outside the tree) would lose or duplicate data.
+        if meta.file_type().is_symlink() {
+            return Err(format!("复制源包含符号链接，请先处理后重试: {}", src.display()));
+        }
         if meta.is_dir() {
             copy_tree(&src, &dst, flag, done, total, tx, skip.inside())?;
         } else {
-            std::fs::copy(&src, &dst).map_err(|e| format!("复制失败 {name}: {e}"))?;
+            std::fs::copy(&src, &dst).map_err(|e| format!("复制失败 {}: {e}", src.display()))?;
             *done += meta.len();
             // A closed channel means the caller gave up; stop rather than keep
             // writing into a directory it is already deleting.
@@ -1138,6 +1120,38 @@ pub(crate) fn copy_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn async_copy_reports_worker_failure_instead_of_success() {
+        let root = temp_root("async-copy-error");
+        let result = copy_tree_with_progress(
+            root.join("missing"), root.join("target"), Arc::new(AtomicBool::new(false)),
+            SkipRule::Nothing, &|_| {},
+        ).await;
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn async_copy_cancellation_finishes_before_cleanup() {
+        let root = temp_root("async-copy-cancel");
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(&source).unwrap();
+        for i in 0..64 {
+            std::fs::write(source.join(format!("file-{i}")), b"test").unwrap();
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let result = copy_tree_with_progress(
+            source, target.clone(), Arc::clone(&flag), SkipRule::Nothing,
+            &|_| { flag.store(true, Ordering::SeqCst); },
+        ).await;
+        assert_eq!(result.unwrap_err(), "cancelled");
+        // No worker remains to recreate target after this removal.
+        std::fs::remove_dir_all(&target).unwrap();
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("phl-inst-{tag}-{}", std::process::id()));

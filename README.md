@@ -3,7 +3,7 @@
 > **PHL — DSH Instance & Runtime Manager**
 > 一个独立实现的、PCL 风格的 DeepSeek Harness 实例与运行时管理器。
 
-桌面端的四个核心模块已经是**真实实现**（Rust 管线，真实读写磁盘），启动 / 停止进程与端口管理仍是模拟流程。
+桌面端的实例、版本、运行时、插件、API 配置与进程管理已经是**真实实现**（Rust 管线，真实读写磁盘与启停进程）。
 浏览器模式（`npm run dev`）下一切数据来自 Mock Repository，方便纯 UI 开发。
 
 | 模块 | 状态 |
@@ -50,6 +50,9 @@ npm run app:build
 # 只在浏览器里调 UI（窗口控制会提示仅桌面端可用）
 npm run dev
 npm run typecheck
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 打包产物：
@@ -82,7 +85,7 @@ npm run icon
 |---|---|
 | 桌面壳 | Tauri 2 + Rust |
 | UI | React 18 + TypeScript |
-| 构建 | Vite 5 |
+| 构建 | Vite 6 |
 | 样式 | Tailwind CSS 3（CSS 变量驱动的 Design Tokens） |
 | 动效 | Motion (`motion/react`) |
 | 状态 | Zustand |
@@ -117,7 +120,7 @@ scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 同一�
 
 ```text
 UI  →  Repository  →  Tauri / Rust     （桌面端：版本、插件、实例、Runtime）
-UI  →  Repository  →  Mock Data        （浏览器模式；桌面端仍为 mock 的模块）
+UI  →  Repository  →  Mock Data        （浏览器模式；桌面端的静态模板）
 ```
 
 `src/services/index.ts` 是唯一决定数据来源的地方，替换实现时页面与 Store 无需改动。

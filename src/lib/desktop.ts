@@ -121,6 +121,7 @@ export interface RootDataSummary {
   instances: DirSummary
   versions: DirSummary
   runtimes: DirSummary
+  config: DirSummary
   cache: DirSummary
   hasData: boolean
 }
@@ -165,6 +166,7 @@ export async function rootDataSummary(root: string): Promise<RootDataSummary> {
       instances: { exists: true, entries: 3 },
       versions: { exists: true, entries: 2 },
       runtimes: { exists: true, entries: 1 },
+      config: { exists: true, entries: 1 },
       cache: { exists: true, entries: 1 },
       hasData: true,
     }
@@ -184,8 +186,8 @@ export async function moveRootData(
   onProgress: (p: MoveProgress) => void,
 ): Promise<MoveSummary> {
   if (!isDesktop) {
-    const kinds = ['instances', 'versions', 'runtimes', 'cache']
-    const sizes = [4.2e9, 0.9e9, 0.6e9, 0.2e9]
+    const kinds = ['instances', 'versions', 'runtimes', 'config', 'cache']
+    const sizes = [4.2e9, 0.9e9, 0.6e9, 1024, 0.2e9]
     for (let i = 0; i < kinds.length; i++) {
       for (let step = 1; step <= 8; step++) {
         await new Promise((resolve) => setTimeout(resolve, 120))
@@ -558,10 +560,10 @@ export async function cancelLaunch(transferId: string): Promise<void> {
  * dead process.
  */
 export async function onInstanceExited(
-  handler: (event: { instanceId: string; code: number | null }) => void,
+  handler: (event: { instanceId: string; pid: number; code: number | null }) => void,
 ): Promise<Unlisten> {
   if (!isDesktop) return () => {}
-  return currentWindow().listen<{ instanceId: string; code: number | null }>(
+  return currentWindow().listen<{ instanceId: string; pid: number; code: number | null }>(
     'phl://instance-exited',
     (event) => handler(event.payload),
   )
