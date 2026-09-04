@@ -73,10 +73,15 @@ export function newTransferId(prefix: string): string {
 }
 
 export interface TransferProgress {
-  /** 0..1 */
-  progress: number
-  bytesDone: number
-  bytesPerSec: number
+  /**
+   * 0..1, and **optional**: `preparing` and `verifying` are unit variants on
+   * the Rust side and carry no numbers at all. They are typed optional so a
+   * consumer has to decide what to show instead of silently rendering
+   * `undefined` into a progress bar.
+   */
+  progress?: number
+  bytesDone?: number
+  bytesPerSec?: number
   /**
    * `extracting` is the version/runtime pipeline (tar unpack); plugins use
    * `preparing` (resolve tarball) and `installing` (unpack + register) so the

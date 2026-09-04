@@ -236,12 +236,12 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
           if (p.stage === 'downloading') {
             patch({
               kind: 'downloading',
-              progress: p.progress,
-              bytesDone: p.bytesDone,
-              bytesPerSec: p.bytesPerSec,
+              progress: p.progress ?? 0,
+              bytesDone: p.bytesDone ?? 0,
+              bytesPerSec: p.bytesPerSec ?? 0,
             })
           } else if (p.stage === 'extracting') {
-            patch({ kind: 'extracting', progress: p.progress })
+            patch({ kind: 'extracting', progress: p.progress ?? 0 })
           } else {
             patch({ kind: 'verifying' })
           }
@@ -312,12 +312,14 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
           if (p.stage === 'downloading') {
             patch({
               kind: 'downloading',
-              progress: p.progress,
-              bytesDone: p.bytesDone,
-              bytesPerSec: p.bytesPerSec,
+              progress: p.progress ?? 0,
+              bytesDone: p.bytesDone ?? 0,
+              bytesPerSec: p.bytesPerSec ?? 0,
             })
           } else {
-            patch({ kind: 'extracting', progress: p.progress })
+            // `verifying` has no progress field; defaulting keeps the bar from
+            // going NaN between download and extract.
+            patch({ kind: 'extracting', progress: p.progress ?? 0 })
           }
         },
         controller.signal,
@@ -376,11 +378,17 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         plugin,
         instance,
         (p) =>
+          // `preparing` and `verifying` carry no numbers — they are unit
+          // variants on the Rust side — so the fields have to be defaulted
+          // rather than copied. Reading them straight through produced
+          // `undefined`, which rendered as a NaN-width bar and a literal
+          // "NaN%" caption. The mock always supplies numbers, so this was
+          // invisible in `npm run dev`.
           patch({
             stage: p.stage === 'extracting' ? 'installing' : p.stage,
-            progress: p.progress,
-            bytesDone: p.bytesDone,
-            bytesPerSec: p.bytesPerSec,
+            progress: p.progress ?? 0,
+            bytesDone: p.bytesDone ?? 0,
+            bytesPerSec: p.bytesPerSec ?? 0,
           }),
         controller.signal,
       )

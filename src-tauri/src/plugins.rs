@@ -331,10 +331,24 @@ async fn resolve_source(
                 .await
                 .map_err(|e| format!("npm registry 响应解析失败: {e}"))?;
 
-            let version = requested_version
-                .and_then(|v| packument.versions.contains_key(v).then(|| v.to_string()))
-                .or_else(|| packument.dist_tags.get("latest").cloned())
-                .ok_or_else(|| format!("npm 上没有找到 {pkg} 的可用版本"))?;
+            // An explicit version is a pin, not a hint. Falling through to
+            // `latest` when the registry did not have it installed something
+            // the user never chose and then recorded it as if they had —
+            // silently, and most likely on a mirror that had simply not
+            // synced yet.
+            let version = match requested_version {
+                Some(want) => {
+                    if !packument.versions.contains_key(want) {
+                        return Err(format!("npm 上没有找到 {pkg}@{want}（该源可能尚未同步）"));
+                    }
+                    want.to_string()
+                }
+                None => packument
+                    .dist_tags
+                    .get("latest")
+                    .cloned()
+                    .ok_or_else(|| format!("npm 上没有找到 {pkg} 的可用版本"))?,
+            };
             let pv = packument
                 .versions
                 .get(&version)
@@ -389,7 +403,12 @@ fn sanitize_pkg_path(name: &str) -> Result<String, String> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '/' | '.' | '-' | '_'))
-        && !name.split('/').any(|seg| seg == ".." || seg.is_empty());
+        // `.` matters as much as `..`: `node_modules/.` resolves to
+        // `node_modules` itself, so a registry id of "." would have made
+        // uninstall wipe every plugin in the instance.
+        && !name
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty());
     if ok {
         Ok(name.to_string())
     } else {

@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::instances::{copy_tree, dir_size_skipping};
+use crate::instances::{copy_tree, dir_size, SkipRule};
 use crate::versions::Transfers;
 
 /// Every subdirectory of the root that carries PHL data, in migration order.
@@ -171,7 +171,11 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             tokio::fs::remove_dir(&dst).await.map_err(|e| e.to_string())?;
         }
 
-        let bytes = dir_size_skipping(&src);
+        // The full size, and below a copy that skips nothing. Relocating the
+        // data root *replaces* the original — a filter that made sense for
+        // cloning an instance would drop every `snapshots/` and `logs/` here
+        // and the source is deleted right after, destroying them for good.
+        let bytes = dir_size(&src);
         // A same-drive move renames instantly; anything else (across drives)
         // falls back to copy-then-delete below.
         if tokio::fs::rename(&src, &dst).await.is_ok() {
@@ -192,7 +196,8 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         let dst2 = dst.clone();
         let worker = std::thread::spawn(move || {
             let mut done = 0u64;
-            let result = copy_tree(&src2, &dst2, &worker_flag, &mut done, bytes, &tx);
+            let result =
+                copy_tree(&src2, &dst2, &worker_flag, &mut done, bytes, &tx, SkipRule::Nothing);
             let _ = tx.blocking_send(result.map(|()| (bytes, bytes)));
         });
 

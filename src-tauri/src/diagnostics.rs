@@ -246,7 +246,16 @@ async fn instance_refs_check(root: &Path) -> DiagnosticItem {
     };
     let mut dangling: Vec<String> = Vec::new();
     for record in &records {
-        let version_dir = root.join("versions").join(&record.manifest.version_id);
+        // Version ids are `dsh-<semver>` but install directories are named by
+        // the bare version — the same strip the version service and the
+        // launcher both apply. Joining the raw id made every healthy instance
+        // report its version as missing.
+        let version_name = record
+            .manifest
+            .version_id
+            .strip_prefix("dsh-")
+            .unwrap_or(&record.manifest.version_id);
+        let version_dir = root.join("versions").join(version_name);
         if !version_dir.exists() {
             dangling.push(format!(
                 "{}（版本 {} 未安装）",

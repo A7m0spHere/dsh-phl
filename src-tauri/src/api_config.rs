@@ -40,8 +40,15 @@ const AGENT_DEFAULT_MODEL: &str = "agent-default-model";
 
 /* ----------------------------- wire types ----------------------------- */
 
+// None of these carry `deny_unknown_fields`, deliberately. They describe files
+// on disk (`api.json`, and the `api` block inside every `instance.json`), and a
+// strict reader turns any version skew — a key written by a newer PHL, or a
+// field name that does not match on one side — into a hard parse failure that
+// erases the whole object. The `baseUrl`/`baseURL` mismatch did exactly that:
+// it rejected the entire library instead of one field.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelRef {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,7 +60,7 @@ pub struct ModelRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Provider {
     pub id: String,
     pub name: String,
@@ -65,7 +72,19 @@ pub struct Provider {
     /// DSH: the wire protocol (`openai-completions`, …). Absent = DSH default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Spelled `baseURL`, not the `baseUrl` that `rename_all = "camelCase"`
+    /// would produce. That is DSH's own key in `settings.yaml` (see
+    /// `provider_from_yaml`) and what the whole frontend uses — and because
+    /// this struct is `deny_unknown_fields`, the mismatch rejected the *entire*
+    /// `ApiConfig` on every save of a provider that had an endpoint, not just
+    /// this one field. The alias keeps any file already written the old way
+    /// loadable.
+    #[serde(
+        default,
+        rename = "baseURL",
+        alias = "baseUrl",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub base_url: Option<String>,
     /// Name of the environment variable DSH reads the key from. Required so a
     /// library entry can never smuggle a literal secret into `api.json`.
@@ -81,7 +100,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DefaultModel {
     /// The *provider name* as it appears under `llm-pi-ai.providers` — DSH
     /// keys its catalog by name, not by our library id.
@@ -93,7 +112,7 @@ pub struct DefaultModel {
 
 /// The global library, persisted at `<root>/config/api.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiConfig {
     /// Format tag; refuse anything but 1 on load, like the bundle format.
     #[serde(default = "default_version")]
@@ -117,12 +136,18 @@ fn default_version() -> u32 {
 /// "management metadata" maps onto this as (inheritance/providers/defaultModel)
 /// vs (syncedAt/syncedHash).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiBinding {
     /// 'default' = every enabled provider + global defaults; 'custom' = the
     /// listed subset with optional per-instance default model; 'none' = PHL
     /// hands the instance over to the user (sync refuses).
-    #[serde(default)]
+    ///
+    /// A bare `#[serde(default)]` here would use `String::default()` — the
+    /// empty string, *not* the struct's `Default` impl. A manifest whose `api`
+    /// object omitted this key then read as inheritance `""`, which is neither
+    /// "none" (so the instance still counted as managed) nor a known mode (so
+    /// every sync failed with an empty, unexplainable error).
+    #[serde(default = "default_inheritance")]
     pub inheritance: String,
     #[serde(default)]
     pub provider_ids: Vec<String>,
@@ -138,10 +163,14 @@ pub struct ApiBinding {
     pub synced_hash: Option<String>,
 }
 
+fn default_inheritance() -> String {
+    "default".into()
+}
+
 impl Default for ApiBinding {
     fn default() -> Self {
         ApiBinding {
-            inheritance: "default".into(),
+            inheritance: default_inheritance(),
             provider_ids: Vec::new(),
             default_model: None,
             synced_at: None,

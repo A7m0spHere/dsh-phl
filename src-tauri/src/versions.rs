@@ -852,12 +852,16 @@ async fn run_npm_install(
                         // npm logs can grow past the pipe into MBs; the tail
                         // is all the retry loop and the error toast ever need.
                         if err_text.len() > 64 * 1024 {
-                            let cut = err_text.len() - 32 * 1024;
-                            let start = err_text[..cut]
-                                .char_indices()
-                                .next_back()
-                                .map(|(i, _)| i)
-                                .unwrap_or(cut);
+                            // Walk forward to a char boundary instead of
+                            // slicing at the raw offset: `err_text[..cut]`
+                            // panics outright when `cut` lands inside a
+                            // multi-byte character, which any non-ASCII npm
+                            // output (a CN mirror's messages, box drawing)
+                            // makes likely once the tail trim kicks in.
+                            let mut start = err_text.len() - 32 * 1024;
+                            while start < err_text.len() && !err_text.is_char_boundary(start) {
+                                start += 1;
+                            }
                             err_text.replace_range(..start, "");
                         }
                     }
@@ -938,7 +942,12 @@ pub(crate) fn sanitize_version(name: &str) -> Result<String, String> {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+        // `.` is an allowed character, so both of these otherwise pass the
+        // whitelist — and `<root>/versions/..` resolves to the data root,
+        // which `remove_version_dir` would then `remove_dir_all`.
+        && name != "."
+        && name != "..";
     if ok {
         Ok(name.to_string())
     } else {

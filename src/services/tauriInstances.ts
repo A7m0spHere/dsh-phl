@@ -79,7 +79,11 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     favorite: record.favorite,
     env: record.env,
     args: record.args,
-    snapshots: [],
+    // Read back from `<instance>/snapshots/*/snapshot.json`. This used to be
+    // hardcoded to `[]` from when snapshots were not implemented, which meant
+    // every reload dropped them from the UI while the (potentially multi-GB)
+    // trees stayed on disk — unrestorable and undeletable.
+    snapshots: record.snapshots,
     api: record.api ?? null,
   }
 }

@@ -155,9 +155,19 @@ pub async fn launch_instance(
 /// keeps the frontend state honest either way.
 #[tauri::command]
 pub async fn stop_instance(processes: State<'_, Processes>, instance_id: String) -> Result<(), String> {
-    let entry = processes.0.lock().expect("processes lock").remove(&instance_id);
+    // Read, kill, and only then forget. Removing first meant a failed
+    // `taskkill` (elevated child, access denied) left the process alive with
+    // PHL no longer tracking it: its port looked free, the close guard stopped
+    // listing it, and nothing in the UI could stop it any more.
+    let entry = processes
+        .0
+        .lock()
+        .expect("processes lock")
+        .get(&instance_id)
+        .cloned();
     if let Some(entry) = entry {
         kill_tree(entry.pid).await?;
+        processes.0.lock().expect("processes lock").remove(&instance_id);
     }
     Ok(())
 }
@@ -526,6 +536,13 @@ fn allocate_port(processes: &Processes, instance_id: &str, wanted: u16, auto: bo
         if let Some((other, _)) = map.iter().find(|(id, e)| e.port == wanted && id.as_str() != instance_id) {
             return Err(format!("端口 {wanted} 已被实例 {other} 占用"));
         }
+        // The bind test is not optional here either. Checking only PHL's own
+        // map meant a port held by an unrelated program passed: DSH then failed
+        // to bind, but the readiness probe connected to *that* program and the
+        // launch was reported as ready, with 打开 WebUI pointing at a stranger.
+        if !port_free(wanted) {
+            return Err(format!("端口 {wanted} 已被本机其他程序占用"));
+        }
         return Ok(wanted);
     }
     let mut port = wanted;
@@ -534,13 +551,22 @@ fn allocate_port(processes: &Processes, instance_id: &str, wanted: u16, auto: bo
         if !phl_taken && port_free(port) {
             return Ok(port);
         }
-        port = port.wrapping_add(1);
+        // `wrapping_add` walked 65535 → 0, and binding port 0 always succeeds
+        // (it means "give me any ephemeral port"), so `port_free(0)` was true
+        // and DSH got `--port 0` — after which the readiness probe could never
+        // connect and the launch hung for the whole timeout.
+        match port.checked_add(1) {
+            Some(next) => port = next,
+            None => break,
+        }
     }
-    Err(format!("从 {wanted} 起连续 100 个端口都不可用"))
+    Err(format!("从 {wanted} 起找不到可用端口"))
 }
 
 fn port_free(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+    // Port 0 is never a real target: `bind` treats it as "assign an ephemeral
+    // port" and would always report it free.
+    port != 0 && TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 async fn count_plugins(profile_dir: &Path) -> usize {
@@ -597,6 +623,25 @@ pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_zero_is_never_considered_free() {
+        // `bind(0)` means "any ephemeral port" and always succeeds, so without
+        // the explicit guard the allocator could hand DSH `--port 0`.
+        assert!(!port_free(0));
+    }
+
+    #[test]
+    fn auto_allocation_stops_at_the_top_of_the_range() {
+        let processes = Processes::default();
+        // Starting at 65535 there is nowhere to advance to; the old
+        // `wrapping_add` rolled over to 0 and returned it as usable.
+        let picked = allocate_port(&processes, "inst", 65535, true);
+        // Failing to find a port is a fine outcome here; returning 0 is not.
+        if let Ok(port) = picked {
+            assert_ne!(port, 0, "port 0 must never be allocated");
+        }
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("phl-launch-{tag}-{}", std::process::id()));
