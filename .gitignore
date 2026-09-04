@@ -24,3 +24,6 @@ src-tauri/gen/schemas/
 *.sln
 *.sw?
 *.tsbuildinfo
+
+# Local scratch: throwaway scripts & screenshots
+.scratch/

@@ -33,7 +33,7 @@ export interface Hotkey {
   global?: boolean
 }
 
-const isTyping = (target: EventTarget | null) => {
+export const isTyping = (target: EventTarget | null) => {
   const el = target as HTMLElement | null
   if (!el) return false
   return (

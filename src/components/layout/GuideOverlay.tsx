@@ -188,12 +188,15 @@ function StartArt() {
             <b className="font-mono text-ink">Ctrl K</b> 快速跳转
           </span>
           <span>
-            <b className="font-mono text-ink">Ctrl N</b> 新建实例
+            <b className="font-mono text-ink">Ctrl ,</b> 打开设置
           </span>
           <span>
-            <b className="font-mono text-ink">Esc</b> 返回上一页
+            <b className="font-mono text-ink">Esc</b> 关闭弹窗与返回
           </span>
         </div>
+        <p className="mt-1.5 text-sm text-ink-faint">
+          完整清单在「设置 → 快捷键」里，随时可以翻。
+        </p>
       </div>
 
       <div className="rounded-lg bg-warn/[0.08] p-3 text-sm leading-relaxed text-ink-muted ring-1 ring-inset ring-warn/20">
