@@ -257,6 +257,7 @@ async fn run_launch(
     //    (a create that ran without a library, or a deleted file). Anything
     //    that already exists on disk is the instance's truth: local edits are
     //    observed and logged, never rewritten — overwrite is a human click.
+    let mut launch_binding: Option<crate::api_config::ApiBinding> = None;
     if let Some(mut manifest) = crate::instances::read_manifest(&instance_dir).await {
         if let Some(api) = api {
             if manifest.api.as_ref() != Some(&api) {
@@ -278,6 +279,7 @@ async fn run_launch(
                 }
             }
         }
+        launch_binding = manifest.api.clone();
         crate::api_config::note_launch_drift(root, &instance_dir, &manifest).await;
     }
     let _ = on_progress.send(LaunchEvent {
@@ -328,6 +330,23 @@ async fn run_launch(
     for (key, value) in &env {
         if key != "DSH_HOME" {
             command.env(key, value);
+        }
+    }
+    // Launch-time key injection (the cc-switch model): providers bound to
+    // this instance may carry a key stored in PHL's local library. DSH reads
+    // keys via each provider's `apiKeyEnv`, so we materialize the stored key
+    // as that process variable — and only as that: the instance's files
+    // never contain the secret. An explicit instance env or a real system
+    // variable of the same name always wins; the stored copy is the fallback
+    // that makes "paste the key once in PHL" work for every instance.
+    if let Some(binding) = &launch_binding {
+        if let Some(config) = crate::api_config::load_config_file(root).await {
+            for (name, value) in crate::api_config::provider_launch_keys(&config, binding) {
+                if env.contains_key(&name) || std::env::var(&name).is_ok() {
+                    continue;
+                }
+                command.env(name, value);
+            }
         }
     }
     command
