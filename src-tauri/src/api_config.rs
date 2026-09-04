@@ -532,6 +532,154 @@ async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String> {
     }))
 }
 
+/* ---------------------------- model discovery ---------------------------- */
+
+/// One entry of a provider's `/models` listing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModel {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Build the model-list URL from a user-entered base.
+///
+/// The rules are the ones Cherry Studio converged on after discovering that
+/// every gateway spells its base differently: trim trailing slashes, add a
+/// scheme when missing, and append only `models` when the last path segment
+/// is already a version (`/v1`, `/paas/v1`, `/compatible-mode/v1`) — else a
+/// blind `/v1/models` yields `/v1/v1/models` on half the internet.
+fn models_url(base: &str) -> String {
+    let mut s = base.trim().trim_end_matches('/').to_string();
+    if s.is_empty() {
+        return String::new();
+    }
+    if !s.contains("://") {
+        s = format!("https://{s}");
+    }
+    let last = s.rsplit('/').next().unwrap_or("");
+    let versionish = last.len() >= 2
+        && last.as_bytes()[0] == b'v'
+        && last[1..].bytes().all(|b| b.is_ascii_digit());
+    if versionish {
+        format!("{s}/models")
+    } else {
+        format!("{s}/v1/models")
+    }
+}
+
+/// Parse the listing defensively: only `id` is required; third-party servers
+/// ship `data[]` rows with every other field optional or absent. Anthropic's
+/// `display_name` is folded into `name`.
+fn parse_models_body(body: &serde_json::Value) -> Vec<RemoteModel> {
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                    if id.trim().is_empty() {
+                        return None;
+                    }
+                    // display_name first: on Anthropic-style rows `name` is
+                    // the model family, `display_name` is the human label.
+                    let name = m
+                        .get("display_name")
+                        .or_else(|| m.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    Some(RemoteModel { id, name })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pull the human-readable cause out of an error body (nested
+/// `error.message` → `error` string → top-level `message`), then fall back
+/// to the bare status code.
+fn api_error_message(status: u16, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let nested = v.get("error").and_then(|e| match e {
+            // `error.message` (OpenAI shape) or a bare `error` string
+            // (a shape seen from aggregators).
+            serde_json::Value::Object(_) => e.get("message").and_then(|m| m.as_str()),
+            serde_json::Value::String(s) => Some(s.as_str()),
+            _ => None,
+        });
+        let message = nested.or_else(|| v.get("message").and_then(|m| m.as_str()));
+        if let Some(m) = message {
+            return format!("端点返回错误 ({status}): {m}");
+        }
+    }
+    format!("端点返回 HTTP {status}")
+}
+
+/// `ENV_MISSING:` prefixes the env-var-not-set failure so the frontend can
+/// distinguish "ask for a temporary key" from real endpoint errors without
+/// matching prose.
+const ENV_MISSING: &str = "ENV_MISSING:";
+
+/// `GET {base}/models` with the provider's auth headers.
+///
+/// The key is resolved in strict priority order: explicit one-time `api_key`
+/// (used and discarded — this command never writes it anywhere), then the
+/// environment variable the library entry references. PHL as a *desktop*
+/// process rarely sees a variable the user only exported in their terminal
+/// session, which is why the temp-key escape hatch exists at all.
+#[tauri::command]
+pub async fn fetch_provider_models(
+    base_url: String,
+    api: Option<String>,
+    api_key_env: String,
+    api_key: Option<String>,
+) -> Result<Vec<RemoteModel>, String> {
+    let url = models_url(&base_url);
+    if url.is_empty() {
+        return Err("未填写 Base URL，无法获取模型列表".into());
+    }
+    let env_name = api_key_env.trim();
+    // An empty variable name is a UI bug, not a missing key: `std::env::var("")`
+    // fails everywhere, and the resulting "环境变量  未设置" reads like a
+    // formatting accident. Fail with a clear message instead.
+    if env_name.is_empty() {
+        return Err("未填写密钥环境变量名，且未提供临时密钥".into());
+    }
+    let key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            std::env::var(env_name).ok().filter(|v| !v.trim().is_empty())
+        })
+        .ok_or_else(|| format!("{ENV_MISSING}环境变量 {env_name} 未设置，可临时输入一次密钥（不会被保存）"))?;
+
+    let anthropic = api.as_deref() == Some("anthropic");
+    let mut request = crate::versions::http_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10));
+    request = if anthropic {
+        request.header("x-api-key", key).header("anthropic-version", "2023-06-01")
+    } else {
+        request.bearer_auth(key)
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("无法连接端点: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = if status.is_success() {
+        response.json().await.map_err(|e| format!("模型列表解析失败: {e}"))?
+    } else {
+        // Read the (usually JSON) error body *before* synthesizing the
+        // message — the provider's own text is the only useful half.
+        let text = response.text().await.unwrap_or_default();
+        return Err(api_error_message(status.as_u16(), &text));
+    };
+    Ok(parse_models_body(&body))
+}
+
 async fn instance_env(root: &Path, instance_id: &str) -> HashMap<String, String> {
     let dir = match crate::instances::instance_dir(root, instance_id) {
         Ok(d) => d,
@@ -1129,5 +1277,145 @@ mod tests {
         };
         assert!(sync_inner(&dir, &b, &config()).await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn models_url_shapes() {
+        assert_eq!(models_url("https://api.openai.com/v1"), "https://api.openai.com/v1/models");
+        assert_eq!(models_url("https://api.openai.com/v1/"), "https://api.openai.com/v1/models");
+        // trailing version segment: never double up /v1/v1
+        assert_eq!(
+            models_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/models"
+        );
+        assert_eq!(models_url("https://g.example/paas/v2"), "https://g.example/paas/v2/models");
+        // bare host / missing scheme
+        assert_eq!(models_url("api.deepseek.com"), "https://api.deepseek.com/v1/models");
+        // host with non-version path: treat as full base, append /v1/models —
+        // a gateway that serves the API off a subpath is the user's problem,
+        // the documented base always carries the version or is the root.
+        assert_eq!(models_url("https://x.example/api"), "https://x.example/api/v1/models");
+        assert_eq!(models_url("  "), "");
+    }
+
+    #[test]
+    fn parse_models_is_defensive_about_fields() {
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-a", "object": "model", "created": 1, "owned_by": "o" },
+                { "id": "with-name", "name": "With Name" },
+                { "id": "anthropic-style", "display_name": "Claude Opus" },
+                { "id": "both-fields", "name": "family", "display_name": "Human Label" },
+                { "name": "no-id-dropped" },
+                { "id": "  " },
+                { "id": "extra", "unknown_field": { "nested": true } }
+            ]
+        });
+        let out = parse_models_body(&body);
+        let ids: Vec<&str> = out.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-a", "with-name", "anthropic-style", "both-fields", "extra"]);
+        assert_eq!(out[2].name.as_deref(), Some("Claude Opus"));
+        assert_eq!(out[3].name.as_deref(), Some("Human Label"), "display_name wins over name");
+        assert_eq!(out[0].name, None);
+        // total garbage → empty, not an error
+        assert!(parse_models_body(&serde_json::json!({ "models": [] })).is_empty());
+    }
+
+    #[test]
+    fn api_error_prefers_provider_message() {
+        let openai = r#"{"error":{"message":"Incorrect API key","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            api_error_message(401, openai),
+            "端点返回错误 (401): Incorrect API key"
+        );
+        let plain = "Unauthorized";
+        assert_eq!(api_error_message(401, plain), "端点返回 HTTP 401");
+        let err_string = r#"{"error":"quota exceeded"}"#;
+        assert!(api_error_message(429, err_string).contains("quota exceeded"));
+    }
+
+    #[tokio::test]
+    async fn missing_env_key_short_circuits_with_prefix() {
+        // No network is reached: the key question must fail fast, and the
+        // ENV_MISSING marker is what the UI keys its temp-key input on.
+        let e = fetch_provider_models(
+            "https://example.invalid/v1".into(),
+            None,
+            "PHL_TEST_DEFINITELY_UNSET_KEY".into(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.starts_with(ENV_MISSING), "unexpected error shape: {e}");
+    }
+
+    #[tokio::test]
+    async fn empty_base_url_rejected() {
+        assert!(fetch_provider_models("".into(), None, "X".into(), Some("k".into()))
+            .await
+            .is_err());
+    }
+
+    /// End-to-end against a throwaway local server: exercises the real
+    /// reqwest path — URL joining, the Bearer header, and the tolerant parse
+    /// — without depending on the public internet.
+    #[tokio::test]
+    async fn fetch_models_against_local_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            assert!(req.contains("get /v1/models"), "request line wrong:\n{req}");
+            assert!(req.contains("bearer test-key"), "auth header wrong:\n{req}");
+            let body = r#"{"object":"list","data":[{"id":"m1","created":1},{"id":"m2","display_name":"Two","unknown":true}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let out = fetch_provider_models(
+            format!("http://{addr}"),
+            None,
+            "IRRELEVANT_WHEN_TEMP_KEY_GIVEN".into(),
+            Some("test-key".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["m1", "m2"]
+        );
+        assert_eq!(out[1].name.as_deref(), Some("Two"));
+        server.await.unwrap();
+    }
+
+    /// Real-network probe against a public OpenAI-compatible endpoint that
+    /// lists models without auth when possible. Run manually:
+    /// `cargo test -- --ignored provider_models_probe`
+    #[tokio::test]
+    #[ignore]
+    async fn provider_models_probe() {
+        // DeepSeek's endpoint accepts any well-formed key for /models on some
+        // deployments; if it 401s, the error text itself is the probe output.
+        match fetch_provider_models(
+            "https://api.deepseek.com".into(),
+            None,
+            "DEEPSEEK_API_KEY".into(),
+            None,
+        )
+        .await
+        {
+            Ok(models) => {
+                println!("models: {} → {:?}", models.len(), models.iter().map(|m| &m.id).collect::<Vec<_>>());
+            }
+            Err(e) => println!("probe reported: {e}"),
+        }
     }
 }

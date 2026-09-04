@@ -34,24 +34,29 @@ const STATE_TONE: Record<ProviderState, 'ok' | 'warn' | 'accent' | 'neutral'> = 
 /** Compact provider pill with its live-vs-library state. */
 function ProviderPill({ view }: { view: ProviderLiveView }) {
   const tone = STATE_TONE[view.state]
+  const hint =
+    view.state === 'modified'
+      ? `实例内已修改：${view.diff.join('、')}。同步会按全局库覆盖。`
+      : view.state === 'missing'
+        ? '该供应商已被实例自行移除。同步会写回。'
+        : view.state === 'local-only'
+          ? '实例内自建的供应商，不在全局库中。可通过「采纳」加入全局库。'
+          : view.state === 'unbound'
+            ? '存在于全局库，但此实例当前未绑定。'
+            : null
+  const badge = (
+    <Badge tone={view.state === 'matched' ? undefined : tone}>
+      {view.provider.name}
+      {view.state !== 'matched' && ` · ${STATE_LABEL[view.state]}`}
+    </Badge>
+  )
+  // Only hintable states get the wrapper — an undefined-content Tooltip
+  // would paint an empty bubble on hover. Pills live inside overflow-hidden
+  // cards, so the wide hints go through the viewport portal.
+  if (!hint) return badge
   return (
-    <Tooltip
-      content={
-        view.state === 'modified'
-          ? `实例内已修改：${view.diff.join('、')}。同步会按全局库覆盖。`
-          : view.state === 'missing'
-            ? '该供应商已被实例自行移除。同步会写回。'
-            : view.state === 'local-only'
-              ? '实例内自建的供应商，不在全局库中。可通过「采纳」加入全局库。'
-              : view.state === 'unbound'
-                ? '存在于全局库，但此实例当前未绑定。'
-                : undefined
-      }
-    >
-      <Badge tone={view.state === 'matched' ? undefined : tone}>
-        {view.provider.name}
-        {view.state !== 'matched' && ` · ${STATE_LABEL[view.state]}`}
-      </Badge>
+    <Tooltip content={hint} allowOverflow>
+      {badge}
     </Tooltip>
   )
 }
@@ -259,12 +264,12 @@ export function ApiBindingCard({ instance }: { instance: Instance }) {
                 </Button>
               )}
               {snapshot && snapshot.missingKeys.length > 0 && (
-                <Tooltip content={`环境变量未设置：${snapshot.missingKeys.join('、')}`}>
+                <Tooltip allowOverflow content={`环境变量未设置：${snapshot.missingKeys.join('、')}`}>
                   <Badge tone="warn">密钥待配置</Badge>
                 </Tooltip>
               )}
               {localChanges && (
-                <Tooltip content="实例内改动会被保留，直到你点同步——PHL 不再自动重写。">
+                <Tooltip allowOverflow content="实例内改动会被保留，直到你点同步——PHL 不再自动重写。">
                   <Badge tone="warn">
                     <Unplug size={10} />
                     本地改动

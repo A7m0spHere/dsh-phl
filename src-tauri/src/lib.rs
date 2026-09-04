@@ -154,6 +154,7 @@ pub fn run() {
             api_config::sync_instance_api,
             api_config::import_instance_api,
             api_config::instance_live_snapshot,
+            api_config::fetch_provider_models,
             storage::free_space,
             storage::root_data_summary,
             storage::move_root_data,
