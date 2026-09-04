@@ -162,6 +162,7 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               {version.channel === 'alpha' && <Badge tone="warn">Alpha</Badge>}
               {version.legacy && <Badge tone="neutral">Legacy</Badge>}
               {installed && <Badge tone="ok">已安装</Badge>}
+              {version.pendingPublish && <Badge tone="neutral">待发布</Badge>}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
               {[
@@ -205,6 +206,15 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                 <Trash2 size={12} />
                 删除
               </Button>
+            ) : version.pendingPublish ? (
+              <Tooltip
+                allowOverflow
+                content="GitHub 已发布该版本，但安装包还没在 npm 上架；上架后点右上角「同步更新」即可安装"
+              >
+                <Button size="sm" variant="secondary" disabled>
+                  等待发布
+                </Button>
+              </Tooltip>
             ) : state.kind === 'failed' ? (
               <Button size="sm" variant="secondary" onClick={() => void install(version.id)}>
                 <RotateCcw size={12} />

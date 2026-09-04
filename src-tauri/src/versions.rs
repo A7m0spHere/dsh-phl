@@ -48,6 +48,10 @@ pub struct DshVersionMeta {
     pub notes: Vec<String>,
     pub latest: bool,
     pub legacy: bool,
+    /// GitHub has cut the release but the npm package is not published yet —
+    /// surfaced so the list tracks GitHub's progress instead of looking
+    /// frozen while the upstream publish lags. No install source.
+    pub pending_publish: bool,
     pub source: Option<VersionSourceMeta>,
 }
 
@@ -145,6 +149,8 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
             HashMap::new()
         });
 
+    let npm_names: std::collections::HashSet<String> =
+        npm.iter().map(|(ver, _)| ver.clone()).collect();
     let mut out: Vec<DshVersionMeta> = npm
         .into_iter()
         .map(|(ver, entry)| {
@@ -170,6 +176,7 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
                 notes,
                 latest: entry.latest,
                 legacy,
+                pending_publish: false,
                 source: Some(VersionSourceMeta {
                     tarball: entry.tarball,
                     integrity: entry.integrity,
@@ -177,6 +184,36 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
             }
         })
         .collect();
+
+    // GitHub releases the team has cut but not published to npm yet. They
+    // join the list as read-only rows so "GitHub is ahead" is visible; the
+    // legacy/latest flags deliberately stay false — *installable* progress
+    // is still what those badges mean.
+    for (ver, rel) in github.iter().filter(|(ver, _)| !npm_names.contains(*ver)) {
+        let Some(sem) = parse_semver(ver) else { continue };
+        // The 0.1.2-rc.1 line was published 15 minutes after each GitHub tag
+        // historically; a day-old absence is an upstream decision, so say
+        // *when* it was cut rather than implying it is imminent.
+        let channel = match sem.pre.as_str() {
+            "" => "stable",
+            p if p.starts_with("rc") => "rc",
+            _ => "alpha",
+        }
+        .to_string();
+        out.push(DshVersionMeta {
+            id: format!("dsh-{ver}"),
+            name: ver.clone(),
+            channel,
+            released_at: rel.published_at.clone(),
+            size: 0,
+            requires_node: Vec::new(),
+            notes: rel.notes.clone(),
+            latest: false,
+            legacy: false,
+            pending_publish: true,
+            source: None,
+        });
+    }
 
     out.sort_by(|a, b| {
         parse_semver(&b.name).unwrap_or_else(|| semver::Version::new(0, 0, 0)).cmp(
@@ -1513,7 +1550,7 @@ mod net_tests {
             Ok(list) => {
                 println!("catalog OK: {} versions", list.len());
                 for v in list.iter().take(4) {
-                    println!("  {} channel={} size={} latest={} notes={}", v.name, v.channel, v.size, v.latest, v.notes.len());
+                    println!("  {} channel={} size={} latest={} pending={} notes={}", v.name, v.channel, v.size, v.latest, v.pending_publish, v.notes.len());
                 }
                 assert!(!list.is_empty());
             }
