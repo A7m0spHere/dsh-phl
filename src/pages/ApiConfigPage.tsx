@@ -57,11 +57,17 @@ const KIND_LABEL: Record<ApiProvider['kind'], string> = {
   custom: '自定义',
 }
 
+/** Protocol options. The `api:` value is written verbatim into settings.yaml
+ * and passed through unvalidated, so this is a convenience list, not an
+ * exhaustive enum: only `openai-completions` is *observed* in a real
+ * settings.yaml on this machine; the others are standard wire names that DSH
+ * is expected to honour but not yet verified here. "留空" omits the field and
+ * lets DSH apply its own default (providers in the wild ship without `api`). */
 const API_CHOICES: { value: string; label: string }[] = [
-  { value: '', label: 'DSH 默认' },
-  { value: 'openai-completions', label: 'completions' },
-  { value: 'openai-responses', label: 'responses' },
+  { value: 'openai-completions', label: 'openai-completions' },
+  { value: 'openai-responses', label: 'openai-responses' },
   { value: 'anthropic', label: 'anthropic' },
+  { value: '', label: '留空 · DSH 默认' },
 ]
 
 function formatSynced(iso?: string): string {

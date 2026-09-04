@@ -28,7 +28,9 @@ export interface RemoteModel {
   name?: string
 }
 
-/** How DSH reaches the endpoint: the wire protocol in `settings.yaml`. */
+/** How DSH reaches the endpoint: the wire protocol in `settings.yaml`. The
+ * backend passes the value through unvalidated — this set is the UI's
+ * convenience list, not an authoritative enum. `''` = omit the field. */
 export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic' | ''
 
 export interface ApiProvider {
