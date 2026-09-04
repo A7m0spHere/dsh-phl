@@ -18,6 +18,16 @@ export interface ApiModelRef {
   maxTokens?: number
 }
 
+/**
+ * One entry from a provider's live `GET /models` listing — the shape PHL
+ * trusts (only `id` is guaranteed; everything else optional). Mirrors the
+ * Rust `RemoteModel`.
+ */
+export interface RemoteModel {
+  id: string
+  name?: string
+}
+
 /** How DSH reaches the endpoint: the wire protocol in `settings.yaml`. */
 export type ProviderApi = 'openai-completions' | 'openai-responses' | 'anthropic' | ''
 

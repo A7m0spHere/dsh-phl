@@ -5,6 +5,7 @@ import type {
   ApiConfig,
   InstanceLiveSnapshot,
   PluginSource,
+  RemoteModel,
   VersionSource,
 } from '@/types'
 
@@ -860,6 +861,28 @@ export async function instanceLiveSnapshot(
     }
   }
   return invoke('instance_live_snapshot', { root, instanceId, binding, config })
+}
+
+/**
+ * Ask a provider's endpoint for its live model listing. The key is resolved
+ * Rust-side (temp input first, then the referenced env var) and never
+ * persisted; `apiKey` here is held only in component memory. Errors from the
+ * backend may be prefixed `ENV_MISSING:` — the UI keys its temp-key input on
+ * that marker.
+ */
+export async function fetchProviderModels(args: {
+  baseURL: string
+  api?: string
+  apiKeyEnv: string
+  apiKey?: string
+}): Promise<RemoteModel[]> {
+  if (!isDesktop) throw new Error('获取模型列表仅在桌面端可用')
+  return invoke('fetch_provider_models', {
+    baseUrl: args.baseURL,
+    api: args.api ?? null,
+    apiKeyEnv: args.apiKeyEnv,
+    apiKey: args.apiKey ?? null,
+  })
 }
 
 /**
