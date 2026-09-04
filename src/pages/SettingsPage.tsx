@@ -277,6 +277,29 @@ export function SettingsPage() {
 
   const [rootDraft, setRootDraft] = useState(settings.root)
 
+  /**
+   * Points the app at a new data root and re-reads everything from it.
+   *
+   * Without the reload the in-memory instance and catalog lists keep
+   * describing the old root while every subsequent write resolves against the
+   * new one — edits fail with "实例不存在", and a delete reports success while
+   * the real directory survives, unreachable, in the old location.
+   */
+  const switchRootTo = async (next: string) => {
+    settings.setRoot(next)
+    setRootDraft(next)
+    await Promise.all([
+      useInstanceStore.getState().reload(),
+      useCatalogStore.getState().load(),
+    ]).catch((err) => {
+      ui.toast({
+        kind: 'error',
+        title: '新目录读取失败',
+        message: err instanceof Error && err.message ? err.message : String(err),
+      })
+    })
+  }
+
   // Keep the field in step when the root changes from somewhere else.
   useEffect(() => setRootDraft(settings.root), [settings.root])
 
@@ -315,8 +338,7 @@ export function SettingsPage() {
         })
         return
       }
-      settings.setRoot(to)
-      setRootDraft(to)
+      await switchRootTo(to)
       ui.toast({
         kind: 'success',
         title: '数据迁移完成',
@@ -390,8 +412,7 @@ export function SettingsPage() {
         return
       }
     }
-    settings.setRoot(next)
-    setRootDraft(next)
+    await switchRootTo(next)
     ui.toast({
       kind: 'info',
       title: '数据目录已更新',

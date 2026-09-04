@@ -106,7 +106,21 @@ export default function App() {
           tone: running.length && stopOnExit ? 'danger' : 'default',
         })
 
-        if (ok) await desktop.exit()
+        if (!ok) return
+
+        // The dialog above promises this; without it the setting was inert and
+        // exiting left orphaned node.exe processes holding their ports, so the
+        // next launch of the same instance failed to bind.
+        if (stopOnExit && running.length) {
+          await Promise.all(
+            running.map((i) =>
+              instances.stop(i.id).catch((err) => {
+                console.warn(`[phl] stop ${i.name} on exit failed:`, err)
+              }),
+            ),
+          )
+        }
+        await desktop.exit()
       })
       .then((fn) => {
         if (disposed) fn()

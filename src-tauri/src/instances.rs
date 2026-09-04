@@ -301,7 +301,10 @@ pub async fn scan_orphan_instances(root: String) -> Result<Vec<OrphanDir>, Strin
     let mut out = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
         let path = entry.path();
-        if !path.is_dir() || manifest_path(&path).exists() {
+        // Keyed on "can this be read as an instance", not on the file merely
+        // existing: a directory whose manifest fails to parse is exactly the
+        // one the user cannot see anywhere else, so it belongs in this list.
+        if !path.is_dir() || read_manifest(&path).await.is_some() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -319,8 +322,10 @@ pub async fn delete_orphan_instance(root: String, name: String) -> Result<(), St
     let root = Path::new(&root);
     let dir = instances_root(root).join(sanitize_segment(&name, "目录名")?);
     assert_inside_instances(root, &dir)?;
-    // Refuse anything that turns out to be a real instance after all.
-    if manifest_path(&dir).exists() {
+    // Refuse anything that turns out to be a real instance after all — but an
+    // unparseable manifest must stay deletable, or the directory would be
+    // unreclaimable from the UI.
+    if read_manifest(&dir).await.is_some() {
         return Err("该目录是一个有效实例，请从实例页删除".into());
     }
     if dir.exists() {
@@ -444,7 +449,7 @@ pub async fn import_instance_bundle(
     manifest.runtime_id = bundle.instance.runtime_id;
     manifest.profile = bundle.instance.profile;
     manifest.note = Some("从 Bundle 导入".into());
-    manifest.env = bundle.instance.env;
+    manifest.env = sanitize_imported_env(bundle.instance.env);
     manifest.args = bundle.instance.args;
 
     let root = Path::new(&root);
@@ -456,6 +461,35 @@ pub async fn import_instance_bundle(
 }
 
 /* ------------------------------ snapshots ----------------------------- */
+
+/// Environment variables that let their value execute code, or redirect the
+/// process to a different runtime, and so must never survive an import.
+///
+/// A bundle is the format PHL tells users to share, so its contents are
+/// attacker-supplied by design. `run_launch` applies instance env verbatim
+/// (minus `DSH_HOME`), which means an imported `NODE_OPTIONS=--require
+/// C:\evil.js` would run on the first 启动. Filtering belongs here, at the
+/// trust boundary, rather than in the launcher's own allow-list.
+const UNSAFE_IMPORT_ENV: &[&str] = &[
+    "NODE_OPTIONS",
+    "NODE_REPL_EXTERNAL_MODULE",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "PATH",
+    "NODE_PATH",
+];
+
+fn sanitize_imported_env(env: HashMap<String, String>) -> HashMap<String, String> {
+    env.into_iter()
+        .filter(|(key, _)| {
+            let upper = key.to_ascii_uppercase();
+            // `DSH_HOME` is the isolation boundary and is recomputed per
+            // instance anyway; the rest are code-injection vectors.
+            upper != "DSH_HOME" && !UNSAFE_IMPORT_ENV.contains(&upper.as_str())
+        })
+        .collect()
+}
 
 /// A recorded point-in-time copy of the instance's `dsh-home`. The workspace
 /// and logs are deliberately not part of it: a snapshot exists to make the
@@ -579,7 +613,7 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     let worker = std::thread::spawn(move || {
         let total = dir_size_skipping(&from);
         let mut done = 0u64;
-        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx);
+        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx, SkipRule::RunStateAtRoot);
         let _ = tx.blocking_send(result.map(|()| (total, total)));
     });
 
@@ -603,10 +637,18 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         }
     }
     let _ = worker.join();
-    copy_result?;
+    // Cancellation is reported by `copy_tree` as Err("cancelled"), so the
+    // cancel branch has to come *first*: propagating the error before it left
+    // the staging tree — a full copy of dsh-home, potentially gigabytes —
+    // behind forever, invisible to both the snapshot list (no snapshot.json)
+    // and the orphan scanner (it only inspects children of `instances/`).
     if flag.load(Ordering::SeqCst) {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err("cancelled".into());
+    }
+    if let Err(e) = copy_result {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(e);
     }
 
     let snapshot = SnapshotFile {
@@ -784,7 +826,18 @@ async fn build_instance_tree(root: &Path, manifest: &InstanceManifest) -> Result
 
 pub(crate) async fn read_manifest(dir: &Path) -> Option<InstanceManifest> {
     let raw = tokio::fs::read_to_string(manifest_path(dir)).await.ok()?;
-    serde_json::from_str::<InstanceManifest>(&raw).ok()
+    match serde_json::from_str::<InstanceManifest>(&raw) {
+        Ok(manifest) => Some(manifest),
+        Err(e) => {
+            // Silently returning None here made the instance vanish from the
+            // list *and* from the orphan view (which used to key off the file
+            // merely existing), leaving the user no signal at all beyond their
+            // instance being gone. It is now reported as reclaimable, and the
+            // reason goes to the log.
+            eprintln!("[phl] 无法解析 {}: {e}", manifest_path(dir).display());
+            None
+        }
+    }
 }
 
 /// Persist just the API binding on an existing manifest — the sync path must
@@ -919,7 +972,7 @@ async fn run_clone(
     std::thread::spawn(move || {
         let total = dir_size_skipping(&from);
         let mut done = 0u64;
-        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx);
+        let result = copy_tree(&from, &to, &worker_flag, &mut done, total, &tx, SkipRule::RunStateAtRoot);
         let _ = tx.blocking_send(result.map(|()| (total, total)));
     });
 
@@ -981,6 +1034,34 @@ fn skipped(name: &str) -> bool {
     name == "logs" || name == "snapshots" || name == ".phl-cache" || name.starts_with(".phl-")
 }
 
+/// What a copy is allowed to leave behind.
+///
+/// This is not a detail: the same `copy_tree` serves cloning an instance and
+/// relocating the entire data root, and those want opposite things. Migrating
+/// with the clone's filter silently dropped every instance's `snapshots/` and
+/// `logs/` and then deleted the source — destroying the user's only rollback
+/// points while reporting success.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkipRule {
+    /// Copy everything. Required whenever the copy replaces the original.
+    Nothing,
+    /// Drop run state, but only at the tree's own root. A nested `logs/` deep
+    /// inside `node_modules` belongs to whatever package created it and is
+    /// part of that package, not PHL's per-instance history.
+    RunStateAtRoot,
+}
+
+impl SkipRule {
+    fn skips(self, name: &str) -> bool {
+        self == SkipRule::RunStateAtRoot && skipped(name)
+    }
+    /// Recursion always descends with `Nothing`: the rule only ever applies to
+    /// the entries directly under the root it was given.
+    fn inside(self) -> Self {
+        SkipRule::Nothing
+    }
+}
+
 pub(crate) fn dir_size(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -1024,6 +1105,7 @@ pub(crate) fn copy_tree(
     done: &mut u64,
     total: u64,
     tx: &tokio::sync::mpsc::Sender<Result<(u64, u64), String>>,
+    skip: SkipRule,
 ) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
@@ -1032,14 +1114,14 @@ pub(crate) fn copy_tree(
             return Err("cancelled".into());
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if skipped(&name) {
+        if skip.skips(&name) {
             continue;
         }
         let src = entry.path();
         let dst = to.join(&name);
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
-            copy_tree(&src, &dst, flag, done, total, tx)?;
+            copy_tree(&src, &dst, flag, done, total, tx, skip.inside())?;
         } else {
             std::fs::copy(&src, &dst).map_err(|e| format!("复制失败 {name}: {e}"))?;
             *done += meta.len();
@@ -1116,6 +1198,33 @@ mod tests {
         assert!(!skipped("workspace"));
     }
 
+    #[test]
+    fn skip_rule_applies_only_at_the_root_and_never_when_relocating() {
+        // A clone drops the instance's own history …
+        assert!(SkipRule::RunStateAtRoot.skips("snapshots"));
+        assert!(SkipRule::RunStateAtRoot.skips("logs"));
+        // … but a `logs/` nested inside a package belongs to that package.
+        assert!(!SkipRule::RunStateAtRoot.inside().skips("logs"));
+        // Relocating the data root replaces the original and then deletes it,
+        // so it must copy everything — dropping snapshots here destroyed them.
+        assert!(!SkipRule::Nothing.skips("snapshots"));
+        assert!(!SkipRule::Nothing.skips("logs"));
+    }
+
+    #[test]
+    fn imported_env_drops_code_injection_vectors() {
+        let mut env = HashMap::new();
+        env.insert("NODE_OPTIONS".into(), "--require C:\\evil.js".into());
+        env.insert("node_options".into(), "--require C:\\evil.js".into());
+        env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
+        env.insert("DSH_HOME".into(), "C:\\elsewhere".into());
+        env.insert("MY_API_KEY".into(), "keep-me".into());
+
+        let safe = sanitize_imported_env(env);
+        assert_eq!(safe.len(), 1, "only the harmless variable survives");
+        assert_eq!(safe.get("MY_API_KEY").map(String::as_str), Some("keep-me"));
+    }
+
     #[tokio::test]
     async fn instance_lifecycle_on_disk() {
         let root = temp_root("life");
@@ -1162,6 +1271,31 @@ mod tests {
             .unwrap();
         assert!(!dir.exists());
         assert!(list_instances(root_s).await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_manifest_stays_visible_and_reclaimable() {
+        let root = temp_root("corrupt");
+        let root_s = root.to_string_lossy().into_owned();
+        create_instance(root_s.clone(), manifest("bad-0001", "Bad"))
+            .await
+            .unwrap();
+
+        // Simulate version skew / a hand edit the parser rejects.
+        let dir = instance_dir(root.as_path(), "bad-0001").unwrap();
+        std::fs::write(manifest_path(&dir), "{ not json ").unwrap();
+
+        // It must not simply vanish: absent from the instance list, but listed
+        // in the reclaim view and deletable from there.
+        assert!(list_instances(root_s.clone()).await.unwrap().is_empty());
+        let orphans = scan_orphan_instances(root_s.clone()).await.unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].name, "bad-0001");
+
+        delete_orphan_instance(root_s, "bad-0001".into()).await.unwrap();
+        assert!(!dir.exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1276,7 +1410,8 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let flag = AtomicBool::new(false);
             let mut done = 0u64;
-            copy_tree(&src, &dst, &flag, &mut done, 512, &tx).map(|()| done)
+            copy_tree(&src, &dst, &flag, &mut done, 512, &tx, SkipRule::RunStateAtRoot)
+                .map(|()| done)
         });
 
         let mut events = 0;

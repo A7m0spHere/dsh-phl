@@ -22,6 +22,8 @@ interface InstanceState {
   snapshotTransfers: Record<string, CopyProgress>
 
   load: () => Promise<void>
+  /** Forces a re-read — used when the data root changes under the app. */
+  reload: () => Promise<void>
 
   launch: (id: string) => Promise<void>
   cancelLaunch: (id: string) => void
@@ -87,7 +89,15 @@ function bindExitListener(
   void onInstanceExited(({ instanceId, code }) => {
     const state = get().stateOf(instanceId)
     if (state.status !== 'running' && state.status !== 'stopping') return
-    const crashed = state.status === 'running' && code !== 0
+    // A manual stop owns the bookkeeping: it captured `ranFor` before awaiting
+    // and banks it once the call returns. Banking here too counted the session
+    // twice and fired a second toast whenever the process happened to die
+    // inside that await — which is the normal case, not an edge one.
+    if (state.status === 'stopping') {
+      set({ states: { ...get().states, [instanceId]: STOPPED } })
+      return
+    }
+    const crashed = code !== 0
     const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
     set({ states: { ...get().states, [instanceId]: STOPPED } })
     const instance = get().byId(instanceId)
@@ -103,7 +113,7 @@ function bindExitListener(
         title: `${instance?.name ?? instanceId} 进程异常退出`,
         message: `退出码 ${code ?? '未知'}。日志在实例目录的 logs/ 下。`,
       })
-    } else if (state.status === 'running') {
+    } else {
       useUIStore.getState().toast({ kind: 'info', title: `${instance?.name ?? instanceId} 已退出` })
     }
   })
@@ -135,6 +145,20 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       loadStarted = false
       throw err
     }
+  },
+
+  /**
+   * Re-reads the instance list from scratch.
+   *
+   * `load()` latches so StrictMode's double mount cannot reset runtime state,
+   * which also made it a one-shot for the whole session — after the data root
+   * changed, the list kept describing the old root while every write went to
+   * the new one. Changing the root has to be able to force a re-read.
+   */
+  async reload() {
+    loadStarted = false
+    set({ loaded: false })
+    await get().load()
   },
 
   /* ---------------- lifecycle ---------------- */
@@ -230,10 +254,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     }
 
     set({ states: { ...get().states, [id]: STOPPED } })
-    get().updateInstance(id, {
-      totalRuntime: instance.totalRuntime + ranFor,
-      lastRunAt: new Date().toISOString(),
-    })
+    // Re-read after the await: `instance` is a pre-await snapshot, and a
+    // plugin install or an edit that landed while the process was shutting
+    // down would be added back on top of a stale `totalRuntime`.
+    const current = get().byId(id)
+    if (current) {
+      get().updateInstance(id, {
+        totalRuntime: current.totalRuntime + ranFor,
+        lastRunAt: new Date().toISOString(),
+      })
+    }
     useUIStore.getState().toast({ kind: 'info', title: `${instance.name} 已停止` })
   },
 
@@ -268,7 +298,11 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     try {
       const snap = await repository.createSnapshot(instance, patchTransfer, controller.signal)
       // snapshots 是磁盘派生的列表；saveInstance 的 manifest 不含它，落内存即可。
-      get().updateInstance(id, { snapshots: [snap, ...instance.snapshots] })
+      // Read the list back after the await rather than closing over the
+      // pre-await copy: a snapshot deleted while this one was being written
+      // would otherwise be resurrected by the stale array.
+      const current = get().byId(id)
+      get().updateInstance(id, { snapshots: [snap, ...(current?.snapshots ?? [])] })
       useUIStore.getState().toast({ kind: 'success', title: '已创建快照', message: snap.label })
       return snap
     } catch (err) {
