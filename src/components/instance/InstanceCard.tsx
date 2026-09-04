@@ -30,7 +30,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   const dismissError = useInstanceStore((s) => s.dismissError)
   const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance.runtimeId))
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const dark = useIsDark()
   const { t, riseItem, scale } = useMotion()
   const { menuItems } = useInstanceActions(instance)
@@ -45,7 +45,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   const primaryLabel = running ? '停止' : busy ? '取消' : failed ? '重试' : '启动'
   const PrimaryIcon = running ? Square : busy ? X : failed ? RotateCcw : Play
 
-  const open = () => navigate({ name: 'instance', id: instance.id })
+  const open = () => push({ name: 'instance', id: instance.id })
 
   return (
     <motion.article

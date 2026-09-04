@@ -651,7 +651,7 @@ const RegistryCard = memo(function RegistryCard({
         message: '插件安装在实例内部；创建后即可一键安装。',
         action: {
           label: '新建实例',
-          run: () => useUIStore.getState().navigate({ name: 'create' }),
+          run: () => useUIStore.getState().push({ name: 'create' }),
         },
       })
       return
@@ -802,7 +802,7 @@ export function PluginsPage() {
   const setSource = useViewStore((s) => s.setPluginSource)
   const sort = useViewStore((s) => s.pluginSort)
   const setSort = useViewStore((s) => s.setPluginSort)
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const { stagger, riseItem, t, scale } = useMotion()
   // Animation intensity is a user setting: at 「关闭」 nothing may translate.
   const riseShift = scale === 0 ? 0 : 8
@@ -980,7 +980,7 @@ export function PluginsPage() {
           title="还没有实例"
           description="插件必须安装到某个实例里。先创建一个实例，再回来管理插件。"
           action={
-            <Button variant="primary" onClick={() => navigate({ name: 'create' })}>
+            <Button variant="primary" onClick={() => push({ name: 'create' })}>
               新建实例
             </Button>
           }
@@ -1001,7 +1001,7 @@ export function PluginsPage() {
         kind: 'info',
         title: '先创建一个实例',
         message: '插件安装在实例内部；创建后即可一键安装。',
-        action: { label: '新建实例', run: () => navigate({ name: 'create' }) },
+        action: { label: '新建实例', run: () => push({ name: 'create' }) },
       })
       return
     }
@@ -1174,7 +1174,7 @@ export function PluginsPage() {
                     variant="primary"
                     block
                     className="mt-3"
-                    onClick={() => navigate({ name: 'create' })}
+                    onClick={() => push({ name: 'create' })}
                   >
                     新建实例
                   </Button>

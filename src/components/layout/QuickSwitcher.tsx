@@ -36,6 +36,7 @@ export function QuickSwitcher() {
   const open = useUIStore((s) => s.paletteOpen)
   const setOpen = useUIStore((s) => s.setPaletteOpen)
   const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const instances = useInstanceStore((s) => s.instances)
   const states = useInstanceStore((s) => s.states)
   const toggle = useInstanceStore((s) => s.toggle)
@@ -56,8 +57,11 @@ export function QuickSwitcher() {
   }, [open])
 
   const commands = useMemo<Command[]>(() => {
+    // Instance/create targets are drill-ins (they own a history entry);
+    // everything else is a lateral jump that should not pollute the stack.
     const go = (route: Route) => () => {
-      navigate(route)
+      if (route.name === 'instance' || route.name === 'create') push(route)
+      else navigate(route)
       setOpen(false)
     }
 
@@ -138,7 +142,7 @@ export function QuickSwitcher() {
     ]
 
     return [...instanceCommands, ...pageCommands]
-  }, [instances, states, versions, navigate, setOpen, toggle])
+  }, [instances, states, versions, navigate, push, setOpen, toggle])
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()
