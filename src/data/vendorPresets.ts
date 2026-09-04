@@ -151,17 +151,6 @@ export const VENDOR_PRESETS: VendorPreset[] = [
     consoleUrl: 'https://cloud.siliconflow.cn/account/credential',
   },
   {
-    id: 'groq',
-    label: 'Groq',
-    providerName: 'groq',
-    notes: '高速推理 · console.groq.com',
-    kind: 'official',
-    api: 'openai-completions',
-    baseURL: 'https://api.groq.com/openai/v1',
-    apiKeyEnv: 'GROQ_API_KEY',
-    consoleUrl: 'https://console.groq.com/keys',
-  },
-  {
     id: 'ollama',
     label: 'Ollama（本地）',
     providerName: 'ollama',
