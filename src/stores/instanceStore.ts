@@ -223,7 +223,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
           kind: 'error',
           title: `${instance.name} 启动失败`,
           message: err.title,
-          action: { label: '查看', run: () => ui.navigate({ name: 'instance', id }) },
+          action: { label: '查看', run: () => ui.push({ name: 'instance', id }) },
         })
       } else {
         patch({ status: 'error', error: { title: '未知错误', detail: String(err) } })
@@ -432,7 +432,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       message: `版本、Runtime 与 ${source.plugins.length} 个插件均已复制，端口 :${clone.port}`,
       action: {
         label: '打开',
-        run: () => useUIStore.getState().navigate({ name: 'instance', id: clone.id }),
+        run: () => useUIStore.getState().push({ name: 'instance', id: clone.id }),
       },
     })
     return clone

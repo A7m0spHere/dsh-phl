@@ -2,6 +2,7 @@ import { useId } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   ArrowLeft,
+  ArrowRight,
   Blocks,
   Boxes,
   CircleHelp,
@@ -80,7 +81,9 @@ export function TitleBar() {
   const route = useUIStore((s) => s.route)
   const navigate = useUIStore((s) => s.navigate)
   const back = useUIStore((s) => s.back)
-  const canGoBack = useUIStore((s) => s.history.length > 0)
+  const forward = useUIStore((s) => s.forward)
+  const canGoBack = useUIStore((s) => s.navBack.length > 0)
+  const canGoForward = useUIStore((s) => s.navForward.length > 0)
   const theme = useUIStore((s) => s.theme)
   const setTheme = useUIStore((s) => s.setTheme)
   const isDark = useUIStore((s) => s.isDark)
@@ -117,25 +120,22 @@ export function TitleBar() {
         <span className="select-none text-sm font-semibold tracking-tight text-ink">PHL</span>
       </div>
 
-      {/* Back sits between identity and navigation: it belongs to the page,
-          not to the app. */}
-      <AnimatePresence initial={false}>
-        {canGoBack && (
-          <motion.div
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 30, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={t(0.2)}
-            className="no-drag overflow-hidden"
-          >
-            <Tooltip content={<span className="flex items-center gap-1">返回 <Kbd>Esc</Kbd></span>} side="bottom">
-              <IconButton label="返回" size="sm" variant="ghost" onClick={back}>
-                <ArrowLeft size={14} />
-              </IconButton>
-            </Tooltip>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Back/forward sit between identity and navigation: they belong to the
+          page history, not to the app. Fixed placeholders — greyed when there
+          is nowhere to go — so the chevrons never jump and the hit target is
+          always in the same spot. */}
+      <div className="no-drag flex items-center">
+        <Tooltip content={<span className="flex items-center gap-1">返回 <Kbd>Alt</Kbd><Kbd>←</Kbd></span>} side="bottom">
+          <IconButton label="返回" size="sm" variant="ghost" disabled={!canGoBack} onClick={back}>
+            <ArrowLeft size={14} />
+          </IconButton>
+        </Tooltip>
+        <Tooltip content={<span className="flex items-center gap-1">前进 <Kbd>Alt</Kbd><Kbd>→</Kbd></span>} side="bottom">
+          <IconButton label="前进" size="sm" variant="ghost" disabled={!canGoForward} onClick={forward}>
+            <ArrowRight size={14} />
+          </IconButton>
+        </Tooltip>
+      </div>
 
       <nav className="no-drag flex items-center gap-0.5">
         {TABS.map((tab) => {

@@ -51,7 +51,7 @@ import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
 export function InstanceDetailPanel({ id }: { id: string }) {
   const instances = useInstanceStore((s) => s.instances)
   const states = useInstanceStore((s) => s.states)
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const instance = instances.find((i) => i.id === id)
   const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance?.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance?.runtimeId))
@@ -78,7 +78,7 @@ export function InstanceDetailPanel({ id }: { id: string }) {
               />
             }
             count={`:${i.port}`}
-            onClick={() => navigate({ name: 'instance', id: i.id })}
+            onClick={() => push({ name: 'instance', id: i.id })}
           />
         ))}
       </PanelGroup>

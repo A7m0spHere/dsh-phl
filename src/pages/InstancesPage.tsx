@@ -50,7 +50,7 @@ export function InstancesPanel() {
   const setFilter = useViewStore((s) => s.setInstanceFilter)
   const sort = useViewStore((s) => s.instanceSort)
   const setSort = useViewStore((s) => s.setInstanceSort)
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
 
   const counts = useMemo(() => {
     const running = instances.filter((i) => states[i.id]?.status === 'running').length
@@ -130,7 +130,7 @@ export function InstancesPanel() {
       </PanelGroup>
 
       <div className="mt-auto p-2.5">
-        <Button block variant="secondary" onClick={() => navigate({ name: 'create' })}>
+        <Button block variant="secondary" onClick={() => push({ name: 'create' })}>
           <Plus size={13} />
           新建实例
         </Button>
@@ -155,7 +155,7 @@ export function InstancesPage() {
   const layout = useUIStore((s) => s.layout)
   const setLayout = useUIStore((s) => s.setLayout)
   const showDock = useUIStore((s) => s.showLaunchDock)
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const confirm = useUIStore((s) => s.confirm)
   const suggestPort = useInstanceStore((s) => s.suggestPort)
   const admitInstance = useInstanceStore((s) => s.admitInstance)
@@ -278,7 +278,7 @@ export function InstancesPage() {
                 <FileUp size={13} />
                 导入 Bundle
               </Button>
-              <Button variant="primary" onClick={() => navigate({ name: 'create' })}>
+              <Button variant="primary" onClick={() => push({ name: 'create' })}>
                 <Plus size={13} />
                 新建实例
               </Button>
@@ -320,7 +320,7 @@ export function InstancesPage() {
               }
               action={
                 instances.length === 0 ? (
-                  <Button variant="primary" onClick={() => navigate({ name: 'create' })}>
+                  <Button variant="primary" onClick={() => push({ name: 'create' })}>
                     <Plus size={13} />
                     新建实例
                   </Button>

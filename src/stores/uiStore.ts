@@ -32,6 +32,114 @@ export const routeKey = (r: Route): string =>
   r.name === 'instance' ? `instance:${r.id}` : r.name
 
 /* ------------------------------------------------------------------ *
+ * URL-driven routing (mode B)
+ *
+ * The address bar (hash form, which a Tauri custom-protocol origin can
+ * always serve) is the source of truth for *where* we are; an in-memory
+ * stack mirrors it so the chrome can render back/forward affordances.
+ *
+ * Two semantics, deliberately separate:
+ *  - `navigate` = horizontal move between sibling screens. Replaces the
+ *    current history entry, so hopping across tabs never pollutes the
+ *    back stack.
+ *  - `push`     = vertical drill-in (list → detail, list → wizard). Adds
+ *    an entry, so `back` walks the drill path, not a chronological
+ *    replay of every tab you glanced at.
+ * ------------------------------------------------------------------ */
+
+export const routePath = (r: Route): string => {
+  switch (r.name) {
+    case 'instance':
+      return `/instance/${encodeURIComponent(r.id)}`
+    case 'create':
+      return r.cloneFrom ? `/create/${encodeURIComponent(r.cloneFrom)}` : '/create'
+    case 'apiConfig':
+      return '/api-config'
+    default:
+      return `/${r.name}`
+  }
+}
+
+export const parseRoute = (path: string): Route | null => {
+  const parts = path.replace(/^\/+|\/+$/g, '').split('/')
+  switch (parts[0]) {
+    case '':
+    case 'instances':
+      return { name: 'instances' }
+    case 'instance':
+      return parts[1] ? { name: 'instance', id: decodeURIComponent(parts[1]) } : null
+    case 'create':
+      return parts[1] ? { name: 'create', cloneFrom: decodeURIComponent(parts[1]) } : { name: 'create' }
+    case 'versions':
+      return { name: 'versions' }
+    case 'plugins':
+      return { name: 'plugins' }
+    case 'api-config':
+      return { name: 'apiConfig' }
+    case 'runtimes':
+      return { name: 'runtimes' }
+    case 'settings':
+      return { name: 'settings' }
+    default:
+      return null
+  }
+}
+
+const initialRoute: Route = (() => {
+  const hash = typeof window !== 'undefined' ? window.location.hash.replace(/^#/, '') : ''
+  return parseRoute(hash) ?? { name: 'instances' }
+})()
+
+const hashFor = (r: Route) => `#${routePath(r)}`
+
+// Mirror of the browser's own back/forward lists so the title bar can show
+// the chevrons and (later) list destinations. We only ever append/truncate
+// in ways that match what we ask `history` to do; a reload resets them,
+// which is acceptable — the deep link itself survives a reload.
+const nav = {
+  back: [] as Route[],
+  forward: [] as Route[],
+  /**
+   * Signed traversal delta for the history.go() we just requested. popstate
+   * does not report how far it jumped, so multi-step "walk back to an
+   * ancestor" moves would otherwise desync the mirror stacks.
+   */
+  pending: null as number | null,
+}
+
+/** -1 = back, 0 = lateral (no slide), 1 = forward. Drives page transitions. */
+let navDirection = 0
+
+const applyTraversal = (d: number) => {
+  if (d < 0) {
+    const steps = Math.min(-d, nav.back.length)
+    const popped = nav.back.splice(nav.back.length - steps, steps)
+    nav.forward = [...popped.reverse(), ...nav.forward].slice(0, 24)
+  } else {
+    const steps = Math.min(d, nav.forward.length)
+    const shifted = nav.forward.splice(0, steps)
+    nav.back = [...nav.back, ...shifted].slice(-24)
+  }
+}
+
+const syncHistory = (set: (partial: Partial<UIState>) => void) =>
+  set({
+    navBack: [...nav.back],
+    navForward: [...nav.forward],
+    direction: navDirection,
+    navSeq: ++navSeq,
+  })
+
+let navSeq = 0
+
+/** A route that sits above `to` in the same tab's drill tree. */
+const isAncestor = (ancestor: Route, to: Route): boolean => {
+  if (routeTab(ancestor) !== routeTab(to)) return false
+  if (ancestor.name !== 'instances') return false
+  return to.name === 'instance' || to.name === 'create'
+}
+
+/* ------------------------------------------------------------------ *
  * transient UI: toasts + dialogs
  * ------------------------------------------------------------------ */
 
@@ -98,12 +206,24 @@ export const ACCENTS: { id: Accent; label: string }[] = [
 interface UIState {
   /* routing */
   route: Route
-  history: Route[]
-  /** 1 = navigating forward, -1 = going back. Drives page transition direction. */
+  /** Screens behind the current one (back stack), newest last. */
+  navBack: Route[]
+  /** Screens ahead of the current one (forward stack), next first. */
+  navForward: Route[]
+  /** Bumped on every history change so components can key off it. */
+  navSeq: number
+  /** 1 = navigating forward, -1 = going back, 0 = lateral (no slide). */
   direction: number
+  /** Horizontal move between siblings: replaces history, never pushes. */
   navigate: (route: Route) => void
+  /** Vertical drill-in (list → detail / wizard): adds a history entry. */
+  push: (route: Route) => void
+  /** Go one level up in the drill tree, reusing history when possible. */
+  up: () => void
   back: () => void
+  forward: () => void
   canGoBack: () => boolean
+  canGoForward: () => boolean
 
   /* appearance (persisted) */
   theme: Theme
@@ -155,27 +275,69 @@ export const useUIStore = create<UIState>()(
   persist(
     (set, get) => ({
       /* ---------------- routing ---------------- */
-      route: { name: 'instances' },
-      history: [],
-      direction: 1,
+      route: initialRoute,
+      navBack: [],
+      navForward: [],
+      navSeq: 0,
+      direction: 0,
 
       navigate: (route) => {
         const current = get().route
         if (routeKey(current) === routeKey(route)) return
-        set({ route, history: [...get().history, current].slice(-24), direction: 1 })
+        // Explicit "up": if a matching screen is already behind us, walk
+        // back to it (keeping the forward stack alive) instead of burying
+        // a duplicate under the current slot.
+        for (let i = nav.back.length - 1; i >= 0; i--) {
+          if (routeKey(nav.back[i]) === routeKey(route)) {
+            navDirection = -1
+            nav.pending = i - nav.back.length
+            window.history.go(nav.pending)
+            return
+          }
+        }
+        if (isAncestor(current, route)) navDirection = -1
+        else if (route.name === 'instance' || route.name === 'create') navDirection = 1
+        else navDirection = 0
+        nav.forward = []
+        window.history.replaceState(null, '', hashFor(route))
+        set({ route, navForward: [] })
+        syncHistory(set)
+      },
+
+      push: (route) => {
+        const current = get().route
+        if (routeKey(current) === routeKey(route)) return
+        navDirection = 1
+        nav.back = [...nav.back, current].slice(-24)
+        nav.forward = []
+        window.history.pushState(null, '', hashFor(route))
+        set({ route, navBack: [...nav.back], navForward: [] })
+        syncHistory(set)
+      },
+
+      up: () => {
+        const { route } = get()
+        if (route.name === 'instance' || route.name === 'create') {
+          get().navigate({ name: 'instances' })
+        }
       },
 
       back: () => {
-        const history = get().history
-        if (!history.length) return
-        set({
-          route: history[history.length - 1],
-          history: history.slice(0, -1),
-          direction: -1,
-        })
+        if (!nav.back.length) return
+        navDirection = -1
+        nav.pending = -1
+        window.history.back()
       },
 
-      canGoBack: () => get().history.length > 0,
+      forward: () => {
+        if (!nav.forward.length) return
+        navDirection = 1
+        nav.pending = 1
+        window.history.forward()
+      },
+
+      canGoBack: () => nav.back.length > 0,
+      canGoForward: () => nav.forward.length > 0,
 
       /* ---------------- appearance ---------------- */
       theme: 'system',
@@ -287,3 +449,75 @@ export const useRoute = () => useUIStore((s) => s.route)
 export const useNavigate = () => useUIStore((s) => s.navigate)
 export const useToast = () => useUIStore((s) => s.toast)
 export const useIsDark = () => useUIStore((s) => s.isDark)
+
+/**
+ * Wire real history traversal (Alt+←/→, mouse side buttons, in-app back)
+ * back into the store. WebView2 handles those accelerators natively, so the
+ * web layer only ever has to react to popstate. Returns a disposer.
+ */
+let popStateBound = false
+
+export function bindHistorySync(): () => void {
+  let boundHere = false
+  if (!popStateBound) {
+    popStateBound = true
+    boundHere = true
+    window.addEventListener('popstate', onPopState)
+  }
+  function onPopState() {
+    const path =
+      (window.history.state?.path as string | undefined) ??
+      window.location.hash.replace(/^#/, '') ??
+      '/'
+    const next = parseRoute(path) ?? ({ name: 'instances' } as Route)
+    const prev = useUIStore.getState().route
+    const key = routeKey(next)
+    if (key === routeKey(prev)) {
+      nav.pending = null
+      navDirection = 0
+      return
+    }
+
+    let dir = 1
+    const d = nav.pending
+    nav.pending = null
+    if (d !== null) {
+      applyTraversal(d)
+      dir = d < 0 ? -1 : 1
+    } else if (navDirection === 0) {
+      // A traversal we did not initiate (browser chrome gesture, reload).
+      // Infer from the stacks by matching the destination's last occurrence.
+      const bi = nav.back.map(routeKey).lastIndexOf(key)
+      if (bi >= 0) {
+        applyTraversal(bi - nav.back.length)
+        dir = -1
+      } else {
+        const fi = nav.forward.map(routeKey).indexOf(key)
+        if (fi >= 0) applyTraversal(fi + 1)
+        else {
+          nav.back = [...nav.back, prev].slice(-24)
+          nav.forward = []
+        }
+        dir = 1
+      }
+    } else {
+      applyTraversal(navDirection)
+      dir = navDirection
+    }
+    navDirection = 0
+
+    useUIStore.setState({
+      route: next,
+      navBack: [...nav.back],
+      navForward: [...nav.forward],
+      direction: dir,
+      navSeq: ++navSeq,
+    })
+  }
+  return () => {
+    if (boundHere) {
+      popStateBound = false
+      window.removeEventListener('popstate', onPopState)
+    }
+  }
+}

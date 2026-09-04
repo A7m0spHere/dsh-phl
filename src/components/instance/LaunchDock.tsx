@@ -26,7 +26,7 @@ export function LaunchDock() {
   const dismissError = useInstanceStore((s) => s.dismissError)
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
-  const navigate = useUIStore((s) => s.navigate)
+  const push = useUIStore((s) => s.push)
   const { t, scale } = useMotion()
 
   // Prefer whatever is running; otherwise the most recently used instance.
@@ -89,7 +89,7 @@ export function LaunchDock() {
 
       <div className="flex items-center gap-2.5 px-[var(--page-pad)] py-2">
         <button
-          onClick={() => navigate({ name: 'instance', id: target.id })}
+          onClick={() => push({ name: 'instance', id: target.id })}
           className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-0.5 pr-2 text-left"
         >
           <InstanceTile name={target.name} hue={target.hue} status={status} size={32} />
