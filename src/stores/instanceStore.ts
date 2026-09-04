@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
 import { isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
+import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
 import { useCatalogStore } from './catalogStore'
 import { useUIStore } from './uiStore'
@@ -27,7 +28,7 @@ interface InstanceState {
 
   launch: (id: string) => Promise<void>
   cancelLaunch: (id: string) => void
-  stop: (id: string) => Promise<void>
+  stop: (id: string) => Promise<boolean>
   toggle: (id: string) => void
 
   createSnapshot: (id: string) => Promise<Snapshot | null>
@@ -55,15 +56,21 @@ interface InstanceState {
   portsInUse: () => Map<number, string>
   suggestPort: () => number
   runningCount: () => number
+  hasPendingWrites: () => boolean
+  flushWrites: () => Promise<void>
 }
 
 const STOPPED: InstanceRuntimeState = { status: 'stopped' }
 
 const launchControllers = new Map<string, AbortController>()
 const snapshotControllers = new Map<string, AbortController>()
+const exitedDuringStop = new Set<string>()
+const exitedDuringLaunch = new Map<string, { pid: number; code: number | null }>()
 let createController: AbortController | null = null
 let loadStarted = false
 let exitListenerBound = false
+const instanceWriters = new Map<string, ReturnType<typeof createOptimisticQueue<Instance>>>()
+const derivedFields = new Set<keyof Instance>(['plugins', 'snapshots', 'diskUsage', 'dshHome', 'workspace'])
 
 /**
  * 插件安装正在往实例的 node_modules 里写文件；此刻拷贝它（快照）或换掉它
@@ -86,15 +93,20 @@ function bindExitListener(
 ) {
   if (exitListenerBound || !isDesktop) return
   exitListenerBound = true
-  void onInstanceExited(({ instanceId, code }) => {
+  void onInstanceExited(({ instanceId, pid, code }) => {
     const state = get().stateOf(instanceId)
+    if (state.status === 'starting') {
+      exitedDuringLaunch.set(instanceId, { pid, code })
+      return
+    }
+    if (state.pid !== undefined && state.pid !== pid) return
     if (state.status !== 'running' && state.status !== 'stopping') return
     // A manual stop owns the bookkeeping: it captured `ranFor` before awaiting
     // and banks it once the call returns. Banking here too counted the session
     // twice and fired a second toast whenever the process happened to die
     // inside that await — which is the normal case, not an edge one.
     if (state.status === 'stopping') {
-      set({ states: { ...get().states, [instanceId]: STOPPED } })
+      exitedDuringStop.add(instanceId)
       return
     }
     const crashed = code !== 0
@@ -173,6 +185,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     const ui = useUIStore.getState()
     const controller = new AbortController()
     launchControllers.set(id, controller)
+    exitedDuringLaunch.delete(id)
 
     const patch = (s: InstanceRuntimeState) => set({ states: { ...get().states, [id]: s } })
     set({ focusId: id })
@@ -189,6 +202,11 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         (p) => patch({ status: 'starting', phase: p.phase, progress: p.progress }),
         controller.signal,
       )
+
+      const exited = exitedDuringLaunch.get(id)
+      if (exited?.pid === outcome.pid) {
+        throw new LaunchError('进程在启动完成前退出', `退出码 ${exited.code ?? '未知'}，请查看实例 logs/ 下的日志。`)
+      }
 
       patch({
         status: 'running',
@@ -230,6 +248,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       }
     } finally {
       launchControllers.delete(id)
+      exitedDuringLaunch.delete(id)
     }
   },
 
@@ -239,18 +258,29 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
 
   async stop(id) {
     const instance = get().byId(id)
-    if (!instance) return
+    if (!instance) return true
     const state = get().stateOf(id)
-    if (state.status !== 'running') return
+    if (state.status !== 'running') return state.status === 'stopped' || state.status === 'error'
 
     const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
-    set({ states: { ...get().states, [id]: { status: 'stopping', pid: state.pid } } })
+    set({ states: { ...get().states, [id]: { ...state, status: 'stopping' } } })
 
     const controller = new AbortController()
+    exitedDuringStop.delete(id)
     try {
       await repository.stop(instance, controller.signal)
-    } catch {
-      /* stopping is not cancellable in the prototype */
+    } catch (err) {
+      // The exit event can confirm death while the stop command is pending.
+      // Otherwise keep the process tracked and allow a retry.
+      if (!exitedDuringStop.has(id)) {
+        set({ states: { ...get().states, [id]: state } })
+        useUIStore.getState().toast({
+          kind: 'error', title: `${instance.name} 停止失败`, message: String(err),
+        })
+        return false
+      }
+    } finally {
+      exitedDuringStop.delete(id)
     }
 
     set({ states: { ...get().states, [id]: STOPPED } })
@@ -265,6 +295,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       })
     }
     useUIStore.getState().toast({ kind: 'info', title: `${instance.name} 已停止` })
+    return true
   },
 
   toggle(id) {
@@ -364,7 +395,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     try {
       await repository.deleteSnapshot(instance, snapshotId)
       get().updateInstance(id, {
-        snapshots: instance.snapshots.filter((s) => s.id !== snapshotId),
+        snapshots: (get().byId(id)?.snapshots ?? []).filter((s) => s.id !== snapshotId),
       })
     } catch (err) {
       useUIStore
@@ -449,33 +480,39 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   updateInstance(id, patch) {
     const before = get().byId(id)
     if (!before) return
-    const next = { ...before, ...patch }
-    set({ instances: get().instances.map((i) => (i.id === id ? next : i)) })
-    // The manifest on disk is the instance's identity, so an edit that only
-    // reaches memory is an edit the user loses on restart.
-    void repository.saveInstance(next).catch((err) => {
-      // Revert only the keys this call changed. Restoring the whole
-      // pre-await snapshot would also undo edits that landed *and saved*
-      // while this write was in flight — the same snapshot-versus-current
-      // hazard `patchInstancePlugins` exists to avoid.
-      const reverted: Partial<Instance> = {}
-      for (const key of Object.keys(patch) as (keyof Instance)[]) {
-        Object.assign(reverted, { [key]: before[key] })
-      }
-      set({
-        instances: get().instances.map((i) => (i.id === id ? { ...i, ...reverted } : i)),
-      })
-      useUIStore.getState().toast({
-        kind: 'error',
-        title: `保存「${before.name}」的修改失败`,
-        message: err instanceof Error && err.message ? err.message : String(err),
-      })
+    const publish = (changes: Partial<Instance>) => set({
+      instances: get().instances.map((i) => i.id === id ? { ...i, ...changes } : i),
     })
+    const persisted: Partial<Instance> = {}
+    const derived: Partial<Instance> = {}
+    for (const key of Object.keys(patch) as (keyof Instance)[]) {
+      if (key === 'id') continue
+      Object.assign(derivedFields.has(key) ? derived : persisted, { [key]: patch[key] })
+    }
+    publish(derived)
+    if (!Object.keys(persisted).length) return
+    let writer = instanceWriters.get(id)
+    if (!writer) {
+      writer = createOptimisticQueue({
+        read: () => get().byId(id)!,
+        publish,
+        write: (value) => repository.saveInstance(value),
+        onError: (err) => useUIStore.getState().toast({
+          kind: 'error', title: `保存「${before.name}」的修改失败`, message: String(err),
+        }),
+      })
+      instanceWriters.set(id, writer)
+    }
+    writer.enqueue(persisted)
   },
 
   async deleteInstance(id) {
     const instance = get().byId(id)
     if (!instance) return
+    if (instanceWriters.get(id)?.busy) {
+      useUIStore.getState().toast({ kind: 'info', title: '请等待实例配置保存完成后再删除' })
+      return
+    }
     launchControllers.get(id)?.abort()
     // A snapshot copy in flight is reading the very tree that is about to
     // vanish — abort it and drop its progress row.
@@ -487,6 +524,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       set({ snapshotTransfers: transfers })
     }
     await repository.deleteInstance(id)
+    instanceWriters.delete(id)
     const states = { ...get().states }
     delete states[id]
     set({ instances: get().instances.filter((i) => i.id !== id), states })
@@ -555,4 +593,6 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
 
   runningCount: () =>
     get().instances.filter((i) => get().stateOf(i.id).status === 'running').length,
+  hasPendingWrites: () => [...instanceWriters.values()].some((writer) => writer.busy),
+  flushWrites: async () => { await Promise.all([...instanceWriters.values()].map((writer) => writer.flush())) },
 }))

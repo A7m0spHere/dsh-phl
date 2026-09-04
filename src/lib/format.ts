@@ -27,26 +27,15 @@ export function formatClock(seconds: number): string {
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`
 }
 
-const RELATIVE_STEPS: [number, string][] = [
-  [60, '秒'],
-  [3600, '分钟'],
-  [86400, '小时'],
-  [86400 * 30, '天'],
-]
-
 export function formatRelative(iso?: string | number): string {
   if (!iso) return '从未运行'
   const then = typeof iso === 'number' ? iso : new Date(iso).getTime()
   const diff = (Date.now() - then) / 1000
   if (diff < 45) return '刚刚'
   if (diff < 60) return '不到 1 分钟前'
-  for (let i = 0; i < RELATIVE_STEPS.length; i++) {
-    const [limit, unit] = RELATIVE_STEPS[i]
-    const next = RELATIVE_STEPS[i + 1]
-    if (!next || diff < next[0]) {
-      return `${Math.floor(diff / limit)} ${unit}前`
-    }
-  }
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} 天前`
   return new Date(then).toLocaleDateString('zh-CN')
 }
 

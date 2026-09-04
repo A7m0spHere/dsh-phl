@@ -90,13 +90,7 @@ export function useInstanceActions(instance: Instance | undefined) {
     }
   }, [instance, store, ui])
 
-  /**
-   * Snapshots are not implemented yet — `instance.json` carries no snapshot
-   * list, so a record written here is dropped the moment the instance is read
-   * back from disk. Saying so is the only honest option: it previously
-   * reported success and promised a rollback point that did not exist, and
-   * the rollback button beside it already admits it does nothing.
-   */
+  /** Snapshot creation and progress are owned by the instance store. */
   const snapshot = useCallback(async () => {
     if (!instance || !id) return
     await store.createSnapshot(id)

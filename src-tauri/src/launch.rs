@@ -167,7 +167,10 @@ pub async fn stop_instance(processes: State<'_, Processes>, instance_id: String)
         .cloned();
     if let Some(entry) = entry {
         kill_tree(entry.pid).await?;
-        processes.0.lock().expect("processes lock").remove(&instance_id);
+        let mut map = processes.0.lock().expect("processes lock");
+        if map.get(&instance_id).map(|e| e.pid) == Some(entry.pid) {
+            map.remove(&instance_id);
+        }
     }
     Ok(())
 }
@@ -232,7 +235,7 @@ async fn run_launch(
             detail: Some(version_name.clone()),
         });
         let node = resolve_node(root, &runtime_name)?;
-        crate::versions::install_version_deps(&node, &version_dir, &registry_base, cancel, |p| {
+        crate::versions::install_version_deps(&node, &version_dir, registry_base, cancel, |p| {
             let _ = on_progress.send(LaunchEvent {
                 stage: "install-deps".into(),
                 progress: p,
@@ -435,7 +438,7 @@ async fn run_launch(
         let code = status.ok().and_then(|s| s.code());
         let _ = watcher_app.emit(
             INSTANCE_EXITED,
-            serde_json::json!({ "instanceId": watcher_id, "code": code }),
+            serde_json::json!({ "instanceId": watcher_id, "pid": pid, "code": code }),
         );
     });
 
@@ -615,33 +618,66 @@ async fn log_tail(path: &Path, max_lines: usize) -> String {
 /// tools, so the whole tree has to go with it.
 #[cfg(windows)]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    Ok(())
+    check_kill_output(pid, output)
 }
 
 #[cfg(not(windows))]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
     // No libc dependency: `kill` on the direct child. DSH's own children are
     // expected to exit with it; a tree-kill here would need a setsid pre-exec.
-    tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("kill").args(["-9", &pid.to_string()]).output()
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    Ok(())
+    check_kill_output(pid, output)
+}
+
+fn check_kill_output(pid: u32, output: std::process::Output) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "无法终止进程 {pid}（退出码 {:?}）: {}{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_kill_command_is_not_success() {
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1)
+        };
+        #[cfg(not(windows))]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(256)
+        };
+        let error = check_kill_output(123, std::process::Output {
+            status, stdout: vec![], stderr: b"access denied".to_vec(),
+        }).unwrap_err();
+        assert!(error.contains("123"));
+        assert!(error.contains("access denied"));
+    }
 
     #[test]
     fn port_zero_is_never_considered_free() {

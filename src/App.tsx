@@ -35,7 +35,7 @@ export default function App() {
     // filesystem for installed versions. Both loaders can now genuinely fail
     // (they reach the disk), so the chain needs a handler — an unhandled
     // rejection here left the pages on their skeletons with no explanation.
-    void initDesktopRoot()
+    const load = () => void initDesktopRoot()
       .then(() => Promise.all([loadCatalog(), loadInstances(), loadApiConfig()]))
       .catch((err) => {
         console.error('[phl] startup load failed:', err)
@@ -45,14 +45,11 @@ export default function App() {
           message: err instanceof Error && err.message ? err.message : String(err),
           action: {
             label: '重试',
-            run: () => {
-              void loadCatalog()
-              void loadInstances()
-              void loadApiConfig()
-            },
+            run: load,
           },
         })
       })
+    load()
   }, [loadCatalog, loadInstances, loadApiConfig])
 
   // Version catalog auto-sync. Deliberately cheap: one coarse timer that only
@@ -96,6 +93,10 @@ export default function App() {
         const ui = useUIStore.getState()
         const instances = useInstanceStore.getState()
         const stopOnExit = useSettingsStore.getState().closeStopsInstances
+        if (stopOnExit && Object.values(instances.states).some((s) => s.status === 'starting' || s.status === 'stopping')) {
+          ui.toast({ kind: 'info', title: '请先取消启动或等待启动、停止完成后再退出' })
+          return
+        }
         const running = instances.instances.filter(
           (i) => instances.states[i.id]?.status === 'running',
         )
@@ -118,14 +119,10 @@ export default function App() {
         // exiting left orphaned node.exe processes holding their ports, so the
         // next launch of the same instance failed to bind.
         if (stopOnExit && running.length) {
-          await Promise.all(
-            running.map((i) =>
-              instances.stop(i.id).catch((err) => {
-                console.warn(`[phl] stop ${i.name} on exit failed:`, err)
-              }),
-            ),
-          )
+          const stopped = await Promise.all(running.map((i) => instances.stop(i.id)))
+          if (stopped.some((ok) => !ok)) return
         }
+        await instances.flushWrites()
         await desktop.exit()
       })
       .then((fn) => {

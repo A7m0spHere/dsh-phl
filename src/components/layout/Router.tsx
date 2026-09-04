@@ -1,14 +1,23 @@
+import { lazy, Suspense } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useMotion } from '@/lib/motion'
 import { routeKey, routeTab, useUIStore, type Route } from '@/stores'
 import { InstancesPage, InstancesPanel } from '@/pages/InstancesPage'
-import { InstanceDetailPage, InstanceDetailPanel } from '@/pages/InstanceDetailPage'
-import { CreateInstancePage, CreateInstancePanel } from '@/pages/CreateInstancePage'
-import { VersionsPage, VersionsPanel } from '@/pages/VersionsPage'
-import { PluginsPage, PluginsPanel } from '@/pages/PluginsPage'
-import { ApiConfigPage, ApiConfigPanel } from '@/pages/ApiConfigPage'
-import { RuntimesPage, RuntimesPanel } from '@/pages/RuntimesPage'
-import { SettingsPage, SettingsPanel } from '@/pages/SettingsPage'
+// Keep the landing page eager; fetch other page modules only when visited.
+const InstanceDetailPage = lazy(() => import('@/pages/InstanceDetailPage').then((m) => ({ default: m.InstanceDetailPage })))
+const InstanceDetailPanel = lazy(() => import('@/pages/InstanceDetailPage').then((m) => ({ default: m.InstanceDetailPanel })))
+const CreateInstancePage = lazy(() => import('@/pages/CreateInstancePage').then((m) => ({ default: m.CreateInstancePage })))
+const CreateInstancePanel = lazy(() => import('@/pages/CreateInstancePage').then((m) => ({ default: m.CreateInstancePanel })))
+const VersionsPage = lazy(() => import('@/pages/VersionsPage').then((m) => ({ default: m.VersionsPage })))
+const VersionsPanel = lazy(() => import('@/pages/VersionsPage').then((m) => ({ default: m.VersionsPanel })))
+const PluginsPage = lazy(() => import('@/pages/PluginsPage').then((m) => ({ default: m.PluginsPage })))
+const PluginsPanel = lazy(() => import('@/pages/PluginsPage').then((m) => ({ default: m.PluginsPanel })))
+const ApiConfigPage = lazy(() => import('@/pages/ApiConfigPage').then((m) => ({ default: m.ApiConfigPage })))
+const ApiConfigPanel = lazy(() => import('@/pages/ApiConfigPage').then((m) => ({ default: m.ApiConfigPanel })))
+const RuntimesPage = lazy(() => import('@/pages/RuntimesPage').then((m) => ({ default: m.RuntimesPage })))
+const RuntimesPanel = lazy(() => import('@/pages/RuntimesPage').then((m) => ({ default: m.RuntimesPanel })))
+const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
+const SettingsPanel = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPanel })))
 
 function renderPage(route: Route) {
   switch (route.name) {
@@ -76,7 +85,7 @@ export function Router() {
             transition={t(0.14)}
             className="absolute inset-0 flex"
           >
-            {renderPanel(route)}
+            <Suspense fallback={<LoadingPage />}>{renderPanel(route)}</Suspense>
           </motion.div>
         </AnimatePresence>
       </div>
@@ -93,10 +102,14 @@ export function Router() {
             className="absolute inset-0"
             style={scale === 0 ? undefined : { willChange: 'transform, opacity' }}
           >
-            {renderPage(route)}
+            <Suspense fallback={<LoadingPage />}>{renderPage(route)}</Suspense>
           </motion.div>
         </AnimatePresence>
       </main>
     </div>
   )
+}
+
+function LoadingPage() {
+  return <div role="status" className="p-6 text-sm text-ink-muted">加载页面…</div>
 }

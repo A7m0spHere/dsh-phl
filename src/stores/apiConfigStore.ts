@@ -104,19 +104,20 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
 
   async load() {
     const root = useSettingsStore.getState().root
+    set({ config: null, snapshots: {}, loaded: false })
     if (desktop.isDesktop) {
-      try {
-        const config = await desktop.loadApiConfig(root)
-        set({ config, loaded: true })
-        return
-      } catch (err) {
-        console.warn('[phl] load api config failed:', err)
-      }
+      const config = await desktop.loadApiConfig(root)
+      if (root === useSettingsStore.getState().root) set({ config, loaded: true })
+      return
     }
     set({ config: loadBrowserConfig(), loaded: true })
   },
 
   async save(next) {
+    if (get().saving) {
+      useUIStore.getState().toast({ kind: 'info', title: '请等待当前 API 配置保存完成后重试' })
+      return null
+    }
     const root = useSettingsStore.getState().root
     set({ saving: true })
     try {
@@ -253,7 +254,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       // Persist right away: an imported-but-unsaved seed would vanish on the
       // next launch while the UI already behaved as if the library existed.
       const saved = await get().save(imported)
-      return saved ?? imported
+      return saved
     } catch (err) {
       useUIStore.getState().toast({
         kind: 'error',
