@@ -40,6 +40,11 @@ export interface DshVersion {
   latest?: boolean
   /** Kept for compatibility testing; PHL warns before removing it. */
   legacy?: boolean
+  /**
+   * Released on GitHub but not yet published to the npm registry — shown so
+   * the list tracks GitHub's pace; there is nothing to install yet.
+   */
+  pendingPublish?: boolean
   /** Present when the version is downloadable from a real registry. */
   source?: VersionSource
   state: VersionInstallState
