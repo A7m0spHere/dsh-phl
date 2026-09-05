@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { openExternal } from '@/lib/desktop'
 import { formatBytes, formatDate, formatSpeed } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
 import {
@@ -185,6 +186,17 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                   <Tooltip content={usedBy.join('、')}>
                     <span className="text-accent-ink">{usedBy.length} 个实例使用</span>
                   </Tooltip>
+                </>
+              )}
+              {version.pendingPublish && (
+                <>
+                  <span className="text-ink-faint/50">·</span>
+                  <button
+                    className="text-accent-ink transition-colors hover:underline"
+                    onClick={() => void openExternal('https://www.npmjs.com/package/@deepseek-ai/dsh')}
+                  >
+                    查看 npm 包
+                  </button>
                 </>
               )}
             </div>

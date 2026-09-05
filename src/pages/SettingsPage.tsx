@@ -589,6 +589,16 @@ export function SettingsPage() {
                   </Select>
                 }
               />
+              <SettingRow
+                title="待发布版本上架时提醒"
+                description="GitHub 已发布、安装包源还没上架的版本，一旦上架立即提醒；跟随版本同步检查，无额外开销"
+                control={
+                  <Switch
+                    checked={settings.pendingReleaseAlerts}
+                    onChange={(v) => settings.set('pendingReleaseAlerts', v)}
+                  />
+                }
+              />
             </div>
           </PageSection>
         )}
