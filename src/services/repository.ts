@@ -83,11 +83,18 @@ export interface TransferProgress {
   bytesDone?: number
   bytesPerSec?: number
   /**
-   * `extracting` is the version/runtime pipeline (tar unpack); plugins use
+   * `extracting` and `installing-deps` are the version pipeline (tar unpack,
+   * then npm materialising the version's own dependencies); plugins use
    * `preparing` (resolve tarball) and `installing` (unpack + register) so the
    * UI can label the PCL-style stages precisely.
    */
-  stage: 'preparing' | 'downloading' | 'extracting' | 'verifying' | 'installing'
+  stage:
+    | 'preparing'
+    | 'downloading'
+    | 'extracting'
+    | 'verifying'
+    | 'installing-deps'
+    | 'installing'
 }
 
 /** Progress of a local tree copy (snapshot create / clone). */

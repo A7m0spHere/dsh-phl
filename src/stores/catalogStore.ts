@@ -287,6 +287,8 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
             })
           } else if (p.stage === 'extracting') {
             patch({ kind: 'extracting', progress: p.progress ?? 0 })
+          } else if (p.stage === 'installing-deps') {
+            patch({ kind: 'installing-deps', progress: p.progress ?? 0 })
           } else {
             patch({ kind: 'verifying' })
           }
@@ -439,7 +441,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
           // "NaN%" caption. The mock always supplies numbers, so this was
           // invisible in `npm run dev`.
           patch({
-            stage: p.stage === 'extracting' ? 'installing' : p.stage,
+            stage:
+              p.stage === 'extracting' || p.stage === 'installing-deps'
+                ? 'installing'
+                : p.stage,
             progress: p.progress ?? 0,
             bytesDone: p.bytesDone ?? 0,
             bytesPerSec: p.bytesPerSec ?? 0,

@@ -201,7 +201,9 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
 
   const state = version.state
   const installed = state.kind === 'installed'
-  const busy = ['queued', 'downloading', 'extracting', 'verifying'].includes(state.kind)
+  const busy = ['queued', 'downloading', 'extracting', 'verifying', 'installing-deps'].includes(
+    state.kind,
+  )
 
   const onRemove = async () => {
     const ok = await confirm({
