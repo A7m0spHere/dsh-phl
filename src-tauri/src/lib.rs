@@ -8,6 +8,7 @@ mod instances;
 mod launch;
 mod paths;
 mod plugins;
+mod repair;
 mod runtimes;
 mod storage;
 mod verify;
@@ -169,6 +170,8 @@ pub fn run() {
             storage::free_space,
             storage::root_data_summary,
             storage::move_root_data,
+            repair::repair_instance,
+            repair::scan_residue,
             verify::verify_instance,
             diagnostics::run_diagnostics,
             diagnostics::clear_download_cache,

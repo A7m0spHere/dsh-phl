@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
-import { verifyInstance, type RemoteVerifyCheck, type RemoteVerifyResult } from '@/lib/desktop'
+import { AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, Wrench, XCircle } from 'lucide-react'
+import {
+  repairInstance,
+  verifyInstance,
+  type RemoteVerifyCheck,
+  type RemoteVerifyResult,
+} from '@/lib/desktop'
 import { Badge, Button, SectionCard } from '@/components/ui'
 import { cn } from '@/lib/cn'
 
@@ -27,7 +32,9 @@ function StatusIcon({ check }: { check: RemoteVerifyCheck }) {
 export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
   const [report, setReport] = useState<RemoteVerifyResult | null>(null)
   const [running, setRunning] = useState(false)
+  const [repairing, setRepairing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [repairNote, setRepairNote] = useState<string | null>(null)
 
   const run = useCallback(async () => {
     setRunning(true)
@@ -44,9 +51,38 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
 
   useEffect(() => {
     setReport(null)
+    setRepairNote(null)
     void run()
   }, [run])
 
+  /**
+   * 修复可修复问题：本地可推导的修复直接执行（重建 workspace、清理残留），
+   * 需要下载的动作提示用户走安装流程；结束后立刻重新体检，让徽章说真话。
+   */
+  const repair = useCallback(async () => {
+    if (!report) return
+    const actions = [...new Set(report.checks.filter((c) => c.repairable).map((c) => c.repairAction ?? ''))]
+      .filter((a) => a !== '')
+      .concat(report.checks.some((c) => c.repairable && !c.repairAction) ? ['cleanup-txn'] : [])
+    if (actions.length === 0) return
+    setRepairing(true)
+    setRepairNote(null)
+    try {
+      const outcome = await repairInstance(instanceId, actions)
+      const parts: string[] = []
+      if (outcome.applied.length > 0) parts.push(`已修复：${outcome.applied.join('、')}`)
+      if (outcome.requiresUser.length > 0)
+        parts.push(`需要重新安装（请在版本/Runtime 页操作）：${outcome.requiresUser.join('、')}`)
+      setRepairNote(parts.join('；') || '没有可执行的修复动作')
+      await run()
+    } catch (err) {
+      setRepairNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRepairing(false)
+    }
+  }, [report, instanceId, run])
+
+  const repairable = report?.checks.some((c) => c.repairable) ?? false
   const overall = report ? OVERALL_TONE[report.overall as keyof typeof OVERALL_TONE] : null
 
   return (
@@ -59,7 +95,13 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
       extra={
         <>
           {overall && report && <Badge tone={overall.tone}>{overall.label}</Badge>}
-          <Button size="xs" variant="ghost" onClick={() => void run()} disabled={running}>
+          {repairable && (
+            <Button size="xs" variant="secondary" onClick={() => void repair()} disabled={repairing || running}>
+              <Wrench size={12} />
+              修复可修复问题
+            </Button>
+          )}
+          <Button size="xs" variant="ghost" onClick={() => void run()} disabled={running || repairing}>
             <RefreshCw size={12} className={cn(running && 'animate-spin')} />
             重新检查
           </Button>
@@ -68,6 +110,9 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
     >
       {error && (
         <p className="px-4 py-3 text-sm text-danger">检查失败：{error}</p>
+      )}
+      {repairNote && (
+        <p className="border-b border-line/60 px-4 py-2 text-sm text-ink-muted">{repairNote}</p>
       )}
       {!error && !report && (
         <p className="px-4 py-3 text-sm text-ink-faint">正在读取实例环境…</p>
