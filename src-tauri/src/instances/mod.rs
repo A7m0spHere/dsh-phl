@@ -1173,6 +1173,72 @@ mod tests {
         }
     }
 
+    /// T-110 Instance 行：快照损坏（缺 dsh-home）时，还原必须干净地失败，
+    /// 实例当前的 dsh-home 原封不动。
+    #[tokio::test]
+    async fn restoring_a_broken_snapshot_fails_and_leaves_the_instance_untouched() {
+        use std::collections::HashMap;
+
+        let root = std::env::temp_dir().join(format!("phl-snapsbroken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let manifest = InstanceManifest {
+            schema_version: 0,
+            id: "broken-1".into(),
+            name: "Broken".into(),
+            note: None,
+            kind: "sandbox".into(),
+            hue: 0,
+            version_id: "dsh-0.1.0".into(),
+            runtime_id: "node-system".into(),
+            port: 34495,
+            auto_port: true,
+            profile: "web".into(),
+            created_at: now_iso(),
+            last_run_at: None,
+            total_runtime: 0,
+            favorite: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            api: None,
+        };
+        create_instance_inner(&root, manifest).await.unwrap();
+        let dir = root.join("instances").join("broken-1");
+        let settings = dir.join("dsh-home").join("settings.yaml");
+        std::fs::write(&settings, b"original").unwrap();
+
+        // A snapshot that never finished: metadata exists, dsh-home is missing.
+        let snap_id = "snap-broken";
+        let snap_dir = dir.join("snapshots").join(snap_id);
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::write(
+            snap_dir.join("snapshot.json"),
+            serde_json::json!({
+                "id": snap_id, "label": "坏快照", "createdAt": now_iso(),
+                "versionId": "dsh-0.1.0", "runtimeId": "node-system",
+                "pluginCount": 0, "size": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let err = restore_snapshot_inner(&root, "broken-1", snap_id, &Processes::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("无法还原"), "{err}");
+
+        // The live environment is untouched.
+        assert_eq!(
+            std::fs::read(&settings).unwrap(),
+            b"original",
+            "dsh-home survived the failed restore"
+        );
+        assert!(!dir.join(".phl-restore").exists(), "no staging leftover");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn snapshot_create_restore_delete_roundtrip() {
         let root = temp_root("snap");
