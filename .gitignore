@@ -22,6 +22,9 @@ dsh-phl-instance-manager-plan.md
 dsh-phl-manual-test-checklist.md
 dsh-phl-project-master-plan.md
 
+# repository documentation is intentionally unpublished for now
+README.md
+
 # rust / tauri
 src-tauri/target/
 src-tauri/gen/schemas/
