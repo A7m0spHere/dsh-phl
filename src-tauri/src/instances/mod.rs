@@ -1130,6 +1130,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// T-110 Windows 专项：中文 / 空格 / Unicode 数据根下的完整实例生命周期。
+    /// 每一段路径都直接进入文件系统调用，正是历史上一堆“莫名失败”的来源。
+    #[tokio::test]
+    async fn instance_lifecycle_survives_windows_path_quirks() {
+        let quirks: &[&str] = &["phl 测试 中文", "phl with spaces", "phl-ünïcødé-④"];
+        for tag in quirks {
+            let root = std::env::temp_dir().join(format!("{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let record = create_instance_inner(&root, manifest("win-path-1", "Win 路径实例"))
+                .await
+                .unwrap();
+            assert!(record.dsh_home.contains(tag));
+
+            // Rename + clone survive the quirky root.
+            save_instance_inner(&root, manifest("win-path-1", "改名后的实例"))
+                .await
+                .unwrap();
+            let clone_manifest = manifest("win-path-2", "克隆实例");
+            create_instance_inner(&root, clone_manifest).await.unwrap();
+
+            let listed = list_instances_inner(&root).await.unwrap();
+            assert_eq!(listed.len(), 2, "{tag}: both instances listed");
+
+            // Orphan scan + snapshot round trip also stay sane.
+            let orphans = scan_orphan_instances_inner(&root).await.unwrap();
+            assert!(orphans.is_empty(), "{tag}: no orphans");
+
+            let snapshot_dir = root.join("instances").join("win-path-1").join("snapshots");
+            std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+            delete_instance_inner(&root, "win-path-2", &Processes::default())
+                .await
+                .unwrap();
+            delete_instance_inner(&root, "win-path-1", &Processes::default())
+                .await
+                .unwrap();
+            assert!(!root.join("instances").join("win-path-1").exists());
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     #[tokio::test]
     async fn snapshot_create_restore_delete_roundtrip() {
         let root = temp_root("snap");
