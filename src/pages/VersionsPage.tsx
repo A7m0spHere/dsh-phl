@@ -1,9 +1,11 @@
-import { Fragment, useMemo, type ReactNode } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Archive,
   Check,
+  ClipboardCopy,
   Download,
+  ExternalLink,
   HardDrive,
   Package,
   RefreshCw,
@@ -13,6 +15,9 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { buildAgentInstallTask, releaseUrl } from '@/lib/githubBuildTask'
+import { registryBase } from '@/services/tauriVersions'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { openExternal } from '@/lib/desktop'
 import { formatBytes, formatDate, formatSpeed } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
@@ -113,12 +118,86 @@ export function VersionsPanel() {
  * row
  * ------------------------------------------------------------------ */
 
+/**
+ * Inline escape hatch for a pending release: hand the "build this version
+ * from source" job to a DSH agent. PHL generates the task and copies it; the
+ * user pastes it into a running instance where the *agent's own* approval
+ * gates apply to every command — PHL never runs the build silently. The
+ * warning follows the AUR/Homebrew shape: consequence → responsibility →
+ * safer alternative, and the safe path (wait for the registry) stays adjacent.
+ */
+function AgentBuildGuide({ versionName, onClose }: { versionName: string; onClose: () => void }) {
+  const toast = useUIStore((s) => s.toast)
+  const root = useSettingsStore((s) => s.root)
+  const registry = registryBase()
+  const task = buildAgentInstallTask({
+    versionName,
+    root,
+    registryBase: registry.includes('npmjs.org') ? undefined : registry,
+  })
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(task)
+      toast({ kind: 'success', title: '安装任务已复制', message: '粘贴到任一运行中的 DSH 对话框，逐步审批执行。', duration: 6000 })
+    } catch {
+      toast({ kind: 'error', title: '复制失败', message: '请手动选中下方文本复制。' })
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-lg bg-surface-sunken p-3.5 ring-1 ring-inset ring-line">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-medium text-ink">让 DSH agent 从源码构建 {versionName}</div>
+          <p className="mt-1 text-sm leading-relaxed text-ink-muted">
+            安装包源尚未收录此版本，但 GitHub 已发布源码。下面的任务会指导一个 DSH agent：克隆对应 tag → 安装依赖 → 构建 → 把产物放进 PHL 的 versions 目录并登记。
+          </p>
+        </div>
+        <Button size="xs" variant="ghost" onClick={onClose} aria-label="关闭">
+          <X size={13} />
+        </Button>
+      </div>
+
+      <div className="mt-2.5 rounded-md bg-warn/10 px-2.5 py-2 text-sm leading-relaxed text-ink-muted ring-1 ring-inset ring-warn/25">
+        <span className="font-medium text-ink">注意：</span>
+        源码构建耗时可能数分钟、可能失败，产物未经官方发布流程签名校验；agent 执行的每条命令需你自行审批，构建结果由你负责。此过程会调用模型、消耗 token。
+        <span className="text-ink-faint"> 推荐做法仍是等版本源收录后点「同步更新」自动安装。</span>
+      </div>
+
+      <details className="mt-2.5 group">
+        <summary className="cursor-pointer list-none text-sm text-accent-ink hover:underline">
+          查看安装任务全文
+        </summary>
+        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-canvas p-2.5 font-mono text-xs leading-relaxed text-ink-muted ring-1 ring-inset ring-line">
+          {task}
+        </pre>
+      </details>
+
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <Button size="sm" variant="primary" onClick={() => void copy()}>
+          <ClipboardCopy size={12} />
+          复制安装任务
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => void openExternal(releaseUrl(versionName))}>
+          <ExternalLink size={12} />
+          在 GitHub 打开
+        </Button>
+      </div>
+      <p className="mt-2 text-sm leading-relaxed text-ink-faint">
+        用法：启动任一已安装版本的实例并打开 WebUI → 把任务粘贴给 agent → 逐步审批执行 → 完成后点本页右上角「同步更新」，PHL 会把构建出的版本登记为已安装。
+      </p>
+    </div>
+  )
+}
+
 function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[] }) {
   const install = useCatalogStore((s) => s.installVersion)
   const cancel = useCatalogStore((s) => s.cancelVersion)
   const remove = useCatalogStore((s) => s.removeVersion)
   const confirm = useUIStore((s) => s.confirm)
   const { t, riseItem } = useMotion()
+  const [guideOpen, setGuideOpen] = useState(false)
 
   const state = version.state
   const installed = state.kind === 'installed'
@@ -162,8 +241,23 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               {version.channel === 'nightly' && <Badge tone="warn">Nightly</Badge>}
               {version.channel === 'alpha' && <Badge tone="warn">Alpha</Badge>}
               {version.legacy && <Badge tone="neutral">Legacy</Badge>}
+              {installed && state.installHealth === 'degraded' && (
+                <Tooltip
+                  allowOverflow
+                  content={`部分依赖在安装时被跳过：${(state.skippedDependencies ?? []).join('、')}`}
+                >
+                  <Badge tone="warn">依赖降级</Badge>
+                </Tooltip>
+              )}
               {installed && <Badge tone="ok">已安装</Badge>}
-              {version.pendingPublish && <Badge tone="neutral">待发布</Badge>}
+              {version.pendingPublish && (
+                <Tooltip
+                  allowOverflow
+                  content="GitHub 已发布此版本，但 npm 尚未上架安装包；上架后会自动提醒并可安装，也可让 agent 从源码构建"
+                >
+                  <Badge tone="warn">npm 未收录</Badge>
+                </Tooltip>
+              )}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
               {[
@@ -219,14 +313,10 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                 删除
               </Button>
             ) : version.pendingPublish ? (
-              <Tooltip
-                allowOverflow
-                content="GitHub 已发布该版本，但安装包还没在 npm 上架；上架后点右上角「同步更新」即可安装"
-              >
-                <Button size="sm" variant="secondary" disabled>
-                  等待发布
-                </Button>
-              </Tooltip>
+              <Button size="sm" variant="secondary" onClick={() => setGuideOpen((v) => !v)}>
+                <Package size={12} />
+                让 agent 构建
+              </Button>
             ) : state.kind === 'failed' ? (
               <Button size="sm" variant="secondary" onClick={() => void install(version.id)}>
                 <RotateCcw size={12} />
@@ -277,6 +367,20 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                   </span>
                 </div>
               </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence initial={false}>
+          {version.pendingPublish && guideOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={t(0.24)}
+              className="overflow-hidden"
+            >
+              <AgentBuildGuide versionName={version.name} onClose={() => setGuideOpen(false)} />
             </motion.div>
           )}
         </AnimatePresence>

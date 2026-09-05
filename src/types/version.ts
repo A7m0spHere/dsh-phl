@@ -17,7 +17,13 @@ export type VersionInstallState =
   | { kind: 'downloading'; progress: number; bytesDone: number; bytesPerSec: number }
   | { kind: 'extracting'; progress: number }
   | { kind: 'verifying' }
-  | { kind: 'installed'; installedAt: string }
+  | {
+      kind: 'installed'
+      installedAt: string
+      /** `degraded` = some dependencies were pruned during install. */
+      installHealth?: 'healthy' | 'degraded'
+      skippedDependencies?: string[]
+    }
   | { kind: 'failed'; reason: string }
 
 export interface DshVersion {

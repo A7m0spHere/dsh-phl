@@ -530,7 +530,7 @@ pub(crate) fn resolve_node(root: &Path, runtime_name: &str) -> Result<PathBuf, S
     Ok(node)
 }
 
-fn runtime_bin_dir(root: &Path, runtime_name: &str) -> PathBuf {
+pub(crate) fn runtime_bin_dir(root: &Path, runtime_name: &str) -> PathBuf {
     let dir = root.join("runtimes").join(runtime_name);
     if cfg!(windows) {
         dir // the zip layout has node.exe at the top
