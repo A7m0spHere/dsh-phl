@@ -12,6 +12,7 @@ use super::{
     cancelled, download, extract, install_version_deps, now_iso, package_requires_deps,
     pick_npm_capable_node, read_deps_marker, verify_integrity, InstalledVersionInfo, ProgressEvent,
 };
+use crate::launch::Processes;
 use crate::paths::{ensure_under_root, PhlState};
 use std::sync::atomic::AtomicBool;
 
@@ -313,19 +314,66 @@ pub(crate) async fn run_install(
 
 #[tauri::command]
 pub async fn remove_version_dir(
+    processes: State<'_, Processes>,
     phl: State<'_, PhlState>,
     version_name: String,
 ) -> Result<(), String> {
-    let safe = sanitize_version(&version_name)?;
-    let root = phl.root();
+    remove_version_dir_inner(&phl.root(), &processes, &version_name).await
+}
+
+pub(crate) async fn remove_version_dir_inner(
+    root: &Path,
+    processes: &Processes,
+    version_name: &str,
+) -> Result<(), String> {
+    let safe = sanitize_version(version_name)?;
     let dir = root.join("versions").join(&safe);
     // Canonical containment: a junction planted at the version path must not
     // redirect `remove_dir_all` outside the data root.
     ensure_under_root(&root.join("versions"), &dir)?;
+
+    // A running instance executes node.exe from inside this version's tree —
+    // Windows locks running executables and their working directories, so the
+    // delete would fail with an opaque "access denied". Refuse up front and
+    // name the instances, instead of letting the user guess from os error 5.
+    let version_id = format!("dsh-{safe}");
+    let mut running_users: Vec<String> = Vec::new();
+    let pinned: Vec<String> = processes
+        .0
+        .lock()
+        .expect("processes lock")
+        .keys()
+        .cloned()
+        .collect();
+    for instance_id in pinned {
+        let Ok(instance_dir_path) = crate::instances::instance_dir(root, &instance_id) else {
+            continue;
+        };
+        if let Ok(manifest) =
+            crate::instances::load_manifest(&instance_dir_path, &instance_id).await
+        {
+            if manifest.version_id == version_id {
+                running_users.push(format!("「{}」", manifest.name));
+            }
+        }
+    }
+    if !running_users.is_empty() {
+        return Err(format!(
+            "以下实例正在运行此版本，请先停止后再删除：{}",
+            running_users.join("、")
+        ));
+    }
+
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| e.to_string())?;
+        tokio::fs::remove_dir_all(&dir).await.map_err(|e| match e.raw_os_error() {
+            // 5 = access denied, 32 = sharing violation — both mean Windows
+            // found a handle this process cannot break. Name the usual
+            // suspects; a bare os error teaches the user nothing.
+            Some(5) | Some(32) => format!(
+                "目录被占用，无法删除（{e}）。请检查：① 是否有实例正在运行此版本（含残留的 node 进程）；② 资源管理器或终端是否停在该目录内；③ 杀毒软件是否正在扫描。"
+            ),
+            _ => e.to_string(),
+        })?;
     }
     Ok(())
 }
