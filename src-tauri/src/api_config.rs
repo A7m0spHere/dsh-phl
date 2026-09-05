@@ -201,7 +201,9 @@ impl Default for ApiBinding {
 /// boundary instead.
 pub(crate) fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     (first.is_ascii_alphabetic() || first == '_')
         && name.len() <= 64
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -212,7 +214,9 @@ pub(crate) fn valid_env_name(name: &str) -> bool {
 fn valid_provider_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /* ------------------------------ resolution ----------------------------- */
@@ -280,7 +284,10 @@ fn resolve_sections(
         map.insert(p.name.as_str().into(), serde_yaml::Value::Mapping(entry));
     }
 
-    let default = binding.default_model.as_ref().or(config.default_model.as_ref());
+    let default = binding
+        .default_model
+        .as_ref()
+        .or(config.default_model.as_ref());
     let default_value = match default {
         Some(d) => {
             let mut mm = serde_yaml::Mapping::new();
@@ -408,13 +415,19 @@ pub async fn save_api_config(
     let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let path = api_config_path(&phl.root());
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // Same tmp+rename discipline as `write_manifest`: a crash mid-write must
     // not leave a half file that reads as "no config library".
     let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, body).await.map_err(|e| e.to_string())?;
-    tokio::fs::rename(&tmp, &path).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&tmp, body)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(config)
 }
 
@@ -431,7 +444,11 @@ pub async fn sync_instance_api(
     sync_inner(&dir, &binding, &config).await
 }
 
-async fn sync_inner(dir: &Path, binding: &ApiBinding, config: &ApiConfig) -> Result<ApiBinding, String> {
+async fn sync_inner(
+    dir: &Path,
+    binding: &ApiBinding,
+    config: &ApiConfig,
+) -> Result<ApiBinding, String> {
     if !dir.join("instance.json").exists() {
         return Err("实例不存在，无法同步 API 配置".into());
     }
@@ -449,11 +466,17 @@ async fn sync_inner(dir: &Path, binding: &ApiBinding, config: &ApiConfig) -> Res
     let body = serde_yaml::to_string(&doc).map_err(|e| e.to_string())?;
     let path = settings_path(dir);
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let tmp = path.with_extension("yaml.tmp");
-    tokio::fs::write(&tmp, &body).await.map_err(|e| e.to_string())?;
-    tokio::fs::rename(&tmp, &path).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&tmp, &body)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut applied = binding.clone();
     applied.synced_at = Some(crate::versions::now_iso());
@@ -487,7 +510,9 @@ async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String> {
     let mut providers = Vec::new();
     for (name, value) in providers_val {
         let Some(name) = name.as_str() else { continue };
-        let Some(vm) = value.as_mapping() else { continue };
+        let Some(vm) = value.as_mapping() else {
+            continue;
+        };
         let get_str = |k: &str| vm.get(k).and_then(|v| v.as_str()).map(str::to_string);
         let models = vm
             .get("models")
@@ -515,8 +540,12 @@ async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String> {
             base_url: get_str("baseURL"),
             // Without a reference DSH has nothing to read; fall back to a
             // conventional variable name the user can point at later.
-            api_key_env: get_str("apiKeyEnv")
-                .unwrap_or_else(|| format!("DSH_{}_API_KEY", name.to_uppercase().replace(['-', '.'], "_"))),
+            api_key_env: get_str("apiKeyEnv").unwrap_or_else(|| {
+                format!(
+                    "DSH_{}_API_KEY",
+                    name.to_uppercase().replace(['-', '.'], "_")
+                )
+            }),
             // A live settings.yaml never contains the key itself (DSH keeps
             // it in credentials/env), so an import can only produce a name.
             api_key: None,
@@ -534,7 +563,11 @@ async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            model: m.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            model: m
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             reasoning_effort: m
                 .get("reasoningEffort")
                 .and_then(|v| v.as_str())
@@ -671,16 +704,22 @@ pub async fn fetch_provider_models(
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
         .or_else(|| {
-            std::env::var(env_name).ok().filter(|v| !v.trim().is_empty())
+            std::env::var(env_name)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
         })
-        .ok_or_else(|| format!("{ENV_MISSING}环境变量 {env_name} 未设置，可临时输入一次密钥（不会被保存）"))?;
+        .ok_or_else(|| {
+            format!("{ENV_MISSING}环境变量 {env_name} 未设置，可临时输入一次密钥（不会被保存）")
+        })?;
 
     let anthropic = api.as_deref() == Some("anthropic");
     let mut request = crate::versions::http_client()
         .get(&url)
         .timeout(std::time::Duration::from_secs(10));
     request = if anthropic {
-        request.header("x-api-key", key).header("anthropic-version", "2023-06-01")
+        request
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
     } else {
         request.bearer_auth(key)
     };
@@ -691,7 +730,10 @@ pub async fn fetch_provider_models(
         .map_err(|e| format!("无法连接端点: {e}"))?;
     let status = response.status();
     let body: serde_json::Value = if status.is_success() {
-        response.json().await.map_err(|e| format!("模型列表解析失败: {e}"))?
+        response
+            .json()
+            .await
+            .map_err(|e| format!("模型列表解析失败: {e}"))?
     } else {
         // Read the (usually JSON) error body *before* synthesizing the
         // message — the provider's own text is the only useful half.
@@ -715,7 +757,9 @@ async fn instance_env(root: &Path, instance_id: &str) -> HashMap<String, String>
         #[serde(default)]
         env: HashMap<String, String>,
     }
-    serde_json::from_str::<EnvProbe>(&raw).map(|p| p.env).unwrap_or_default()
+    serde_json::from_str::<EnvProbe>(&raw)
+        .map(|p| p.env)
+        .unwrap_or_default()
 }
 
 /// The provider ids a binding pulls from the library. Selection lives here
@@ -852,9 +896,18 @@ async fn snapshot_inner(
         // referenced variable — instance env counts too.
         let env_extra = instance_env(root, instance_id).await;
         for id in bound_provider_ids(config, binding) {
-            let Some(p) = config.providers.iter().find(|p| p.id == id) else { continue };
-            let stored = p.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false);
-            if !stored && std::env::var(&p.api_key_env).is_err() && !env_extra.contains_key(&p.api_key_env) {
+            let Some(p) = config.providers.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            let stored = p
+                .api_key
+                .as_deref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
+            if !stored
+                && std::env::var(&p.api_key_env).is_err()
+                && !env_extra.contains_key(&p.api_key_env)
+            {
                 missing_keys.push(p.api_key_env.clone());
             }
         }
@@ -889,13 +942,21 @@ pub(crate) async fn note_launch_drift(
     dir: &Path,
     manifest: &crate::instances::InstanceManifest,
 ) {
-    let Some(binding) = manifest.api.clone() else { return };
+    let Some(binding) = manifest.api.clone() else {
+        return;
+    };
     if binding.inheritance == "none" || binding.synced_hash.is_none() {
         return;
     }
-    let Some(config) = load_config_file(root).await else { return };
-    let Ok((llm, default_model)) = resolve_sections(&config, &binding) else { return };
-    let Ok(mut doc) = read_settings(dir).await else { return };
+    let Some(config) = load_config_file(root).await else {
+        return;
+    };
+    let Ok((llm, default_model)) = resolve_sections(&config, &binding) else {
+        return;
+    };
+    let Ok(mut doc) = read_settings(dir).await else {
+        return;
+    };
     if doc.is_null() {
         doc = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
@@ -912,7 +973,9 @@ pub(crate) async fn note_launch_drift(
 }
 
 pub(crate) async fn load_config_file(root: &Path) -> Option<ApiConfig> {
-    let raw = tokio::fs::read_to_string(api_config_path(root)).await.ok()?;
+    let raw = tokio::fs::read_to_string(api_config_path(root))
+        .await
+        .ok()?;
     serde_json::from_str(&raw).ok()
 }
 
@@ -971,7 +1034,10 @@ mod tests {
                 model: "deepseek-v4".into(),
                 reasoning_effort: Some("max".into()),
             }),
-            providers: vec![provider("deepseek", "DEEPSEEK_API_KEY"), provider("zen", "ZEN_API_KEY")],
+            providers: vec![
+                provider("deepseek", "DEEPSEEK_API_KEY"),
+                provider("zen", "ZEN_API_KEY"),
+            ],
         }
     }
 
@@ -1023,7 +1089,12 @@ mod tests {
         assert!(llm.contains_key(key("deepseek")));
         assert!(llm.contains_key(key("zen")));
         assert_eq!(
-            default_model.as_mapping().unwrap().get(key("model")).unwrap().as_str(),
+            default_model
+                .as_mapping()
+                .unwrap()
+                .get(key("model"))
+                .unwrap()
+                .as_str(),
             Some("deepseek-v4")
         );
     }
@@ -1057,7 +1128,12 @@ mod tests {
         let key = |s: &str| serde_yaml::Value::from(s);
         assert!(!llm.contains_key(key("deepseek")));
         assert_eq!(
-            default_model.as_mapping().unwrap().get(key("model")).unwrap().as_str(),
+            default_model
+                .as_mapping()
+                .unwrap()
+                .get(key("model"))
+                .unwrap()
+                .as_str(),
             Some("zen-fast")
         );
     }
@@ -1072,10 +1148,16 @@ mod tests {
         let (llm, default_model) = resolve_sections(&config(), &ApiBinding::default()).unwrap();
         merge_sections(&mut doc, &llm, &default_model).unwrap();
         let out = serde_yaml::to_string(&doc).unwrap();
-        assert!(out.contains("ui-theme: dark"), "unknown key survived: {out}");
+        assert!(
+            out.contains("ui-theme: dark"),
+            "unknown key survived: {out}"
+        );
         assert!(out.contains("google:"), "existing provider survived: {out}");
         assert!(out.contains("deepseek:"), "bound provider injected: {out}");
-        assert!(out.contains("deepseek-v4"), "default model overwritten: {out}");
+        assert!(
+            out.contains("deepseek-v4"),
+            "default model overwritten: {out}"
+        );
         assert!(!out.contains("keep-me"), "old default replaced: {out}");
     }
 
@@ -1089,7 +1171,10 @@ mod tests {
         let (llm, default_model) = resolve_sections(&c, &b).unwrap();
         merge_sections(&mut doc, &llm, &default_model).unwrap();
         let out = serde_yaml::to_string(&doc).unwrap();
-        assert!(out.contains("keep-me"), "null default must not erase: {out}");
+        assert!(
+            out.contains("keep-me"),
+            "null default must not erase: {out}"
+        );
     }
 
     #[tokio::test]
@@ -1102,7 +1187,10 @@ mod tests {
         let imported = import_inner(&dir).await.unwrap().unwrap();
         let names: Vec<&str> = imported.providers.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"deepseek") && names.contains(&"zen"));
-        assert_eq!(imported.default_model.as_ref().unwrap().model, "deepseek-v4");
+        assert_eq!(
+            imported.default_model.as_ref().unwrap().model,
+            "deepseek-v4"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1122,18 +1210,28 @@ mod tests {
 
         // A user hand-edit of an UNMANAGED key must not read as drift; an edit
         // inside the managed provider map must.
-        let raw = tokio::fs::read_to_string(settings_path(&dir)).await.unwrap();
+        let raw = tokio::fs::read_to_string(settings_path(&dir))
+            .await
+            .unwrap();
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
-        doc.as_mapping_mut().unwrap().insert("ui-theme".into(), "light".into());
+        doc.as_mapping_mut()
+            .unwrap()
+            .insert("ui-theme".into(), "light".into());
         tokio::fs::write(settings_path(&dir), serde_yaml::to_string(&doc).unwrap())
             .await
             .unwrap();
         let mut doc = read_settings(&dir).await.unwrap();
         let before = serde_yaml::to_string(&doc).unwrap();
         merge_sections(&mut doc, &llm, &dm).unwrap();
-        assert_eq!(before, serde_yaml::to_string(&doc).unwrap(), "unmanaged edit is not drift");
+        assert_eq!(
+            before,
+            serde_yaml::to_string(&doc).unwrap(),
+            "unmanaged edit is not drift"
+        );
 
-        let raw = tokio::fs::read_to_string(settings_path(&dir)).await.unwrap();
+        let raw = tokio::fs::read_to_string(settings_path(&dir))
+            .await
+            .unwrap();
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
         let key = |s: &str| serde_yaml::Value::from(s);
         doc.as_mapping_mut()
@@ -1153,7 +1251,11 @@ mod tests {
         let mut doc = read_settings(&dir).await.unwrap();
         let before = serde_yaml::to_string(&doc).unwrap();
         merge_sections(&mut doc, &llm, &dm).unwrap();
-        assert_ne!(before, serde_yaml::to_string(&doc).unwrap(), "managed edit is drift");
+        assert_ne!(
+            before,
+            serde_yaml::to_string(&doc).unwrap(),
+            "managed edit is drift"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1179,11 +1281,17 @@ mod tests {
         println!(
             "imported {} providers: {:?}",
             imported.providers.len(),
-            imported.providers.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+            imported
+                .providers
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
         );
         assert!(!imported.providers.is_empty());
 
-        let applied = sync_inner(&dir, &ApiBinding::default(), &imported).await.unwrap();
+        let applied = sync_inner(&dir, &ApiBinding::default(), &imported)
+            .await
+            .unwrap();
         let after = import_inner(&dir).await.unwrap().unwrap();
         assert_eq!(after.providers.len(), imported.providers.len());
         // The import/sync loop must be stable on the user's real file.
@@ -1207,7 +1315,9 @@ mod tests {
         // not as "has local changes".
         let (root, _dir) = temp_root_with_instance("never-synced");
         let b = ApiBinding::default(); // inheritance default, syncedHash None
-        let snap = snapshot_inner(&root, "never-synced", &b, &config()).await.unwrap();
+        let snap = snapshot_inner(&root, "never-synced", &b, &config())
+            .await
+            .unwrap();
         assert!(!snap.local_changes);
         assert!(!snap.default_model_changed);
         assert!(snap.live.is_none());
@@ -1230,7 +1340,9 @@ mod tests {
 
         // A local DSH-side edit (tamper a managed provider's URL) and an
         // unmanaged local provider both must surface.
-        let raw = tokio::fs::read_to_string(settings_path(&dir)).await.unwrap();
+        let raw = tokio::fs::read_to_string(settings_path(&dir))
+            .await
+            .unwrap();
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
         {
             let key = |s: &str| serde_yaml::Value::from(s);
@@ -1263,7 +1375,10 @@ mod tests {
         assert!(snap.default_model_changed, "edited default model surfaces");
         let live = snap.live.unwrap();
         let names: Vec<&str> = live.providers.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"local-only"), "live view shows the file, not the library");
+        assert!(
+            names.contains(&"local-only"),
+            "live view shows the file, not the library"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1273,8 +1388,11 @@ mod tests {
         // Unmanaged bindings must be a no-op even when a library exists.
         let (root, dir) = temp_root_with_instance("gate-none");
         std::fs::create_dir_all(api_config_path(&root).parent().unwrap()).unwrap();
-        std::fs::write(api_config_path(&root), serde_json::to_string(&config()).unwrap())
-            .unwrap();
+        std::fs::write(
+            api_config_path(&root),
+            serde_json::to_string(&config()).unwrap(),
+        )
+        .unwrap();
         let none = ApiBinding {
             inheritance: "none".into(),
             provider_ids: vec![],
@@ -1282,8 +1400,13 @@ mod tests {
             synced_at: None,
             synced_hash: None,
         };
-        assert!(apply_create_binding(&root, &dir, "gate-none", none).await.is_none());
-        assert!(!settings_path(&dir).exists(), "unmanaged means never written");
+        assert!(apply_create_binding(&root, &dir, "gate-none", none)
+            .await
+            .is_none());
+        assert!(
+            !settings_path(&dir).exists(),
+            "unmanaged means never written"
+        );
 
         // Managed but no library: skipped, and the binding stays without a
         // baseline so the launch-time materialization can take over later.
@@ -1294,8 +1417,11 @@ mod tests {
 
         // Library returns: the same call materializes and persists.
         std::fs::create_dir_all(api_config_path(&root).parent().unwrap()).unwrap();
-        std::fs::write(api_config_path(&root), serde_json::to_string(&config()).unwrap())
-            .unwrap();
+        std::fs::write(
+            api_config_path(&root),
+            serde_json::to_string(&config()).unwrap(),
+        )
+        .unwrap();
         let out = apply_create_binding(&root, &dir, "gate-none", ApiBinding::default()).await;
         assert!(out.is_some());
         assert!(settings_path(&dir).exists());
@@ -1317,7 +1443,9 @@ mod tests {
             synced_at: None,
             synced_hash: None,
         };
-        let snap = snapshot_inner(&root, "unmanaged", &b, &config()).await.unwrap();
+        let snap = snapshot_inner(&root, "unmanaged", &b, &config())
+            .await
+            .unwrap();
         assert!(!snap.local_changes);
         assert_eq!(snap.live.unwrap().providers.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1345,8 +1473,11 @@ mod tests {
             })
         });
         let keys = provider_launch_keys(&c, &ApiBinding::default());
-        assert_eq!(keys, vec![("DEEPSEEK_API_KEY".to_string(), "sk-live".to_string())],
-            "blank stored keys are no keys; names are trimmed of the value only");
+        assert_eq!(
+            keys,
+            vec![("DEEPSEEK_API_KEY".to_string(), "sk-live".to_string())],
+            "blank stored keys are no keys; names are trimmed of the value only"
+        );
 
         // custom binding only pulls what it selects.
         let custom = ApiBinding {
@@ -1357,7 +1488,10 @@ mod tests {
         assert!(provider_launch_keys(&c, &custom).is_empty());
 
         // unmanaged bindings expose nothing to inject.
-        let none = ApiBinding { inheritance: "none".into(), ..Default::default() };
+        let none = ApiBinding {
+            inheritance: "none".into(),
+            ..Default::default()
+        };
         assert!(provider_launch_keys(&c, &none).is_empty());
     }
 
@@ -1374,10 +1508,15 @@ mod tests {
         std::fs::write(api_config_path(&root), serde_json::to_string(&c).unwrap()).unwrap();
         let b = ApiBinding::default();
         let applied = sync_inner(&dir, &b, &c).await.unwrap();
-        let snap = snapshot_inner(&root, "stored-key", &applied, &c).await.unwrap();
+        let snap = snapshot_inner(&root, "stored-key", &applied, &c)
+            .await
+            .unwrap();
         assert_eq!(
             snap.missing_keys,
-            vec![format!("PHL_TEST_UNSET_{}", c.providers[1].name.to_uppercase())],
+            vec![format!(
+                "PHL_TEST_UNSET_{}",
+                c.providers[1].name.to_uppercase()
+            )],
             "the provider with a stored key must not read as missing"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1385,20 +1524,35 @@ mod tests {
 
     #[test]
     fn models_url_shapes() {
-        assert_eq!(models_url("https://api.openai.com/v1"), "https://api.openai.com/v1/models");
-        assert_eq!(models_url("https://api.openai.com/v1/"), "https://api.openai.com/v1/models");
+        assert_eq!(
+            models_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            models_url("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1/models"
+        );
         // trailing version segment: never double up /v1/v1
         assert_eq!(
             models_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             "https://dashscope.aliyuncs.com/compatible-mode/v1/models"
         );
-        assert_eq!(models_url("https://g.example/paas/v2"), "https://g.example/paas/v2/models");
+        assert_eq!(
+            models_url("https://g.example/paas/v2"),
+            "https://g.example/paas/v2/models"
+        );
         // bare host / missing scheme
-        assert_eq!(models_url("api.deepseek.com"), "https://api.deepseek.com/v1/models");
+        assert_eq!(
+            models_url("api.deepseek.com"),
+            "https://api.deepseek.com/v1/models"
+        );
         // host with non-version path: treat as full base, append /v1/models —
         // a gateway that serves the API off a subpath is the user's problem,
         // the documented base always carries the version or is the root.
-        assert_eq!(models_url("https://x.example/api"), "https://x.example/api/v1/models");
+        assert_eq!(
+            models_url("https://x.example/api"),
+            "https://x.example/api/v1/models"
+        );
         assert_eq!(models_url("  "), "");
     }
 
@@ -1418,9 +1572,22 @@ mod tests {
         });
         let out = parse_models_body(&body);
         let ids: Vec<&str> = out.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["gpt-a", "with-name", "anthropic-style", "both-fields", "extra"]);
+        assert_eq!(
+            ids,
+            [
+                "gpt-a",
+                "with-name",
+                "anthropic-style",
+                "both-fields",
+                "extra"
+            ]
+        );
         assert_eq!(out[2].name.as_deref(), Some("Claude Opus"));
-        assert_eq!(out[3].name.as_deref(), Some("Human Label"), "display_name wins over name");
+        assert_eq!(
+            out[3].name.as_deref(),
+            Some("Human Label"),
+            "display_name wins over name"
+        );
         assert_eq!(out[0].name, None);
         // total garbage → empty, not an error
         assert!(parse_models_body(&serde_json::json!({ "models": [] })).is_empty());
@@ -1456,9 +1623,11 @@ mod tests {
 
     #[tokio::test]
     async fn empty_base_url_rejected() {
-        assert!(fetch_provider_models("".into(), None, "X".into(), Some("k".into()))
-            .await
-            .is_err());
+        assert!(
+            fetch_provider_models("".into(), None, "X".into(), Some("k".into()))
+                .await
+                .is_err()
+        );
     }
 
     /// End-to-end against a throwaway local server: exercises the real
@@ -1517,7 +1686,11 @@ mod tests {
         .await
         {
             Ok(models) => {
-                println!("models: {} → {:?}", models.len(), models.iter().map(|m| &m.id).collect::<Vec<_>>());
+                println!(
+                    "models: {} → {:?}",
+                    models.len(),
+                    models.iter().map(|m| &m.id).collect::<Vec<_>>()
+                );
             }
             Err(e) => println!("probe reported: {e}"),
         }

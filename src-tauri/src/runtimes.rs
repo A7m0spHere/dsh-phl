@@ -124,7 +124,10 @@ pub async fn list_installed_runtimes(
 #[tauri::command]
 pub async fn system_node_version() -> Option<String> {
     tokio::task::spawn_blocking(|| {
-        let output = std::process::Command::new("node").arg("--version").output().ok()?;
+        let output = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -177,7 +180,9 @@ pub async fn remove_runtime_dir(
     let dir = root.join("runtimes").join(&safe);
     ensure_under_root(&root.join("runtimes"), &dir)?;
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -185,9 +190,7 @@ pub async fn remove_runtime_dir(
 /// Bytes on disk per installed runtime, for the Runtimes overview. The dist
 /// index does not publish sizes, so this is the only honest number there is.
 #[tauri::command]
-pub async fn runtimes_disk_usage(
-    phl: State<'_, PhlState>,
-) -> Result<HashMap<String, u64>, String> {
+pub async fn runtimes_disk_usage(phl: State<'_, PhlState>) -> Result<HashMap<String, u64>, String> {
     let dir = phl.root().join("runtimes");
     let mut out = HashMap::new();
     let mut entries = match tokio::fs::read_dir(&dir).await {
@@ -250,8 +253,12 @@ async fn run_runtime_install(
     let staging = crate::versions::txn_dir(&runtimes_dir, &version_name, "staging", token);
     let backup = crate::versions::txn_dir(&runtimes_dir, &version_name, "backup", token);
     let part_path = cache_dir.join(format!("{filename}.part"));
-    tokio::fs::create_dir_all(&runtimes_dir).await.map_err(|e| e.to_string())?;
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&runtimes_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Everything below lands in the staging dir; the installed tree for this
     // major is only touched once a complete replacement exists. Deleting the
@@ -259,9 +266,19 @@ async fn run_runtime_install(
     // failed download just destroyed.
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
-    let downloaded: Downloaded = download(flag, &url, &part_path, None, &|progress, bytes_done, bytes_per_sec| {
-        let _ = on_progress.send(ProgressEvent::Downloading { progress, bytes_done, bytes_per_sec });
-    })
+    let downloaded: Downloaded = download(
+        flag,
+        &url,
+        &part_path,
+        None,
+        &|progress, bytes_done, bytes_per_sec| {
+            let _ = on_progress.send(ProgressEvent::Downloading {
+                progress,
+                bytes_done,
+                bytes_per_sec,
+            });
+        },
+    )
     .await?;
 
     on_progress
@@ -275,16 +292,26 @@ async fn run_runtime_install(
         .send(ProgressEvent::Extracting { progress: 0.0 })
         .map_err(|e| e.to_string())?;
     if platform.ends_with(".zip") {
-        extract_zip(&part_path, &staging, &|progress| {
-            let _ = on_progress.send(ProgressEvent::Extracting { progress });
-        }, flag)
+        extract_zip(
+            &part_path,
+            &staging,
+            &|progress| {
+                let _ = on_progress.send(ProgressEvent::Extracting { progress });
+            },
+            flag,
+        )
         .await?;
     } else {
         // The .tar.gz nests everything under node-v…-<platform>/;
         // versions::extract strips the first component, same as npm's package/.
-        extract(&part_path, &staging, &|progress| {
-            let _ = on_progress.send(ProgressEvent::Extracting { progress });
-        }, flag)
+        extract(
+            &part_path,
+            &staging,
+            &|progress| {
+                let _ = on_progress.send(ProgressEvent::Extracting { progress });
+            },
+            flag,
+        )
         .await?;
     }
 
@@ -316,34 +343,29 @@ async fn run_runtime_install(
 
     // Swap in through the shared promote path: backup, rename, final verify
     // (marker version must match), rollback of the old tree on any failure.
-    crate::versions::promote_staged(
-        &staging,
-        &dest,
-        &backup,
-        &|installed: &Path| {
-            let marker = std::fs::read_to_string(installed.join("phl-runtime.json"))
-                .map_err(|e| format!("Runtime 标记读取失败: {e}"))?;
-            let parsed: RuntimeMarker = serde_json::from_str(&marker)
-                .map_err(|e| format!("Runtime 标记解析失败: {e}"))?;
-            if parsed.version != version {
-                return Err(format!(
-                    "Runtime 标记版本 {} 与目标 {version} 不一致",
-                    parsed.version
-                ));
-            }
-            // The zip layout puts node.exe at the top level, the tar layout
-            // in bin/ — same distinction `runtime_bin_dir` encodes.
-            let bin = if cfg!(windows) {
-                installed.to_path_buf()
-            } else {
-                installed.join("bin")
-            };
-            if !bin.join(node_binary()).exists() {
-                return Err("node 可执行文件缺失".into());
-            }
-            Ok(())
-        },
-    )
+    crate::versions::promote_staged(&staging, &dest, &backup, &|installed: &Path| {
+        let marker = std::fs::read_to_string(installed.join("phl-runtime.json"))
+            .map_err(|e| format!("Runtime 标记读取失败: {e}"))?;
+        let parsed: RuntimeMarker =
+            serde_json::from_str(&marker).map_err(|e| format!("Runtime 标记解析失败: {e}"))?;
+        if parsed.version != version {
+            return Err(format!(
+                "Runtime 标记版本 {} 与目标 {version} 不一致",
+                parsed.version
+            ));
+        }
+        // The zip layout puts node.exe at the top level, the tar layout
+        // in bin/ — same distinction `runtime_bin_dir` encodes.
+        let bin = if cfg!(windows) {
+            installed.to_path_buf()
+        } else {
+            installed.join("bin")
+        };
+        if !bin.join(node_binary()).exists() {
+            return Err("node 可执行文件缺失".into());
+        }
+        Ok(())
+    })
     .await?;
     Ok(())
 }
@@ -429,7 +451,12 @@ fn group_catalog(entries: Vec<DistEntry>) -> Vec<NodeRuntimeMeta> {
         let Some(semver) = parse_semver(&version) else {
             continue;
         };
-        let line = MajorLine { major: semver.major, version, codename: entry.lts, semver };
+        let line = MajorLine {
+            major: semver.major,
+            version,
+            codename: entry.lts,
+            semver,
+        };
         let major = line.major;
         match lines.iter_mut().find(|l| l.major == major) {
             Some(existing) if existing.semver < line.semver => *existing = line,
@@ -488,7 +515,10 @@ fn parse_shasums(text: &str) -> HashMap<String, String> {
         let (Some(hash), Some(filename)) = (parts.next(), parts.next()) else {
             continue;
         };
-        out.insert(filename.trim_start_matches('*').to_string(), hash.to_string());
+        out.insert(
+            filename.trim_start_matches('*').to_string(),
+            hash.to_string(),
+        );
     }
     out
 }
@@ -519,7 +549,9 @@ async fn extract_zip<F: Fn(f64) + Send + Sync>(
     on_tick: &F,
     flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    tokio::fs::create_dir_all(dest).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(dest)
+        .await
+        .map_err(|e| e.to_string())?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<f64, String>>(16);
     let path = archive_path.to_path_buf();
     let dest = dest.to_path_buf();
@@ -553,7 +585,8 @@ async fn extract_zip<F: Fn(f64) + Send + Sync>(
                         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                     }
                     let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut entry, &mut out).map_err(|e| format!("解压写入失败: {e}"))?;
+                    std::io::copy(&mut entry, &mut out)
+                        .map_err(|e| format!("解压写入失败: {e}"))?;
                     // Node's unix archives are tarballs; only the zip path can
                     // lose the executable bit.
                     #[cfg(unix)]
@@ -595,7 +628,10 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     fn entry(version: &str, lts: Option<&str>) -> DistEntry {
-        DistEntry { version: version.into(), lts: lts.map(str::to_string) }
+        DistEntry {
+            version: version.into(),
+            lts: lts.map(str::to_string),
+        }
     }
 
     #[test]
@@ -663,9 +699,13 @@ mod tests {
         let map = parse_shasums(
             "abc123  node-v22.11.0-win-x64.zip\n0123 *node-v22.11.0-darwin-x64.tar.gz\n\n",
         );
-        assert_eq!(map.get("node-v22.11.0-win-x64.zip").map(String::as_str), Some("abc123"));
         assert_eq!(
-            map.get("node-v22.11.0-darwin-x64.tar.gz").map(String::as_str),
+            map.get("node-v22.11.0-win-x64.zip").map(String::as_str),
+            Some("abc123")
+        );
+        assert_eq!(
+            map.get("node-v22.11.0-darwin-x64.tar.gz")
+                .map(String::as_str),
             Some("0123")
         );
 
@@ -705,10 +745,12 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
         let opts = zip::write::SimpleFileOptions::default();
         zip.add_directory("node-v0.0.0-win-x64/lib", opts).unwrap();
-        zip.start_file("node-v0.0.0-win-x64/node.exe", opts).unwrap();
+        zip.start_file("node-v0.0.0-win-x64/node.exe", opts)
+            .unwrap();
         use std::io::Write;
         zip.write_all(b"bin").unwrap();
-        zip.start_file("node-v0.0.0-win-x64/lib/a.js", opts).unwrap();
+        zip.start_file("node-v0.0.0-win-x64/lib/a.js", opts)
+            .unwrap();
         zip.write_all(b"// a").unwrap();
         zip.finish().unwrap();
 
@@ -716,7 +758,10 @@ mod tests {
         extract_zip(&zip_path, &dest, &|_| {}, &Arc::new(AtomicBool::new(false)))
             .await
             .unwrap();
-        assert!(dest.join("node.exe").exists(), "top-level node-v…/ prefix stripped");
+        assert!(
+            dest.join("node.exe").exists(),
+            "top-level node-v…/ prefix stripped"
+        );
         assert!(dest.join("lib/a.js").exists());
         assert!(!dest.join("node-v0.0.0-win-x64").exists());
 
@@ -734,15 +779,21 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
         let opts = zip::write::SimpleFileOptions::default();
         for i in 0..50 {
-            zip.start_file(format!("node-v0.0.0-win-x64/f{i}.js"), opts).unwrap();
+            zip.start_file(format!("node-v0.0.0-win-x64/f{i}.js"), opts)
+                .unwrap();
             use std::io::Write;
             zip.write_all(b"x").unwrap();
         }
         zip.finish().unwrap();
 
-        let err = extract_zip(&zip_path, &dir.join("out"), &|_| {}, &Arc::new(AtomicBool::new(true)))
-            .await
-            .unwrap_err();
+        let err = extract_zip(
+            &zip_path,
+            &dir.join("out"),
+            &|_| {},
+            &Arc::new(AtomicBool::new(true)),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, "cancelled");
 
         let _ = std::fs::remove_dir_all(&dir);
