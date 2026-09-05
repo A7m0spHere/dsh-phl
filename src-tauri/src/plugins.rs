@@ -37,9 +37,16 @@ const REGISTRY_FALLBACKS: &[&str] = &["https://awesome-dsh-plugin.com", "https:/
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PluginSourceWire {
-    Npm { pkg: String },
-    Tarball { url: String, integrity: Option<String> },
-    Github { repo: String },
+    Npm {
+        pkg: String,
+    },
+    Tarball {
+        url: String,
+        integrity: Option<String>,
+    },
+    Github {
+        repo: String,
+    },
 }
 
 /// Mirrors the frontend `Plugin`. Live registry entries carry no releases —
@@ -77,10 +84,16 @@ pub struct PluginReleaseMeta {
 pub enum PluginProgressEvent {
     Preparing,
     #[serde(rename_all = "camelCase")]
-    Downloading { progress: f64, bytes_done: u64, bytes_per_sec: u64 },
+    Downloading {
+        progress: f64,
+        bytes_done: u64,
+        bytes_per_sec: u64,
+    },
     Verifying,
     #[serde(rename_all = "camelCase")]
-    Installing { progress: f64 },
+    Installing {
+        progress: f64,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -170,7 +183,11 @@ fn map_registry_entry(entry: RegistryEntry) -> Option<PluginMeta> {
         .or_else(|| entry.description.en.clone())
         .unwrap_or_default();
     let official = entry.owner.eq_ignore_ascii_case("deepseek-ai")
-        || entry.npm.as_deref().unwrap_or("").starts_with("@deepseek-ai/");
+        || entry
+            .npm
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("@deepseek-ai/");
     let name = if entry.name.is_empty() {
         repo.rsplit('/').next().unwrap_or(&repo).to_string()
     } else {
@@ -225,7 +242,11 @@ fn parse_registry(text: &str) -> Result<RegistryFile, String> {
 }
 
 fn map_registry_file(mut file: RegistryFile) -> Vec<PluginMeta> {
-    let mut out: Vec<PluginMeta> = file.plugins.drain(..).filter_map(map_registry_entry).collect();
+    let mut out: Vec<PluginMeta> = file
+        .plugins
+        .drain(..)
+        .filter_map(map_registry_entry)
+        .collect();
     out.sort_by(|a, b| b.downloads.cmp(&a.downloads).then(a.id.cmp(&b.id)));
     out
 }
@@ -394,7 +415,9 @@ fn registry_id_of(source: &PluginSourceWire) -> String {
             .unwrap_or("plugin")
             .trim_end_matches(".tgz")
             .to_string(),
-        PluginSourceWire::Github { repo } => repo.rsplit('/').next().unwrap_or("plugin").to_string(),
+        PluginSourceWire::Github { repo } => {
+            repo.rsplit('/').next().unwrap_or("plugin").to_string()
+        }
     }
 }
 
@@ -476,9 +499,19 @@ async fn run_plugin_install(
         .await
         .map_err(|e| format!("无法创建缓存目录: {e}"))?;
     let part_path = cache_dir.join(format!("{}.part", sanitize_cache_name(&registry_id)));
-    let downloaded = download(flag, &resolved.url, &part_path, None, &|progress, bytes_done, bytes_per_sec| {
-        let _ = on_progress.send(PluginProgressEvent::Downloading { progress, bytes_done, bytes_per_sec });
-    })
+    let downloaded = download(
+        flag,
+        &resolved.url,
+        &part_path,
+        None,
+        &|progress, bytes_done, bytes_per_sec| {
+            let _ = on_progress.send(PluginProgressEvent::Downloading {
+                progress,
+                bytes_done,
+                bytes_per_sec,
+            });
+        },
+    )
     .await;
 
     let downloaded = match downloaded {
@@ -508,9 +541,14 @@ async fn run_plugin_install(
     let _ = tokio::fs::remove_dir_all(&backup).await;
 
     let install_result = async {
-        extract(&part_path, &staging, &|progress| {
-            let _ = on_progress.send(PluginProgressEvent::Installing { progress });
-        }, flag)
+        extract(
+            &part_path,
+            &staging,
+            &|progress| {
+                let _ = on_progress.send(PluginProgressEvent::Installing { progress });
+            },
+            flag,
+        )
         .await?;
         if !staging.exists() {
             return Err("压缩包内没有预期的 package/ 前缀".into());
@@ -587,7 +625,13 @@ fn source_kind(source: &PluginSourceWire) -> &'static str {
 
 fn sanitize_cache_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -664,11 +708,16 @@ pub(crate) async fn disabled_plugin_ids(instance_root: &Path) -> std::collection
         let Some(rest) = line.trim_start().strip_prefix("- id:") else {
             continue;
         };
-        let id = rest.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+        let id = rest
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
         if id.is_empty() {
             continue;
         }
-        let Some(range) = find_block(&lines, &id) else { continue };
+        let Some(range) = find_block(&lines, &id) else {
+            continue;
+        };
         if range.0 != i {
             continue; // a later duplicate block; the first one wins
         }
@@ -830,7 +879,9 @@ pub async fn uninstall_plugin(
     let dir = profile.join("node_modules").join(&registry_id);
     crate::paths::ensure_under_root(&profile.join("node_modules"), &dir)?;
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -83,7 +83,12 @@ pub struct Launches(pub Mutex<HashMap<String, Arc<AtomicBool>>>);
 
 impl Launches {
     fn take(&self, id: &str) -> Arc<AtomicBool> {
-        self.0.lock().expect("launches lock").entry(id.to_string()).or_default().clone()
+        self.0
+            .lock()
+            .expect("launches lock")
+            .entry(id.to_string())
+            .or_default()
+            .clone()
     }
 
     fn cancel(&self, id: &str) {
@@ -155,7 +160,10 @@ pub async fn launch_instance(
 /// Not running in the map → nothing to do; the exit event (or its absence)
 /// keeps the frontend state honest either way.
 #[tauri::command]
-pub async fn stop_instance(processes: State<'_, Processes>, instance_id: String) -> Result<(), String> {
+pub async fn stop_instance(
+    processes: State<'_, Processes>,
+    instance_id: String,
+) -> Result<(), String> {
     // Read, kill, and only then forget. Removing first meant a failed
     // `taskkill` (elevated child, access denied) left the process alive with
     // PHL no longer tracking it: its port looked free, the close guard stopped
@@ -250,7 +258,9 @@ async fn run_launch(
     let dsh_home = instance_dir.join("dsh-home");
     let workspace = instance_dir.join("workspace");
     for dir in [dsh_home.join("profiles").join(&profile), workspace.clone()] {
-        tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // Pre-launch API handling. Two things happen, and the difference between
@@ -274,9 +284,13 @@ async fn run_launch(
                 && binding.synced_hash.is_none()
                 && !dsh_home.join("settings.yaml").exists()
             {
-                if let Some(applied) =
-                    crate::api_config::apply_create_binding(root, &instance_dir, &instance_id, binding)
-                        .await
+                if let Some(applied) = crate::api_config::apply_create_binding(
+                    root,
+                    &instance_dir,
+                    &instance_id,
+                    binding,
+                )
+                .await
                 {
                     eprintln!("[phl] api config materialized into {instance_id} at launch");
                     manifest.api = Some(applied);
@@ -315,7 +329,9 @@ async fn run_launch(
     });
 
     let logs_dir = instance_dir.join("logs");
-    tokio::fs::create_dir_all(&logs_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&logs_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     let log_path = logs_dir.join(format!("launch-{}.log", now_iso().replace(':', "-")));
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -355,12 +371,16 @@ async fn run_launch(
     }
     command
         .current_dir(&workspace)
-        .stdout(std::process::Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+        .stdout(std::process::Stdio::from(
+            log.try_clone().map_err(|e| e.to_string())?,
+        ))
         .stderr(std::process::Stdio::from(log));
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = command.spawn().map_err(|e| format!("无法启动 DSH 进程: {e}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("无法启动 DSH 进程: {e}"))?;
     let pid = child.id().ok_or("进程已启动但没有 PID")?;
     processes
         .0
@@ -373,11 +393,19 @@ async fn run_launch(
         if Launches::is_cancelled(cancel) {
             // kill_tree, not child.kill(): node is only the root of the tree.
             let _ = kill_tree(pid).await;
-            processes.0.lock().expect("processes lock").remove(&instance_id);
+            processes
+                .0
+                .lock()
+                .expect("processes lock")
+                .remove(&instance_id);
             return Err("cancelled".into());
         }
         if let Ok(Some(status)) = child.try_wait() {
-            processes.0.lock().expect("processes lock").remove(&instance_id);
+            processes
+                .0
+                .lock()
+                .expect("processes lock")
+                .remove(&instance_id);
             let tail = log_tail(&log_path, 30).await;
             return Err(format!(
                 "DSH 进程在就绪前退出（code {}）。\n--- 日志末尾 ---\n{tail}",
@@ -386,19 +414,29 @@ async fn run_launch(
         }
         // A listening socket is the readiness signal; HTTP shape is DSH's
         // business, not ours.
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             break;
         }
         let elapsed = started.elapsed();
         if elapsed >= READY_TIMEOUT {
             let _ = kill_tree(pid).await;
-            processes.0.lock().expect("processes lock").remove(&instance_id);
+            processes
+                .0
+                .lock()
+                .expect("processes lock")
+                .remove(&instance_id);
             let tail = log_tail(&log_path, 30).await;
-            return Err(format!("等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"));
+            return Err(format!(
+                "等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"
+            ));
         }
         let _ = on_progress.send(LaunchEvent {
             stage: "await-ready".into(),
-            progress: (0.36 + 0.61 * (elapsed.as_secs_f64() / READY_TIMEOUT.as_secs_f64())).min(0.97),
+            progress: (0.36 + 0.61 * (elapsed.as_secs_f64() / READY_TIMEOUT.as_secs_f64()))
+                .min(0.97),
             detail: None,
         });
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -409,7 +447,11 @@ async fn run_launch(
     // linger). One final liveness check before reporting success keeps the
     // frontend from displaying "running" for a corpse.
     if let Ok(Some(status)) = child.try_wait() {
-        processes.0.lock().expect("processes lock").remove(&instance_id);
+        processes
+            .0
+            .lock()
+            .expect("processes lock")
+            .remove(&instance_id);
         let tail = log_tail(&log_path, 30).await;
         return Err(format!(
             "DSH 进程在就绪后立即退出（code {}）。\n--- 日志末尾 ---\n{tail}",
@@ -468,10 +510,17 @@ async fn read_web_url(log_path: &Path) -> Option<String> {
 fn parse_web_url(log_text: &str) -> Option<String> {
     for line in log_text.lines() {
         const MARKER: &str = "dsh web:";
-        let Some(idx) = line.find(MARKER) else { continue };
+        let Some(idx) = line.find(MARKER) else {
+            continue;
+        };
         let rest = line[idx + MARKER.len()..].trim_start();
-        let Some(start) = rest.find("http") else { continue };
-        let url: String = rest[start..].chars().take_while(|c| !c.is_whitespace()).collect();
+        let Some(start) = rest.find("http") else {
+            continue;
+        };
+        let url: String = rest[start..]
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
         if !url.is_empty() {
             return Some(url);
         }
@@ -494,7 +543,11 @@ fn build_command(
     dsh_home: &Path,
 ) -> Result<CommandPlan, String> {
     let node = resolve_node(root, runtime_name)?;
-    let bin = root.join("versions").join(version_name).join("lib").join("bin.js");
+    let bin = root
+        .join("versions")
+        .join(version_name)
+        .join("lib")
+        .join("bin.js");
     if !bin.exists() {
         return Err(format!("DSH 版本 {version_name} 未安装（缺少 lib/bin.js）"));
     }
@@ -512,7 +565,10 @@ fn build_command(
         let sep = if cfg!(windows) { ";" } else { ":" };
         let bin_dir = runtime_bin_dir(root, runtime_name);
         let existing = std::env::var("PATH").unwrap_or_default();
-        env_pairs.push(("PATH".into(), format!("{}{sep}{existing}", bin_dir.display())));
+        env_pairs.push((
+            "PATH".into(),
+            format!("{}{sep}{existing}", bin_dir.display()),
+        ));
     }
     Ok((node, cmd_args, env_pairs))
 }
@@ -525,7 +581,10 @@ pub(crate) fn resolve_node(root: &Path, runtime_name: &str) -> Result<PathBuf, S
     }
     let node = runtime_bin_dir(root, runtime_name).join(node_binary());
     if !node.exists() {
-        return Err(format!("Runtime {runtime_name} 未安装（缺少 {}）", node.display()));
+        return Err(format!(
+            "Runtime {runtime_name} 未安装（缺少 {}）",
+            node.display()
+        ));
     }
     Ok(node)
 }
@@ -553,10 +612,18 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Picks the port to listen on. PHL's own running instances are named in the
 /// error; anything else on the machine is caught by the bind test. Pure and
 /// synchronous — the async caller turns `Err` into a launch failure.
-fn allocate_port(processes: &Processes, instance_id: &str, wanted: u16, auto: bool) -> Result<u16, String> {
+fn allocate_port(
+    processes: &Processes,
+    instance_id: &str,
+    wanted: u16,
+    auto: bool,
+) -> Result<u16, String> {
     let map = processes.0.lock().expect("processes lock");
     if !auto {
-        if let Some((other, _)) = map.iter().find(|(id, e)| e.port == wanted && id.as_str() != instance_id) {
+        if let Some((other, _)) = map
+            .iter()
+            .find(|(id, e)| e.port == wanted && id.as_str() != instance_id)
+        {
             return Err(format!("端口 {wanted} 已被实例 {other} 占用"));
         }
         // The bind test is not optional here either. Checking only PHL's own
@@ -570,7 +637,9 @@ fn allocate_port(processes: &Processes, instance_id: &str, wanted: u16, auto: bo
     }
     let mut port = wanted;
     for _ in 0..100 {
-        let phl_taken = map.iter().any(|(id, e)| e.port == port && id != instance_id);
+        let phl_taken = map
+            .iter()
+            .any(|(id, e)| e.port == port && id != instance_id);
         if !phl_taken && port_free(port) {
             return Ok(port);
         }
@@ -637,7 +706,9 @@ pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
     // No libc dependency: `kill` on the direct child. DSH's own children are
     // expected to exit with it; a tree-kill here would need a setsid pre-exec.
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("kill").args(["-9", &pid.to_string()]).output()
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output()
     })
     .await
     .map_err(|e| e.to_string())?
@@ -673,9 +744,15 @@ mod tests {
             use std::os::unix::process::ExitStatusExt;
             std::process::ExitStatus::from_raw(256)
         };
-        let error = check_kill_output(123, std::process::Output {
-            status, stdout: vec![], stderr: b"access denied".to_vec(),
-        }).unwrap_err();
+        let error = check_kill_output(
+            123,
+            std::process::Output {
+                status,
+                stdout: vec![],
+                stderr: b"access denied".to_vec(),
+            },
+        )
+        .unwrap_err();
         assert!(error.contains("123"));
         assert!(error.contains("access denied"));
     }
@@ -727,11 +804,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("launch.log");
-        std::fs::write(
-            &path,
-            "dsh web: http://127.0.0.1:4000/?token=abc123\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "dsh web: http://127.0.0.1:4000/?token=abc123\n").unwrap();
         assert_eq!(
             read_web_url(&path).await.as_deref(),
             Some("http://127.0.0.1:4000/?token=abc123")
@@ -748,14 +821,24 @@ mod tests {
         std::fs::write(root.join("runtimes/node-22/node.exe"), "bin").unwrap();
 
         let dsh_home = root.join("instances/i/dsh-home");
-        let (program, args, env) =
-            build_command(&root, "0.1.0", "node-22", 3081, &["--verbose".into()], &dsh_home)
-                .unwrap();
+        let (program, args, env) = build_command(
+            &root,
+            "0.1.0",
+            "node-22",
+            3081,
+            &["--verbose".into()],
+            &dsh_home,
+        )
+        .unwrap();
 
         assert!(program.to_string_lossy().ends_with("node.exe"));
         // User args first, then our --port / --no-open — a duplicate --port
         // from the instance config can never override PHL's allocation.
-        let expected_bin = root.join("versions").join("0.1.0").join("lib").join("bin.js");
+        let expected_bin = root
+            .join("versions")
+            .join("0.1.0")
+            .join("lib")
+            .join("bin.js");
         assert_eq!(
             args,
             vec![
@@ -768,13 +851,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            env.iter().find(|(k, _)| k == "DSH_HOME").map(|(_, v)| v.as_str()),
+            env.iter()
+                .find(|(k, _)| k == "DSH_HOME")
+                .map(|(_, v)| v.as_str()),
             Some(dsh_home.to_string_lossy().as_ref())
         );
         // The runtime bin dir leads PATH so child processes resolve this node.
         let path = &env.iter().find(|(k, _)| k == "PATH").unwrap().1;
         assert!(path.starts_with(
-            root.join("runtimes").join("node-22").to_string_lossy().as_ref()
+            root.join("runtimes")
+                .join("node-22")
+                .to_string_lossy()
+                .as_ref()
         ));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -807,17 +895,21 @@ mod tests {
         let (program, _, env) =
             build_command(&root, "0.1.0", "node-system", 3080, &[], &root.join("h")).unwrap();
         assert_eq!(program, PathBuf::from("node"));
-        assert!(env.iter().all(|(k, _)| k != "PATH"), "system node is already on PATH");
+        assert!(
+            env.iter().all(|(k, _)| k != "PATH"),
+            "system node is already on PATH"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn port_allocation_skips_phl_and_os_conflicts() {
         let processes = Processes::default();
-        processes.0.lock().unwrap().insert(
-            "other".into(),
-            ProcessEntry { pid: 1, port: 3081 },
-        );
+        processes
+            .0
+            .lock()
+            .unwrap()
+            .insert("other".into(), ProcessEntry { pid: 1, port: 3081 });
 
         // Fixed port colliding with a PHL instance → next free port under auto…
         assert_eq!(allocate_port(&processes, "me", 3081, true).unwrap(), 3082);
@@ -850,7 +942,9 @@ mod tests {
         let dir = temp_dir("tail");
         let path = dir.join("launch.log");
         std::fs::write(&path, "l1\nl2\nl3\n").unwrap();
-        let tail = tokio::runtime::Runtime::new().unwrap().block_on(log_tail(&path, 2));
+        let tail = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(log_tail(&path, 2));
         assert_eq!(tail, "l2\nl3");
         let _ = std::fs::remove_dir_all(&dir);
     }

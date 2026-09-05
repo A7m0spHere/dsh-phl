@@ -105,7 +105,11 @@ fn read_deps_marker(version_dir: &Path) -> (String, Vec<String>) {
 #[serde(rename_all = "camelCase", tag = "stage")]
 pub enum ProgressEvent {
     #[serde(rename_all = "camelCase")]
-    Downloading { progress: f64, bytes_done: u64, bytes_per_sec: u64 },
+    Downloading {
+        progress: f64,
+        bytes_done: u64,
+        bytes_per_sec: u64,
+    },
     #[serde(rename_all = "camelCase")]
     Extracting { progress: f64 },
     #[serde(rename_all = "camelCase")]
@@ -220,7 +224,9 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
     // legacy/latest flags deliberately stay false — *installable* progress
     // is still what those badges mean.
     for (ver, rel) in github.iter().filter(|(ver, _)| !npm_names.contains(*ver)) {
-        let Some(sem) = parse_semver(ver) else { continue };
+        let Some(sem) = parse_semver(ver) else {
+            continue;
+        };
         // The 0.1.2-rc.1 line was published 15 minutes after each GitHub tag
         // historically; a day-old absence is an upstream decision, so say
         // *when* it was cut rather than implying it is imminent.
@@ -246,9 +252,9 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
     }
 
     out.sort_by(|a, b| {
-        parse_semver(&b.name).unwrap_or_else(|| semver::Version::new(0, 0, 0)).cmp(
-            &parse_semver(&a.name).unwrap_or_else(|| semver::Version::new(0, 0, 0)),
-        )
+        parse_semver(&b.name)
+            .unwrap_or_else(|| semver::Version::new(0, 0, 0))
+            .cmp(&parse_semver(&a.name).unwrap_or_else(|| semver::Version::new(0, 0, 0)))
     });
     Ok(out)
 }
@@ -335,7 +341,9 @@ pub async fn remove_version_dir(
     // redirect `remove_dir_all` outside the data root.
     ensure_under_root(&root.join("versions"), &dir)?;
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -484,7 +492,9 @@ async fn npm_catalog(
         ));
     }
     if out.is_empty() {
-        return Err(format!("npm registry 上没有找到 {DSH_PACKAGE_RAW} 的任何版本"));
+        return Err(format!(
+            "npm registry 上没有找到 {DSH_PACKAGE_RAW} 的任何版本"
+        ));
     }
     Ok((out, latest_semver))
 }
@@ -526,11 +536,18 @@ fn clean_note_line(line: &str) -> String {
             _ => {}
         }
     }
-    let cleaned = out.trim().trim_start_matches("- ").trim_start_matches("* ").trim();
+    let cleaned = out
+        .trim()
+        .trim_start_matches("- ")
+        .trim_start_matches("* ")
+        .trim();
     cleaned.to_string()
 }
 
-async fn github_releases(client: &reqwest::Client, prefer_mirror: bool) -> Result<HashMap<String, GhInfo>, String> {
+async fn github_releases(
+    client: &reqwest::Client,
+    prefer_mirror: bool,
+) -> Result<HashMap<String, GhInfo>, String> {
     // api.github.com is unreachable for many CN networks. Prefix proxies that
     // mirror the full URL work for the API too. The endpoints are raced in
     // parallel rather than tried in sequence: a sequential fallback pays the
@@ -539,8 +556,7 @@ async fn github_releases(client: &reqwest::Client, prefer_mirror: bool) -> Resul
     // still decides the winner when both return the same data at the same time.
     const MIRRORS: &[&str] = &["https://gh-proxy.com/"];
     let official = GITHUB_RELEASES.to_string();
-    let mut candidates: Vec<String> =
-        MIRRORS.iter().map(|m| format!("{m}{official}")).collect();
+    let mut candidates: Vec<String> = MIRRORS.iter().map(|m| format!("{m}{official}")).collect();
     if !prefer_mirror {
         candidates.push(official);
     }
@@ -681,8 +697,16 @@ fn find_npm_cli(node_program: &Path) -> Option<PathBuf> {
     };
     let dir = exec.parent()?;
     let candidates = [
-        dir.join("node_modules").join("npm").join("bin").join("npm-cli.js"),
-        dir.parent()?.join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js"),
+        dir.join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js"),
+        dir.parent()?
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js"),
     ];
     candidates.into_iter().find(|p| p.exists())
 }
@@ -730,12 +754,21 @@ fn strip_dev_dependencies(version_dir: &Path) -> bool {
     let Ok(mut pkg) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return false;
     };
-    let Some(map) = pkg.as_object_mut() else { return false };
-    if map.get("devDependencies").and_then(|v| v.as_object()).map(|o| o.is_empty()).unwrap_or(true) {
+    let Some(map) = pkg.as_object_mut() else {
+        return false;
+    };
+    if map
+        .get("devDependencies")
+        .and_then(|v| v.as_object())
+        .map(|o| o.is_empty())
+        .unwrap_or(true)
+    {
         return false;
     }
     map.remove("devDependencies");
-    let Ok(modified) = serde_json::to_string_pretty(&pkg) else { return false };
+    let Ok(modified) = serde_json::to_string_pretty(&pkg) else {
+        return false;
+    };
     std::fs::write(&path, modified).is_ok()
 }
 
@@ -751,7 +784,9 @@ fn remove_dep_from_manifest(version_dir: &Path, name: &str) -> bool {
     let Ok(mut pkg) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return false;
     };
-    let Some(map) = pkg.as_object_mut() else { return false };
+    let Some(map) = pkg.as_object_mut() else {
+        return false;
+    };
     let mut changed = false;
     for key in ["dependencies", "peerDependencies", "optionalDependencies"] {
         if let Some(deps) = map.get_mut(key).and_then(|d| d.as_object_mut()) {
@@ -761,7 +796,9 @@ fn remove_dep_from_manifest(version_dir: &Path, name: &str) -> bool {
     if !changed {
         return false;
     }
-    let Ok(modified) = serde_json::to_string_pretty(&pkg) else { return false };
+    let Ok(modified) = serde_json::to_string_pretty(&pkg) else {
+        return false;
+    };
     std::fs::write(&path, modified).is_ok()
 }
 
@@ -815,7 +852,9 @@ pub(crate) fn decide_not_found(
 fn parse_404_package(stderr_text: &str) -> Option<String> {
     for line in stderr_text.lines() {
         const MARKER: &str = "The requested resource '";
-        let Some(idx) = line.find(MARKER) else { continue };
+        let Some(idx) = line.find(MARKER) else {
+            continue;
+        };
         let rest = &line[idx + MARKER.len()..];
         let Some(end) = rest.find('\'') else { continue };
         let spec = &rest[..end]; // `@scope/name@range` or `name@range`
@@ -852,9 +891,16 @@ pub(crate) async fn install_version_deps(
     let mut skipped: Vec<String> = Vec::new();
     strip_dev_dependencies(version_dir);
 
-    let outcome =
-        install_deps_attempts(node_program, &npm_cli, version_dir, registry_base, flag, &on_progress, &mut skipped)
-            .await;
+    let outcome = install_deps_attempts(
+        node_program,
+        &npm_cli,
+        version_dir,
+        registry_base,
+        flag,
+        &on_progress,
+        &mut skipped,
+    )
+    .await;
 
     if !original_manifest.is_empty() {
         let _ = std::fs::write(version_dir.join("package.json"), &original_manifest);
@@ -938,7 +984,9 @@ async fn install_deps_attempts(
                         if !remove_dep_from_manifest(version_dir, &pkg) {
                             let _ =
                                 tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
-                            return Err(format!("依赖 {pkg} 在 registry 上不存在，且无法从清单中移除它"));
+                            return Err(format!(
+                                "依赖 {pkg} 在 registry 上不存在，且无法从清单中移除它"
+                            ));
                         }
                         skipped.push(pkg);
                         if attempt == 11 {
@@ -1077,7 +1125,10 @@ async fn run_npm_install(
     if status.success() {
         Ok(())
     } else if err_text.trim().is_empty() {
-        Err(format!("npm install 失败 (code {})", status.code().unwrap_or(-1)))
+        Err(format!(
+            "npm install 失败 (code {})",
+            status.code().unwrap_or(-1)
+        ))
     } else {
         Err(err_text)
     }
@@ -1175,7 +1226,9 @@ pub(crate) async fn promote_staged(
 /// A failed or cancelled attempt can only ever leave a `.phl-txn` child
 /// behind, never something that reads as an installed version or runtime.
 pub(crate) fn txn_dir(parent: &Path, name: &str, role: &str, token: u128) -> PathBuf {
-    parent.join(".phl-txn").join(format!("{name}.{role}-{token}"))
+    parent
+        .join(".phl-txn")
+        .join(format!("{name}.{role}-{token}"))
 }
 
 pub(crate) fn now_millis() -> u128 {
@@ -1239,7 +1292,9 @@ async fn run_install(
     let token = now_millis();
     let staging = txn_dir(&versions_dir, &version_name, "staging", token);
     let backup = txn_dir(&versions_dir, &version_name, "backup", token);
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::fs::create_dir_all(staging.parent().expect("txn parent"))
         .await
         .map_err(|e| e.to_string())?;
@@ -1249,9 +1304,19 @@ async fn run_install(
     // must leave the old version exactly where it was.
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
-    let downloaded = download(flag, tarball_url, &part_path, total_hint, &|progress, bytes_done, bytes_per_sec| {
-        let _ = on_progress.send(ProgressEvent::Downloading { progress, bytes_done, bytes_per_sec });
-    })
+    let downloaded = download(
+        flag,
+        tarball_url,
+        &part_path,
+        total_hint,
+        &|progress, bytes_done, bytes_per_sec| {
+            let _ = on_progress.send(ProgressEvent::Downloading {
+                progress,
+                bytes_done,
+                bytes_per_sec,
+            });
+        },
+    )
     .await?;
 
     on_progress
@@ -1265,9 +1330,14 @@ async fn run_install(
     on_progress
         .send(ProgressEvent::Extracting { progress: 0.0 })
         .map_err(|e| e.to_string())?;
-    if let Err(e) = extract(&part_path, &staging, &|progress| {
-        let _ = on_progress.send(ProgressEvent::Extracting { progress });
-    }, flag)
+    if let Err(e) = extract(
+        &part_path,
+        &staging,
+        &|progress| {
+            let _ = on_progress.send(ProgressEvent::Extracting { progress });
+        },
+        flag,
+    )
     .await
     {
         let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -1321,7 +1391,9 @@ async fn run_install(
     .await?;
 
     if keep_archive {
-        tokio::fs::rename(&part_path, &archive_path).await.map_err(|e| e.to_string())?;
+        tokio::fs::rename(&part_path, &archive_path)
+            .await
+            .map_err(|e| e.to_string())?;
     } else {
         let _ = tokio::fs::remove_file(&part_path).await;
     }
@@ -1382,7 +1454,9 @@ pub(crate) async fn download<F: Fn(f64, u64, u64) + Send + Sync>(
         let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
         hasher.update(&chunk);
         hasher256.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| format!("写入缓存失败: {e}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("写入缓存失败: {e}"))?;
         bytes_done += chunk.len() as u64;
 
         let elapsed = last_report.elapsed();
@@ -1395,7 +1469,11 @@ pub(crate) async fn download<F: Fn(f64, u64, u64) + Send + Sync>(
             };
             last_report = Instant::now();
             last_bytes = bytes_done;
-            let progress = if total > 0 { bytes_done as f64 / total as f64 } else { 0.0 };
+            let progress = if total > 0 {
+                bytes_done as f64 / total as f64
+            } else {
+                0.0
+            };
             on_tick(progress, bytes_done, last_speed);
         }
     }
@@ -1479,7 +1557,9 @@ pub(crate) async fn extract<F: Fn(f64) + Send + Sync>(
     on_tick: &F,
     flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    tokio::fs::create_dir_all(dest).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(dest)
+        .await
+        .map_err(|e| e.to_string())?;
     let compressed = tokio::fs::metadata(archive_path)
         .await
         .map(|m| m.len())
@@ -1495,7 +1575,10 @@ pub(crate) async fn extract<F: Fn(f64) + Send + Sync>(
         let consumed = Arc::new(AtomicU64::new(0));
         let result = (|| -> Result<(), String> {
             let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-            let counted = CountingReader { inner: file, read: Arc::clone(&consumed) };
+            let counted = CountingReader {
+                inner: file,
+                read: Arc::clone(&consumed),
+            };
             let mut archive = tar::Archive::new(GzDecoder::new(counted));
             let entries = archive.entries().map_err(|e| e.to_string())?;
             for entry in entries {
@@ -1567,7 +1650,12 @@ pub(crate) fn now_iso() -> String {
     let days = secs / 86_400;
     let (y, m, d) = civil_from_days(days as i64);
     let rem = secs % 86_400;
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 /// Howard Hinnant's days-to-civil algorithm (no external date crate).
@@ -1731,7 +1819,9 @@ mod tests {
         // Correct integrity passes.
         verify_integrity(digest.as_slice(), Some(&integrity)).unwrap();
         // A different payload's digest fails.
-        assert!(verify_integrity(Sha512::digest(b"tampered").as_slice(), Some(&integrity)).is_err());
+        assert!(
+            verify_integrity(Sha512::digest(b"tampered").as_slice(), Some(&integrity)).is_err()
+        );
         // An algorithm we cannot actually check must be refused, not skipped.
         assert!(verify_integrity(digest.as_slice(), Some("sha1-abc")).is_err());
         // No integrity published → nothing to check.
@@ -1742,7 +1832,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(dest.join("package.json").exists(), "package/ prefix stripped");
+        assert!(
+            dest.join("package.json").exists(),
+            "package/ prefix stripped"
+        );
         assert!(dest.join("lib/bin.js").exists());
         assert!(!dest.join("package").exists());
 
@@ -1899,10 +1992,7 @@ mod tests {
         let core = "commander";
 
         // Mirror 404 → retry official first, whatever the package is.
-        assert!(matches!(
-            decide_not_found(exp, true, false),
-            RetryOfficial
-        ));
+        assert!(matches!(decide_not_found(exp, true, false), RetryOfficial));
         assert!(matches!(decide_not_found(core, true, false), RetryOfficial));
 
         // Official 404 → the allowlist decides.
@@ -1917,7 +2007,10 @@ mod tests {
 
     #[test]
     fn engines_ranges_map_to_majors() {
-        assert_eq!(majors_from_engines(">=20"), (20u32..=34).collect::<Vec<_>>());
+        assert_eq!(
+            majors_from_engines(">=20"),
+            (20u32..=34).collect::<Vec<_>>()
+        );
         // `||` alternatives — `VersionReq` cannot parse these in one piece.
         let alt = majors_from_engines("^18.17.0 || >=20.5.0");
         assert!(alt.contains(&18) && alt.contains(&20) && alt.contains(&22));
@@ -1940,7 +2033,15 @@ mod net_tests {
             Ok(list) => {
                 println!("catalog OK: {} versions", list.len());
                 for v in list.iter().take(4) {
-                    println!("  {} channel={} size={} latest={} pending={} notes={}", v.name, v.channel, v.size, v.latest, v.pending_publish, v.notes.len());
+                    println!(
+                        "  {} channel={} size={} latest={} pending={} notes={}",
+                        v.name,
+                        v.channel,
+                        v.size,
+                        v.latest,
+                        v.pending_publish,
+                        v.notes.len()
+                    );
                 }
                 assert!(!list.is_empty());
             }
