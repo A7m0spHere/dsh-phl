@@ -27,8 +27,21 @@ async fn read_patch_lines(instance_root: &Path) -> Vec<String> {
     }
 }
 
+/// DSH scaffolds a fresh profile's patch file as a comment header plus a
+/// bare `[]`. That `[]` is already a complete document: appending a
+/// `- id:` block after it leaves two documents in one stream, and DSH's
+/// single-document loader then refuses the file at launch ("end of the
+/// stream or a document separator is expected"). A column-0 `[]` is never
+/// legitimate next to entries, so every write drops it — which both lets
+/// the first entry replace the placeholder and heals files a pre-fix PHL
+/// had already corrupted. An *indented* `[]` (a nested empty list) is left
+/// alone.
+fn drop_empty_list_placeholder(lines: Vec<String>) -> Vec<String> {
+    lines.into_iter().filter(|l| l.trim_end() != "[]").collect()
+}
+
 async fn write_patch_lines(instance_root: &Path, lines: &[String]) -> Result<(), String> {
-    let mut text = lines.join("\n");
+    let mut text = drop_empty_list_placeholder(lines.to_vec()).join("\n");
     if !text.is_empty() {
         text.push('\n');
     }
@@ -285,5 +298,80 @@ mod tests {
         let doc = lines("plugins:\n  - id: foo\n    name: foo\n  - id: bar\n");
         assert_eq!(find_block(&doc, "foo"), Some((1, 3)));
         assert_eq!(child_indent(&doc, (1, 3)), 4);
+    }
+
+    fn temp_profile(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("phl-cordis-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// serde_yaml refuses multi-document streams, same as DSH's loader — so
+    /// "parses as one sequence" is the exact launch-time acceptance test.
+    fn assert_single_sequence_document(text: &str) -> Vec<serde_yaml::Value> {
+        serde_yaml::from_str(text).expect("patch file must be a single YAML document")
+    }
+
+    #[tokio::test]
+    async fn first_entry_replaces_the_scaffold_placeholder() {
+        // DSH scaffolds a fresh profile with a comment header plus `[]`.
+        // Appending after that `[]` is a second document in the same stream —
+        // the exact shape that made DSH exit before ready (code 1).
+        let dir = temp_profile("scaffold");
+        std::fs::write(
+            patch_path(&dir),
+            "# Your patch layer for this dsh profile\n# a top-level YAML array\n[]\n",
+        )
+        .unwrap();
+        register_cordis_patch(&dir, "dshmarket", None)
+            .await
+            .unwrap();
+
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert!(!text.contains("[]"), "placeholder replaced: {text}");
+        assert!(text.contains("# Your patch layer"), "header kept: {text}");
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc[0]["id"], "dshmarket");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn writing_heals_a_file_the_old_append_corrupted() {
+        // Instances hit by the pre-fix bug carry `[]` *and* entries; any
+        // later plugin toggle rewrites the file, so the write path must
+        // heal it, not just avoid creating new damage.
+        let dir = temp_profile("heal");
+        std::fs::write(
+            patch_path(&dir),
+            "# header\n[]\n\n- id: dshmarket\n  name: dshmarket\n",
+        )
+        .unwrap();
+        set_plugin_disabled(&dir, "dshmarket", true).await.unwrap();
+
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert!(!text.contains("[]"), "healed: {text}");
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc.len(), 1);
+        assert_eq!(doc[0]["disabled"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn indented_empty_lists_survive_a_write() {
+        // Only a column-0 `[]` is the scaffold placeholder; an indented or
+        // inline empty list is real content.
+        let dir = temp_profile("nested-empty");
+        std::fs::write(
+            patch_path(&dir),
+            "- id: foo\n  name: foo\n  config:\n    items: []\n",
+        )
+        .unwrap();
+        set_plugin_disabled(&dir, "foo", true).await.unwrap();
+
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert!(text.contains("items: []"), "nested [] kept: {text}");
+        assert_single_sequence_document(&text);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
