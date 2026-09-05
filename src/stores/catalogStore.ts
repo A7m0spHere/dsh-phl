@@ -43,6 +43,40 @@ export interface PluginTransferState {
 
 export const pluginKey = (instanceId: string, pluginId: string) => `p:${instanceId}:${pluginId}`
 
+/* ----------------------- 慢速官方源 → 镜像提醒 ----------------------- */
+
+const OFFICIAL_HINT_MIN_AVERAGE = 256 * 1024 // bytes/s
+let mirrorHintShown = false
+
+/**
+ * 官方 npm 源在国内经常慢到让人以为程序死了。下载/装依赖明显偏慢且当前
+ * 用的正是官方源时，给一次性的可操作提醒（一键切到 npmmirror）；镜像源
+ * 或已提示过则绝不再弹。切换设置只影响之后的安装——进行中的那一次要用
+ * 户自己取消重试，绝不擅自替用户取消。
+ */
+function maybeHintMirror(slow: () => boolean): void {
+  if (mirrorHintShown) return
+  if (useSettingsStore.getState().source !== 'official') return
+  if (!slow()) return
+  mirrorHintShown = true
+  useUIStore.getState().toast({
+    kind: 'info',
+    title: '官方源速度较慢，试试镜像？',
+    message:
+      '检测到从 npm 官方源下载较慢。切换到 npmmirror 镜像通常能显著提速；切换后取消当前安装、重新安装即可生效。',
+    duration: 12000,
+    action: {
+      label: '切换到镜像',
+      run: () => {
+        useSettingsStore.getState().set('source', 'mirror-cn')
+        useUIStore
+          .getState()
+          .toast({ kind: 'success', title: '已切换到 npmmirror 镜像', message: '取消当前安装后重新安装即可生效。' })
+      },
+    },
+  })
+}
+
 interface CatalogState {
   versions: DshVersion[]
   runtimes: Runtime[]
@@ -269,6 +303,8 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     if (!version) return
     const controller = new AbortController()
     controllers.set(`v:${id}`, controller)
+    const startedAt = Date.now()
+    let depsStartedAt = 0
 
     const patch = (state: DshVersion['state']) =>
       set({ versions: get().versions.map((v) => (v.id === id ? { ...v, state } : v)) })
@@ -285,10 +321,17 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
               bytesDone: p.bytesDone ?? 0,
               bytesPerSec: p.bytesPerSec ?? 0,
             })
+            maybeHintMirror(
+              () =>
+                Date.now() - startedAt > 15_000 &&
+                (p.bytesDone ?? 0) / Math.max(Date.now() - startedAt, 1) < OFFICIAL_HINT_MIN_AVERAGE,
+            )
           } else if (p.stage === 'extracting') {
             patch({ kind: 'extracting', progress: p.progress ?? 0 })
           } else if (p.stage === 'installing-deps') {
+            if (depsStartedAt === 0) depsStartedAt = Date.now()
             patch({ kind: 'installing-deps', progress: p.progress ?? 0 })
+            maybeHintMirror(() => Date.now() - depsStartedAt > 60_000)
           } else {
             patch({ kind: 'verifying' })
           }
@@ -360,6 +403,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
 
     const patch = (state: Runtime['state']) =>
       set({ runtimes: get().runtimes.map((r) => (r.id === id ? { ...r, state } : r)) })
+    const startedAt = Date.now()
 
     try {
       await repository.installRuntime(
@@ -372,6 +416,11 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
               bytesDone: p.bytesDone ?? 0,
               bytesPerSec: p.bytesPerSec ?? 0,
             })
+            maybeHintMirror(
+              () =>
+                Date.now() - startedAt > 15_000 &&
+                (p.bytesDone ?? 0) / Math.max(Date.now() - startedAt, 1) < OFFICIAL_HINT_MIN_AVERAGE,
+            )
           } else {
             // `verifying` has no progress field; defaulting keeps the bar from
             // going NaN between download and extract.
