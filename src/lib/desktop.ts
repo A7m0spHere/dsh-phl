@@ -272,14 +272,14 @@ export async function listDshVersions(registryBase: string): Promise<RemoteVersi
   return invoke<RemoteVersionMeta[]>('list_dsh_versions', { registryBase })
 }
 
-export async function listInstalledVersions(root: string): Promise<InstalledVersionInfo[]> {
+export async function listInstalledVersions(): Promise<InstalledVersionInfo[]> {
   if (!isDesktop) return []
-  return invoke<InstalledVersionInfo[]>('list_installed_versions', { root })
+  return invoke<InstalledVersionInfo[]>('list_installed_versions', {})
 }
 
-export async function removeVersionDir(root: string, versionName: string): Promise<void> {
+export async function removeVersionDir(versionName: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('remove_version_dir', { root, versionName })
+  await invoke('remove_version_dir', { versionName })
 }
 
 export interface DownloadArgs {
@@ -287,7 +287,6 @@ export interface DownloadArgs {
   tarballUrl: string
   integrity?: string
   versionName: string
-  root: string
   /** npm registry base — used to install the package's own dependencies. */
   registryBase: string
   keepArchive: boolean
@@ -310,7 +309,6 @@ export async function downloadDshVersion(args: DownloadArgs): Promise<void> {
     tarballUrl: args.tarballUrl,
     integrity: args.integrity ?? null,
     versionName: args.versionName,
-    root: args.root,
     registryBase: args.registryBase,
     keepArchive: args.keepArchive,
     totalBytes: args.totalBytes ?? null,
@@ -351,15 +349,9 @@ export interface RemotePluginMeta {
 
 export type PluginProgressStage = 'preparing' | 'downloading' | 'verifying' | 'installing'
 
-export async function listDshPlugins(
-  catalogBase: string,
-  cacheDir?: string,
-): Promise<RemotePluginMeta[]> {
+export async function listDshPlugins(catalogBase: string): Promise<RemotePluginMeta[]> {
   if (!isDesktop) return []
-  return invoke<RemotePluginMeta[]>('list_dsh_plugins', {
-    registryBase: catalogBase,
-    cacheDir: cacheDir ?? null,
-  })
+  return invoke<RemotePluginMeta[]>('list_dsh_plugins', { registryBase: catalogBase })
 }
 
 export interface InstallPluginArgs {
@@ -371,8 +363,8 @@ export interface InstallPluginArgs {
   version?: string
   /** npm registry used to resolve `npm` sources. */
   registryBase: string
-  /** The instance profile directory owning `node_modules` + cordis.patch.yml. */
-  instanceRoot: string
+  /** The owning instance's id — Rust resolves its profile directory itself. */
+  instanceId: string
   onProgress: (event: {
     stage: PluginProgressStage
     progress: number
@@ -394,7 +386,7 @@ export async function installPlugin(args: InstallPluginArgs): Promise<{
     source: args.source,
     version: args.version ?? null,
     registryBase: args.registryBase,
-    instanceRoot: args.instanceRoot,
+    instanceId: args.instanceId,
     onProgress: channel,
   })
 }
@@ -408,17 +400,17 @@ export async function pluginLatestVersion(
 }
 
 export async function setPluginEnabled(
-  instanceRoot: string,
+  instanceId: string,
   registryId: string,
   enabled: boolean,
 ): Promise<void> {
   if (!isDesktop) return
-  await invoke('set_plugin_enabled', { instanceRoot, registryId, enabled })
+  await invoke('set_plugin_enabled', { instanceId, registryId, enabled })
 }
 
-export async function uninstallPlugin(instanceRoot: string, registryId: string): Promise<void> {
+export async function uninstallPlugin(instanceId: string, registryId: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('uninstall_plugin', { instanceRoot, registryId })
+  await invoke('uninstall_plugin', { instanceId, registryId })
 }
 
 /* ------------------------------ runtimes ------------------------------ */
@@ -450,9 +442,9 @@ export async function listNodeRuntimeCatalog(distBase: string): Promise<RemoteRu
   return invoke('list_node_runtimes', { distBase })
 }
 
-export async function listInstalledRuntimes(root: string): Promise<InstalledRuntimeInfo[]> {
+export async function listInstalledRuntimes(): Promise<InstalledRuntimeInfo[]> {
   if (!isDesktop) return []
-  return invoke('list_installed_runtimes', { root })
+  return invoke('list_installed_runtimes', {})
 }
 
 /** `node --version` on PATH, or null when there is no usable answer. */
@@ -472,7 +464,6 @@ export interface DownloadRuntimeArgs {
   versionName: string
   /** Full semver to fetch, e.g. `22.12.0`. */
   version: string
-  root: string
   keepArchive: boolean
   onProgress: (event: {
     stage: 'downloading' | 'extracting' | 'verifying'
@@ -491,21 +482,20 @@ export async function downloadNodeRuntime(args: DownloadRuntimeArgs): Promise<vo
     distBase: args.distBase,
     versionName: args.versionName,
     version: args.version,
-    root: args.root,
     keepArchive: args.keepArchive,
     onProgress: channel,
   })
 }
 
-export async function removeRuntimeDir(root: string, runtimeName: string): Promise<void> {
+export async function removeRuntimeDir(runtimeName: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('remove_runtime_dir', { root, runtimeName })
+  await invoke('remove_runtime_dir', { runtimeName })
 }
 
 /** Bytes on disk per installed runtime directory, keyed by its name. */
-export async function runtimesDiskUsage(root: string): Promise<Record<string, number>> {
+export async function runtimesDiskUsage(): Promise<Record<string, number>> {
   if (!isDesktop) return {}
-  return invoke('runtimes_disk_usage', { root })
+  return invoke('runtimes_disk_usage', {})
 }
 
 /* ------------------------------- launch ------------------------------- */
@@ -519,7 +509,6 @@ export interface LaunchEventMsg {
 
 export interface LaunchInstanceArgs {
   transferId: string
-  root: string
   instanceId: string
   /** Bare DSH version directory name (id minus the `dsh-` prefix). */
   versionName: string
@@ -553,7 +542,6 @@ export async function launchInstance(args: LaunchInstanceArgs): Promise<LaunchRe
   channel.onmessage = args.onProgress
   return invoke('launch_instance', {
     transferId: args.transferId,
-    root: args.root,
     instanceId: args.instanceId,
     versionName: args.versionName,
     runtimeName: args.runtimeName,
@@ -617,15 +605,15 @@ export interface DiagnosticReport {
 }
 
 /** In the browser there is nothing to inspect; callers show a notice. */
-export async function runDiagnostics(root: string): Promise<DiagnosticReport | null> {
+export async function runDiagnostics(): Promise<DiagnosticReport | null> {
   if (!isDesktop) return null
-  return invoke('run_diagnostics', { root })
+  return invoke('run_diagnostics', {})
 }
 
 /** Frees the download cache (`.part` 残留与保留的压缩包), returns bytes. */
-export async function clearDownloadCache(root: string): Promise<number> {
+export async function clearDownloadCache(): Promise<number> {
   if (!isDesktop) return 0
-  return invoke('clear_download_cache', { root })
+  return invoke('clear_download_cache', {})
 }
 
 /* ------------------------------- bundles ------------------------------ */
@@ -835,34 +823,30 @@ export async function deleteOrphanInstance(name: string): Promise<void> {
 /* ---------------------------- api config ------------------------------ */
 
 /** The global provider library; `null` until the user creates one. */
-export async function loadApiConfig(root: string): Promise<ApiConfig | null> {
+export async function loadApiConfig(): Promise<ApiConfig | null> {
   if (!isDesktop) return null
-  return invoke('load_api_config', { root })
+  return invoke('load_api_config', {})
 }
 
-export async function saveApiConfig(root: string, config: ApiConfig): Promise<ApiConfig> {
+export async function saveApiConfig(config: ApiConfig): Promise<ApiConfig> {
   if (!isDesktop) throw new Error('API 配置库仅在桌面端可用')
-  return invoke('save_api_config', { root, config })
+  return invoke('save_api_config', { config })
 }
 
 /** Materialize a binding into the instance's dsh-home/settings.yaml. */
 export async function syncInstanceApi(
-  root: string,
   instanceId: string,
   binding: ApiBinding,
   config: ApiConfig,
 ): Promise<ApiBinding> {
   if (!isDesktop) throw new Error('API 配置同步仅在桌面端可用')
-  return invoke('sync_instance_api', { root, instanceId, binding, config })
+  return invoke('sync_instance_api', { instanceId, binding, config })
 }
 
 /** Read an instance's live settings.yaml back as a library seed. */
-export async function importInstanceApi(
-  root: string,
-  instanceId: string,
-): Promise<ApiConfig | null> {
+export async function importInstanceApi(instanceId: string): Promise<ApiConfig | null> {
   if (!isDesktop) return null
-  return invoke('import_instance_api', { root, instanceId })
+  return invoke('import_instance_api', { instanceId })
 }
 
 /**
@@ -871,7 +855,6 @@ export async function importInstanceApi(
  * overwrite confirmations, and `planAdoption` (client-side) drives 采纳.
  */
 export async function instanceLiveSnapshot(
-  root: string,
   instanceId: string,
   binding: ApiBinding,
   config: ApiConfig,
@@ -885,7 +868,7 @@ export async function instanceLiveSnapshot(
       missingKeys: [],
     }
   }
-  return invoke('instance_live_snapshot', { root, instanceId, binding, config })
+  return invoke('instance_live_snapshot', { instanceId, binding, config })
 }
 
 /**

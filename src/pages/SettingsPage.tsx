@@ -210,7 +210,7 @@ export function SettingsPage() {
   useEffect(() => {
     if (section !== 'diagnostics' || !desktop.isDesktop) return
     setDiagLoading(true)
-    void runDiagnostics(settings.root)
+    void runDiagnostics()
       .then(setReport, () => setReport(null))
       .finally(() => setDiagLoading(false))
   }, [section, settings.root])
@@ -218,7 +218,7 @@ export function SettingsPage() {
   const rerunDiagnostics = () => {
     if (!desktop.isDesktop || diagLoading) return
     setDiagLoading(true)
-    void runDiagnostics(settings.root)
+    void runDiagnostics()
       .then(setReport, (err) => {
         setReport(null)
         ui.toast({
@@ -242,7 +242,7 @@ export function SettingsPage() {
     if (!ok) return
     setCacheBusy(true)
     try {
-      const freed = await clearDownloadCache(settings.root)
+      const freed = await clearDownloadCache()
       ui.toast({ kind: 'success', title: '缓存已清理', message: `释放 ${formatBytes(freed)}` })
       rerunDiagnostics()
     } catch (err) {
@@ -590,8 +590,8 @@ export function SettingsPage() {
                 }
               />
               <SettingRow
-                title="待发布版本上架时提醒"
-                description="GitHub 已发布、安装包源还没上架的版本，一旦上架立即提醒；跟随版本同步检查，无额外开销"
+                title="GitHub 版本上架 npm 时提醒"
+                description="GitHub 已发布、npm 还没收录的版本，一旦上架立即提醒；跟随版本同步检查，无额外开销"
                 control={
                   <Switch
                     checked={settings.pendingReleaseAlerts}

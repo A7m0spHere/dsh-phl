@@ -28,6 +28,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::paths::PhlState;
 use crate::versions::{now_iso, sanitize_version};
 
 /// Emitted when a launched DSH process exits for any reason — crash, manual
@@ -111,8 +112,8 @@ pub async fn launch_instance(
     app: AppHandle,
     launches: State<'_, Launches>,
     processes: State<'_, Processes>,
+    phl: State<'_, PhlState>,
     transfer_id: String,
-    root: String,
     instance_id: String,
     version_name: String,
     runtime_name: String,
@@ -133,7 +134,7 @@ pub async fn launch_instance(
         &app,
         &processes,
         &cancel,
-        Path::new(&root),
+        &phl.root(),
         &instance_id,
         &version_name,
         &runtime_name,

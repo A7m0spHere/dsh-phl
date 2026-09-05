@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::State;
+
+use crate::paths::PhlState;
 
 /// Key in `settings.yaml` holding the model catalog / providers.
 const LLM_SECTION: &str = "llm-pi-ai";
@@ -367,8 +370,8 @@ fn settings_path(dir: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub async fn load_api_config(root: String) -> Result<Option<ApiConfig>, String> {
-    let path = api_config_path(Path::new(&root));
+pub async fn load_api_config(phl: State<'_, PhlState>) -> Result<Option<ApiConfig>, String> {
+    let path = api_config_path(&phl.root());
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -383,7 +386,10 @@ pub async fn load_api_config(root: String) -> Result<Option<ApiConfig>, String> 
 }
 
 #[tauri::command]
-pub async fn save_api_config(root: String, mut config: ApiConfig) -> Result<ApiConfig, String> {
+pub async fn save_api_config(
+    phl: State<'_, PhlState>,
+    mut config: ApiConfig,
+) -> Result<ApiConfig, String> {
     if config.version != 1 {
         return Err(format!("不支持的 API 配置版本: {}", config.version));
     }
@@ -400,7 +406,7 @@ pub async fn save_api_config(root: String, mut config: ApiConfig) -> Result<ApiC
     }
     config.updated_at = crate::versions::now_iso();
     let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    let path = api_config_path(Path::new(&root));
+    let path = api_config_path(&phl.root());
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
     }
@@ -416,12 +422,12 @@ pub async fn save_api_config(root: String, mut config: ApiConfig) -> Result<ApiC
 /// Returns the binding as it should be persisted (sync metadata filled).
 #[tauri::command]
 pub async fn sync_instance_api(
-    root: String,
+    phl: State<'_, PhlState>,
     instance_id: String,
     binding: ApiBinding,
     config: ApiConfig,
 ) -> Result<ApiBinding, String> {
-    let dir = crate::instances::instance_dir(Path::new(&root), &instance_id)?;
+    let dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
     sync_inner(&dir, &binding, &config).await
 }
 
@@ -459,10 +465,10 @@ async fn sync_inner(dir: &Path, binding: &ApiBinding, config: &ApiConfig) -> Res
 /// — the seed flow for "I already configured this instance in the DSH UI".
 #[tauri::command]
 pub async fn import_instance_api(
-    root: String,
+    phl: State<'_, PhlState>,
     instance_id: String,
 ) -> Result<Option<ApiConfig>, String> {
-    let dir = crate::instances::instance_dir(Path::new(&root), &instance_id)?;
+    let dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
     import_inner(&dir).await
 }
 
@@ -779,12 +785,12 @@ pub struct InstanceLiveSnapshot {
 
 #[tauri::command]
 pub async fn instance_live_snapshot(
-    root: String,
+    phl: State<'_, PhlState>,
     instance_id: String,
     binding: ApiBinding,
     config: ApiConfig,
 ) -> Result<InstanceLiveSnapshot, String> {
-    snapshot_inner(Path::new(&root), &instance_id, &binding, &config).await
+    snapshot_inner(&phl.root(), &instance_id, &binding, &config).await
 }
 
 async fn snapshot_inner(

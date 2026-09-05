@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::paths::PhlState;
 use crate::versions::{download, extract, http_client, now_iso, verify_integrity, Transfers};
 
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -422,14 +423,18 @@ fn sanitize_pkg_path(name: &str) -> Result<String, String> {
 #[allow(clippy::too_many_arguments)]
 pub async fn install_plugin(
     transfers: State<'_, Transfers>,
+    phl: State<'_, PhlState>,
     transfer_id: String,
     plugin_id: String,
     source: PluginSourceWire,
     version: Option<String>,
     registry_base: String,
-    instance_root: String,
+    instance_id: String,
     on_progress: Channel<PluginProgressEvent>,
 ) -> Result<PluginInstallOutcome, String> {
+    // The profile directory is resolved backend-side from the instance id —
+    // the manifest's profile is the authority, not a path from the WebView.
+    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
     let flag = transfers.take(&transfer_id);
     let result = run_plugin_install(
         &flag,
@@ -437,7 +442,7 @@ pub async fn install_plugin(
         &source,
         version.as_deref(),
         &registry_base,
-        Path::new(&instance_root),
+        &profile,
         &on_progress,
     )
     .await;
@@ -803,23 +808,27 @@ async fn register_cordis_patch(
 
 #[tauri::command]
 pub async fn set_plugin_enabled(
-    instance_root: String,
+    phl: State<'_, PhlState>,
+    instance_id: String,
     registry_id: String,
     enabled: bool,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    set_plugin_disabled(Path::new(&instance_root), &registry_id, !enabled).await
+    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    set_plugin_disabled(&profile, &registry_id, !enabled).await
 }
 
 #[tauri::command]
 pub async fn uninstall_plugin(
-    instance_root: String,
+    phl: State<'_, PhlState>,
+    instance_id: String,
     registry_id: String,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    let root = Path::new(&instance_root);
-    remove_plugin_block(root, &registry_id).await?;
-    let dir = root.join("node_modules").join(&registry_id);
+    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    remove_plugin_block(&profile, &registry_id).await?;
+    let dir = profile.join("node_modules").join(&registry_id);
+    crate::paths::ensure_under_root(&profile.join("node_modules"), &dir)?;
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
     }
