@@ -8,6 +8,7 @@ import {
 } from '@/lib/desktop'
 import { Badge, Button, SectionCard } from '@/components/ui'
 import { cn } from '@/lib/cn'
+import { useUIStore } from '@/stores'
 
 /**
  * 环境健康（T-101/T-103）：对实例执行一次只读的结构化体检，把 manifest、
@@ -29,7 +30,14 @@ function StatusIcon({ check }: { check: RemoteVerifyCheck }) {
   return <XCircle className={cn(cls, 'text-danger')} />
 }
 
+/** 缺失的版本 / Runtime 要通过各自页面的安装流程补齐（T-204 的下载一半）。 */
+const NAV_ROUTES: Record<string, { label: string; route: 'versions' | 'runtimes' }> = {
+  'install-version': { label: '去安装版本', route: 'versions' },
+  'install-runtime': { label: '去安装 Runtime', route: 'runtimes' },
+}
+
 export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
+  const navigate = useUIStore((s) => s.navigate)
   const [report, setReport] = useState<RemoteVerifyResult | null>(null)
   const [running, setRunning] = useState(false)
   const [repairing, setRepairing] = useState(false)
@@ -137,8 +145,20 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
                   {check.message}
                 </span>
                 {check.repairable && (
-                  <span className="mt-0.5 block text-sm text-ink-faint">
-                    可修复{check.repairAction ? `（${check.repairAction}）` : ''}
+                  <span className="mt-0.5 flex items-center gap-2 text-sm text-ink-faint">
+                    <span>
+                      可修复
+                      {check.repairAction && NAV_ROUTES[check.repairAction] ? '：需要重新安装' : ''}
+                    </span>
+                    {check.repairAction && NAV_ROUTES[check.repairAction] && (
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        onClick={() => navigate({ name: NAV_ROUTES[check.repairAction!].route })}
+                      >
+                        {NAV_ROUTES[check.repairAction!].label}
+                      </Button>
+                    )}
                   </span>
                 )}
               </span>
