@@ -16,9 +16,9 @@
 //! only references them by id. Sharing the bits while isolating the state is
 //! the whole point of the product.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -31,50 +31,25 @@ use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
+pub(crate) mod bundle;
+pub(crate) mod copy;
+pub(crate) mod manifest;
+pub(crate) mod snapshot;
+
+pub(crate) use copy::{copy_tree_with_progress, dir_size, SkipRule};
+use manifest::{classify_manifest, write_manifest, ManifestRead};
+pub(crate) use manifest::{load_manifest, read_manifest, InstanceManifest};
+#[cfg(test)]
+use snapshot::{
+    delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create, sanitize_imported_env,
+};
+use snapshot::{scan_snapshots, SnapshotFile};
+
 /* ----------------------------- wire types ----------------------------- */
 
 /// What `instance.json` holds: everything that defines the instance and
 /// nothing that can be observed from the filesystem. The plugin list is
 /// absent on purpose — see `scan_plugins`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstanceManifest {
-    /// On-disk format version, stamped by the backend on every write. Absent
-    /// means the manifest predates schema versioning — same shape, migrated
-    /// in memory on read and stamped on the next write (original kept as a
-    /// `.bak`). A version from a *newer* PHL is never guessed at; see
-    /// `classify_manifest`.
-    #[serde(default)]
-    pub schema_version: u32,
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub kind: String,
-    pub hue: u32,
-    pub version_id: String,
-    pub runtime_id: String,
-    pub port: u32,
-    pub auto_port: bool,
-    pub profile: String,
-    pub created_at: String,
-    #[serde(default)]
-    pub last_run_at: Option<String>,
-    #[serde(default)]
-    pub total_runtime: u64,
-    #[serde(default)]
-    pub favorite: bool,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Binding to the global API provider library (`api_config`). `None` for
-    /// manifests written before the feature existed — treated as unmanaged.
-    #[serde(default)]
-    pub api: Option<ApiBinding>,
-}
-
-/// A manifest plus everything derived from the directory it lives in.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceRecord {
@@ -132,59 +107,7 @@ struct PluginMarker {
 
 /* ------------------------------- paths -------------------------------- */
 
-/// The manifest format this build reads and writes. Bump only together with a
-/// migration story: older versions must keep parsing, and this build must
-/// refuse (not guess at) anything written by a newer one.
-pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
-
-/// What reading an `instance.json` actually found. The distinctions matter:
-/// `Missing` means "not an instance at all", `Corrupt` is reclaimable junk,
-/// and `UnsupportedSchema` is a *valid instance this build cannot parse* —
-/// it must stay invisible to every destructive path.
-enum ManifestRead {
-    Ok(Box<InstanceManifest>),
-    Missing,
-    Corrupt(String),
-    UnsupportedSchema { found: u32, supported: u32 },
-}
-
-async fn classify_manifest(dir: &Path) -> ManifestRead {
-    let Ok(raw) = tokio::fs::read_to_string(manifest_path(dir)).await else {
-        return ManifestRead::Missing;
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(e) => return ManifestRead::Corrupt(format!("JSON 无法解析: {e}")),
-    };
-    // The version is inspected on the raw JSON, before a full parse: a
-    // manifest from a newer PHL may carry fields this struct would reject, and
-    // that failure must report itself as "too new", not as corruption.
-    let found = value
-        .get("schemaVersion")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    if found > MANIFEST_SCHEMA_VERSION {
-        return ManifestRead::UnsupportedSchema {
-            found,
-            supported: MANIFEST_SCHEMA_VERSION,
-        };
-    }
-    match serde_json::from_value::<InstanceManifest>(value) {
-        Ok(mut manifest) => {
-            // Legacy manifests migrate in memory; the stamp reaches disk the
-            // next time this manifest is written, with the original saved.
-            manifest.schema_version = MANIFEST_SCHEMA_VERSION;
-            ManifestRead::Ok(Box::new(manifest))
-        }
-        Err(e) => ManifestRead::Corrupt(e.to_string()),
-    }
-}
-
-// Instance ids and profile names are pasted straight into a filesystem path —
-// the whitelist lives in `paths::sanitize_segment`, shared with every module
-// that builds paths from user-supplied ids.
-
-fn instances_root(root: &Path) -> PathBuf {
+pub(crate) fn instances_root(root: &Path) -> PathBuf {
     root.join("instances")
 }
 
@@ -192,11 +115,11 @@ pub(crate) fn instance_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
     Ok(instances_root(root).join(sanitize_segment(id, "实例 id")?))
 }
 
-fn profile_root(dir: &Path, profile: &str) -> PathBuf {
+pub(crate) fn profile_root(dir: &Path, profile: &str) -> PathBuf {
     dir.join("dsh-home").join("profiles").join(profile)
 }
 
-fn manifest_path(dir: &Path) -> PathBuf {
+pub(crate) fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("instance.json")
 }
 
@@ -205,7 +128,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
 /// `sanitize_segment` already rejects separators, so this is belt and braces
 /// — but the operation on the other side is `remove_dir_all`, and a guard
 /// that only exists in one place is one refactor away from being gone.
-fn assert_inside_instances(root: &Path, dir: &Path) -> Result<(), String> {
+pub(crate) fn assert_inside_instances(root: &Path, dir: &Path) -> Result<(), String> {
     let base = instances_root(root);
     let is_child = dir.parent() == Some(base.as_path())
         && matches!(dir.components().next_back(), Some(Component::Normal(_)));
@@ -274,7 +197,7 @@ pub(crate) async fn create_instance_inner(
 /// failed sync does not fail the create: the binding stays (minus sync
 /// metadata), the instance shows as "尚未同步" in the UI, and the user can
 /// fix the library and hit sync.
-async fn apply_api_at_create(
+pub(crate) async fn apply_api_at_create(
     root: &Path,
     dir: &Path,
     mut manifest: InstanceManifest,
@@ -324,7 +247,7 @@ async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> 
     // The UI blocks this too, but the guard belongs next to the irreversible
     // operation: a running instance's files are in use, and forcing the
     // delete would leave a half-deleted tree behind a live process.
-    ensure_not_running(processes, id)?;
+    snapshot::ensure_not_running(processes, id)?;
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir)
             .await
@@ -430,455 +353,16 @@ async fn delete_orphan_instance_inner(root: &Path, name: &str) -> Result<(), Str
     Ok(())
 }
 
-/* ------------------------------- bundle ------------------------------- */
-
-/// The bundle format: a manifest plus the plugin records that were on disk at
-/// export time. Deliberately not a package of `node_modules` — the manifest
-/// is what makes an environment reproducible, and the plugin files come back
-/// through the normal install pipeline, not a private archive.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstanceBundle {
-    /// Format tag; anything other than 1 is refused on import.
-    pub phl_bundle: u32,
-    pub exported_at: String,
-    pub instance: InstanceManifest,
-    pub plugins: Vec<BundlePluginEntry>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundlePluginEntry {
-    pub plugin_id: String,
-    pub version: String,
-    pub registry_id: String,
-}
-
-/// What the import dialog shows before anything is created.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundlePreview {
-    pub name: String,
-    pub version_id: String,
-    pub runtime_id: String,
-    pub port: u32,
-    pub plugin_count: usize,
-    pub exported_at: String,
-}
-
-async fn read_bundle_file(path: &str) -> Result<InstanceBundle, String> {
-    let raw = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("无法读取 Bundle 文件: {e}"))?;
-    // The format tag is checked before the full parse, so an unknown version
-    // reports itself instead of a pile of missing-field errors.
-    let value: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("Bundle 文件解析失败: {e}"))?;
-    let version = value.get("phlBundle").and_then(|v| v.as_u64()).unwrap_or(0);
-    if version != 1 {
-        return Err(format!("不支持的 Bundle 版本: {version}"));
-    }
-    let bundle: InstanceBundle =
-        serde_json::from_value(value).map_err(|e| format!("Bundle 文件解析失败: {e}"))?;
-    Ok(bundle)
-}
-
-#[tauri::command]
-pub async fn export_instance_bundle(
-    state: State<'_, PhlState>,
-    id: String,
-    dest: String,
-) -> Result<(), String> {
-    export_instance_bundle_inner(&state.root(), &id, &dest).await
-}
-
-/// Exports to `dest`, which comes from the user's save dialog and is
-/// deliberately *not* confined to the root — the confinement applies to what
-/// gets read, while the destination is the user's own choice of file.
-async fn export_instance_bundle_inner(root: &Path, id: &str, dest: &str) -> Result<(), String> {
-    let dir = instance_dir(root, id)?;
-    let manifest = load_manifest(&dir, id).await?;
-    let plugins = scan_plugins(&profile_root(&dir, &manifest.profile)).await;
-    let bundle = InstanceBundle {
-        phl_bundle: 1,
-        exported_at: now_iso(),
-        plugins: plugins
-            .into_iter()
-            .map(|p| BundlePluginEntry {
-                plugin_id: p.plugin_id,
-                version: p.version,
-                registry_id: p.registry_id,
-            })
-            .collect(),
-        instance: manifest,
-    };
-    let body = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
-    tokio::fs::write(dest, body)
-        .await
-        .map_err(|e| format!("无法写入 Bundle: {e}"))
-}
-
-#[tauri::command]
-pub async fn read_instance_bundle(path: String) -> Result<BundlePreview, String> {
-    let bundle = read_bundle_file(&path).await?;
-    Ok(BundlePreview {
-        name: bundle.instance.name,
-        version_id: bundle.instance.version_id,
-        runtime_id: bundle.instance.runtime_id,
-        port: bundle.instance.port,
-        plugin_count: bundle.plugins.len(),
-        exported_at: bundle.exported_at,
-    })
-}
-
-#[tauri::command]
-pub async fn import_instance_bundle(
-    state: State<'_, PhlState>,
-    path: String,
-    manifest: InstanceManifest,
-) -> Result<InstanceRecord, String> {
-    import_instance_bundle_inner(&state.root(), &path, manifest).await
-}
-
-/// Creates an instance from a bundle file. Identity (id, name, port) comes
-/// from the importer so collisions stay a frontend concern; everything that
-/// defines the *environment* — version, runtime, profile, env, args — comes
-/// from the bundle. Plugin files are not in a bundle by design: the records
-/// travel, the reinstall goes through the normal plugin pipeline.
-async fn import_instance_bundle_inner(
-    root: &Path,
-    path: &str,
-    manifest: InstanceManifest,
-) -> Result<InstanceRecord, String> {
-    let bundle = read_bundle_file(path).await?;
-
-    let mut manifest = manifest;
-    manifest.kind = bundle.instance.kind;
-    manifest.hue = bundle.instance.hue;
-    manifest.version_id = bundle.instance.version_id;
-    manifest.runtime_id = bundle.instance.runtime_id;
-    manifest.profile = bundle.instance.profile;
-    manifest.note = Some("从 Bundle 导入".into());
-    manifest.env = sanitize_imported_env(bundle.instance.env);
-    manifest.args = bundle.instance.args;
-
-    let dir = build_instance_tree(root, &manifest).await?;
-    // Same "boots configured" promise as a normal create: the imported
-    // instance inherits the global library unless the manifest says otherwise.
-    let manifest = apply_api_at_create(root, &dir, manifest).await;
-    Ok(build_record(&dir, manifest).await)
-}
-
-/* ------------------------------ snapshots ----------------------------- */
-
-/// Environment variables that let their value execute code, or redirect the
-/// process to a different runtime, and so must never survive an import.
-///
-/// A bundle is the format PHL tells users to share, so its contents are
-/// attacker-supplied by design. `run_launch` applies instance env verbatim
-/// (minus `DSH_HOME`), which means an imported `NODE_OPTIONS=--require
-/// C:\evil.js` would run on the first 启动. Filtering belongs here, at the
-/// trust boundary, rather than in the launcher's own allow-list.
-const UNSAFE_IMPORT_ENV: &[&str] = &[
-    "NODE_OPTIONS",
-    "NODE_REPL_EXTERNAL_MODULE",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "PATH",
-    "NODE_PATH",
-];
-
-fn sanitize_imported_env(env: HashMap<String, String>) -> HashMap<String, String> {
-    env.into_iter()
-        .filter(|(key, _)| {
-            let upper = key.to_ascii_uppercase();
-            // `DSH_HOME` is the isolation boundary and is recomputed per
-            // instance anyway; the rest are code-injection vectors.
-            upper != "DSH_HOME" && !UNSAFE_IMPORT_ENV.contains(&upper.as_str())
-        })
-        .collect()
-}
-
-/// A recorded point-in-time copy of the instance's `dsh-home`. The workspace
-/// and logs are deliberately not part of it: a snapshot exists to make the
-/// *environment* (plugins, config) reproducible, not to back up user data.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotFile {
-    pub id: String,
-    pub label: String,
-    pub created_at: String,
-    /// The environment at snapshot time — a restore brings these back.
-    pub version_id: String,
-    pub runtime_id: String,
-    pub plugin_count: usize,
-    /// Bytes measured when the snapshot was taken; listing never re-walks.
-    pub size: u64,
-}
-
-fn snapshots_root(dir: &Path) -> PathBuf {
-    dir.join("snapshots")
-}
-
-async fn scan_snapshots(dir: &Path) -> Vec<SnapshotFile> {
-    let mut out = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(snapshots_root(dir)).await else {
-        return out;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Ok(raw) = tokio::fs::read_to_string(path.join("snapshot.json")).await else {
-            continue; // no metadata → not a completed snapshot
-        };
-        let Ok(snap) = serde_json::from_str::<SnapshotFile>(&raw) else {
-            continue;
-        };
-        out.push(snap);
-    }
-    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    out
-}
-
-/// Refuses snapshot ids that are not plain segments, so a frontend-supplied
-/// id can never escape the instance's `snapshots/` directory.
-fn snapshot_dir(dir: &Path, snapshot_id: &str) -> Result<PathBuf, String> {
-    let safe = sanitize_segment(snapshot_id, "快照 id")?;
-    Ok(snapshots_root(dir).join(safe))
-}
-
-fn ensure_not_running(processes: &Processes, id: &str) -> Result<(), String> {
-    if processes.0.lock().expect("processes lock").contains_key(id) {
-        return Err("实例正在运行，请先停止再进行快照操作".into());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn create_instance_snapshot(
-    transfers: State<'_, Transfers>,
-    processes: State<'_, Processes>,
-    state: State<'_, PhlState>,
-    transfer_id: String,
-    id: String,
-    on_progress: Channel<CloneProgress>,
-) -> Result<SnapshotFile, String> {
-    let flag = transfers.take(&transfer_id);
-    let result = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
-        let _ = on_progress.send(p);
-    })
-    .await;
-    transfers.release(&transfer_id);
-    result
-}
-
-async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
-    flag: &Arc<AtomicBool>,
-    processes: &Processes,
-    root: &Path,
-    id: &str,
-    on_progress: &F,
-) -> Result<SnapshotFile, String> {
-    let id = sanitize_segment(id, "实例 id")?;
-    let dir = instance_dir(root, &id)?;
-    let manifest = load_manifest(&dir, &id).await?;
-    ensure_not_running(processes, &id)?;
-
-    let dsh_home = dir.join("dsh-home");
-    if !dsh_home.exists() {
-        return Err("实例缺少 dsh-home，无法创建快照".into());
-    }
-
-    let snap_id = format!(
-        "snap-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    let staging = snapshots_root(&dir).join(format!(".phl-new-{snap_id}"));
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Same copy-with-progress shape as cloning; the snapshot lands under a
-    // staging name so a cancelled copy cannot look like a real snapshot.
-    let dest = staging.join("dsh-home");
-    tokio::fs::create_dir_all(&dest)
-        .await
-        .map_err(|e| e.to_string())?;
-    let copy_result = copy_tree_with_progress(
-        dsh_home.clone(),
-        dest,
-        Arc::clone(flag),
-        SkipRule::RunStateAtRoot,
-        on_progress,
-    )
-    .await;
-    // Cancellation is reported by `copy_tree` as Err("cancelled"), so the
-    // cancel branch has to come *first*: propagating the error before it left
-    // the staging tree — a full copy of dsh-home, potentially gigabytes —
-    // behind forever, invisible to both the snapshot list (no snapshot.json)
-    // and the orphan scanner (it only inspects children of `instances/`).
-    if flag.load(Ordering::SeqCst) {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err("cancelled".into());
-    }
-    let bytes_total = match copy_result {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            return Err(e);
-        }
-    };
-
-    let snapshot = SnapshotFile {
-        id: snap_id,
-        label: format!("快照 {}", now_iso().replace('T', " ").trim_end_matches('Z')),
-        created_at: now_iso(),
-        version_id: manifest.version_id,
-        runtime_id: manifest.runtime_id,
-        plugin_count: scan_plugins(&profile_root(&dir, &manifest.profile))
-            .await
-            .len(),
-        size: bytes_total,
-    };
-    let body = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
-    tokio::fs::write(staging.join("snapshot.json"), body)
-        .await
-        .map_err(|e| format!("无法写入快照元数据: {e}"))?;
-
-    let dest = snapshots_root(&dir).join(&snapshot.id);
-    tokio::fs::rename(&staging, &dest)
-        .await
-        .map_err(|e| format!("无法放置快照目录: {e}"))?;
-    Ok(snapshot)
-}
-
-/// Restores a snapshot by copying its `dsh-home` back over the live one. The
-/// copy (not move) keeps the snapshot intact so it can be restored again —
-/// and rolling back to the same point twice must not be a trap.
-#[tauri::command]
-pub async fn restore_instance_snapshot(
-    processes: State<'_, Processes>,
-    state: State<'_, PhlState>,
-    id: String,
-    snapshot_id: String,
-) -> Result<InstanceRecord, String> {
-    restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
-}
-
-async fn restore_snapshot_inner(
-    root: &Path,
-    id: &str,
-    snapshot_id: &str,
-    processes: &Processes,
-) -> Result<InstanceRecord, String> {
-    let id = sanitize_segment(id, "实例 id")?;
-    let dir = instance_dir(root, &id)?;
-    ensure_not_running(processes, &id)?;
-
-    let snap_dir = snapshot_dir(&dir, snapshot_id)?;
-    let raw = tokio::fs::read_to_string(snap_dir.join("snapshot.json"))
-        .await
-        .map_err(|_| format!("快照不存在: {snapshot_id}"))?;
-    serde_json::from_str::<SnapshotFile>(&raw).map_err(|e| format!("快照元数据解析失败: {e}"))?;
-    let snap_home = snap_dir.join("dsh-home");
-    if !snap_home.exists() {
-        return Err(format!("快照 {snapshot_id} 缺少 dsh-home，无法还原"));
-    }
-    let current = dir.join("dsh-home");
-    if !current.exists() {
-        return Err("实例缺少 dsh-home，无法还原".into());
-    }
-
-    // Copy back under a staging name, then swap. If the swap fails, the
-    // current tree steps back in; the snapshot itself is never touched.
-    let staging = dir.join(".phl-restore");
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Err(e) = copy_tree_sync(&snap_home, &staging.join("dsh-home")) {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(format!("还原快照失败: {e}"));
-    }
-
-    let backup = dir.join(".phl-old-dsh-home");
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-    tokio::fs::rename(&current, &backup)
-        .await
-        .map_err(|e| format!("无法备份当前 dsh-home: {e}"))?;
-    if let Err(e) = tokio::fs::rename(staging.join("dsh-home"), &current).await {
-        let _ = tokio::fs::rename(&backup, &current).await;
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(format!("无法放置还原内容: {e}"));
-    }
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-
-    let manifest = load_manifest(&dir, &id).await?;
-    Ok(build_record(&dir, manifest).await)
-}
-
-#[tauri::command]
-pub async fn delete_instance_snapshot(
-    processes: State<'_, Processes>,
-    state: State<'_, PhlState>,
-    id: String,
-    snapshot_id: String,
-) -> Result<(), String> {
-    delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
-}
-
-async fn delete_snapshot_inner(
-    root: &Path,
-    id: &str,
-    snapshot_id: &str,
-    processes: &Processes,
-) -> Result<(), String> {
-    let id = sanitize_segment(id, "实例 id")?;
-    let dir = instance_dir(root, &id)?;
-    ensure_not_running(processes, &id)?;
-    let snap_dir = snapshot_dir(&dir, snapshot_id)?;
-    ensure_under_root(&instances_root(root), &snap_dir)?;
-    if snap_dir.exists() {
-        tokio::fs::remove_dir_all(&snap_dir)
-            .await
-            .map_err(|e| format!("无法删除快照: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Blocking tree copy for restore; the amounts involved make a progress
-/// channel not worth the wiring, and the swap after it is atomic.
-fn copy_tree_sync(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let target = to.join(entry.file_name());
-        let meta = entry.metadata().map_err(|e| e.to_string())?;
-        if meta.is_dir() {
-            copy_tree_sync(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)
-                .map_err(|e| format!("复制 {} 失败: {e}", entry.path().display()))?;
-        }
-    }
-    Ok(())
-}
-
 /* ------------------------------ internals ----------------------------- */
 
 /// The shared staging + rename create path (used by create and bundle
 /// import). A create that fails halfway must not leave a directory that looks
 /// like an instance but has no manifest — that is exactly how the current
 /// orphans came about.
-async fn build_instance_tree(root: &Path, manifest: &InstanceManifest) -> Result<PathBuf, String> {
+pub(crate) async fn build_instance_tree(
+    root: &Path,
+    manifest: &InstanceManifest,
+) -> Result<PathBuf, String> {
     let id = sanitize_segment(&manifest.id, "实例 id")?;
     let profile = sanitize_segment(&manifest.profile, "profile 名")?;
     let dir = instance_dir(root, &id)?;
@@ -913,43 +397,6 @@ async fn build_instance_tree(root: &Path, manifest: &InstanceManifest) -> Result
     Ok(dir)
 }
 
-pub(crate) async fn read_manifest(dir: &Path) -> Option<InstanceManifest> {
-    match classify_manifest(dir).await {
-        ManifestRead::Ok(manifest) => Some(*manifest),
-        ManifestRead::Missing => None,
-        ManifestRead::Corrupt(e) => {
-            // Silently returning None here made the instance vanish from the
-            // list *and* from the orphan view (which used to key off the file
-            // merely existing), leaving the user no signal at all beyond their
-            // instance being gone. It is now reported as reclaimable, and the
-            // reason goes to the log.
-            eprintln!("[phl] 无法解析 {}: {e}", manifest_path(dir).display());
-            None
-        }
-        ManifestRead::UnsupportedSchema { found, supported } => {
-            eprintln!(
-                "[phl] {}: schema 版本 {found} 超出当前支持的 {supported}，已隐藏该实例（请升级 PHL）",
-                manifest_path(dir).display()
-            );
-            None
-        }
-    }
-}
-
-/// Load a manifest for an id-addressed command. Unlike `read_manifest`, every
-/// failure mode is an explicit error — in particular a schema this build
-/// cannot parse must fail loudly instead of being overwritten by a save.
-pub(crate) async fn load_manifest(dir: &Path, id: &str) -> Result<InstanceManifest, String> {
-    match classify_manifest(dir).await {
-        ManifestRead::Ok(manifest) => Ok(*manifest),
-        ManifestRead::Missing => Err(format!("实例不存在或缺少清单: {id}")),
-        ManifestRead::Corrupt(e) => Err(format!("实例 {id} 清单损坏: {e}")),
-        ManifestRead::UnsupportedSchema { found, supported } => Err(format!(
-            "实例 {id} 的清单 schema 版本过新: {found}（当前支持 {supported}），请升级 PHL 后再操作"
-        )),
-    }
-}
-
 /// Resolves an instance's active profile directory — the one owning
 /// `node_modules` and `cordis.patch.yml` — from the instance id. Plugin
 /// commands key on this id so the WebView never supplies a filesystem path.
@@ -973,41 +420,7 @@ pub(crate) async fn set_instance_api(
     write_manifest(&dir, &manifest).await
 }
 
-async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> Result<(), String> {
-    // The schema version is backend-owned: whatever the caller sent, the file
-    // always records the format this build writes. Callers load their copy
-    // from disk (already migrated) or author a fresh one — either way the
-    // stamp must reflect this build, not round-trip stale state.
-    let mut manifest = manifest.clone();
-    manifest.schema_version = MANIFEST_SCHEMA_VERSION;
-
-    let path = manifest_path(dir);
-    // One-time backup when this write changes the on-disk schema — a legacy
-    // manifest gaining its version stamp. If the upgrade write is somehow
-    // interrupted, the `.bak` still carries the last readable state.
-    if let Ok(raw) = tokio::fs::read_to_string(&path).await {
-        let on_disk_version = serde_json::from_str::<serde_json::Value>(&raw)
-            .ok()
-            .and_then(|v| v.get("schemaVersion").and_then(|v| v.as_u64()))
-            .unwrap_or(0) as u32;
-        if on_disk_version != MANIFEST_SCHEMA_VERSION {
-            let _ = tokio::fs::copy(&path, dir.join("instance.json.legacy.bak")).await;
-        }
-    }
-
-    let body = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    // Write beside the target and rename, so a crash mid-write cannot leave a
-    // truncated manifest — that would make the instance unreadable entirely.
-    let tmp = dir.join("instance.json.tmp");
-    tokio::fs::write(&tmp, body)
-        .await
-        .map_err(|e| format!("无法写入实例清单: {e}"))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| format!("无法写入实例清单: {e}"))
-}
-
-async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord {
+pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord {
     let profile = profile_root(dir, &manifest.profile);
     InstanceRecord {
         dsh_home: dir.join("dsh-home").to_string_lossy().into_owned(),
@@ -1025,7 +438,7 @@ async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord 
 /// source of truth removes a whole class of drift: an install whose record was
 /// lost still shows up, a record whose files were removed does not, and a
 /// plugin added out of band is discovered rather than ignored.
-async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
+pub(crate) async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
     let node_modules = profile.join("node_modules");
     let disabled = disabled_plugin_ids(profile).await;
     let mut out = Vec::new();
@@ -1147,166 +560,16 @@ async fn run_clone(
 /// Logs, download caches and snapshot history are per-instance run state;
 /// copying them would inflate the clone and carry the source's history into a
 /// fresh instance. A clone starts from the present, without the past.
-fn skipped(name: &str) -> bool {
-    name == "logs" || name == "snapshots" || name == ".phl-cache" || name.starts_with(".phl-")
-}
-
-/// What a copy is allowed to leave behind.
-///
-/// This is not a detail: the same `copy_tree` serves cloning an instance and
-/// relocating the entire data root, and those want opposite things. Migrating
-/// with the clone's filter silently dropped every instance's `snapshots/` and
-/// `logs/` and then deleted the source — destroying the user's only rollback
-/// points while reporting success.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SkipRule {
-    /// Copy everything. Required whenever the copy replaces the original.
-    Nothing,
-    /// Drop run state, but only at the tree's own root. A nested `logs/` deep
-    /// inside `node_modules` belongs to whatever package created it and is
-    /// part of that package, not PHL's per-instance history.
-    RunStateAtRoot,
-}
-
-impl SkipRule {
-    fn skips(self, name: &str) -> bool {
-        self == SkipRule::RunStateAtRoot && skipped(name)
-    }
-    /// Recursion always descends with `Nothing`: the rule only ever applies to
-    /// the entries directly under the root it was given.
-    fn inside(self) -> Self {
-        SkipRule::Nothing
-    }
-}
-
-pub(crate) fn dir_size(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut total = 0u64;
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total += dir_size(&entry.path());
-        } else {
-            total += meta.len();
-        }
-    }
-    total
-}
-
-pub(crate) fn dir_size_skipping(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut total = 0u64;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if skipped(&name) {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total += dir_size(&entry.path());
-        } else {
-            total += meta.len();
-        }
-    }
-    total
-}
-
-/// Shared by cloning, snapshots and cross-drive relocation. Completion comes
-/// from the worker result, never from a closed progress channel. Awaiting the
-/// worker also ensures cancellation cannot race staging-directory cleanup.
-pub(crate) async fn copy_tree_with_progress<F: Fn(CloneProgress) + Send + Sync>(
-    from: PathBuf,
-    to: PathBuf,
-    flag: Arc<AtomicBool>,
-    skip: SkipRule,
-    on_progress: &F,
-) -> Result<u64, String> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
-    let worker = tokio::task::spawn_blocking(move || {
-        if flag.load(Ordering::SeqCst) {
-            return Err("cancelled".into());
-        }
-        let total = match skip {
-            SkipRule::Nothing => dir_size(&from),
-            SkipRule::RunStateAtRoot => dir_size_skipping(&from),
-        };
-        let mut done = 0;
-        copy_tree(&from, &to, &flag, &mut done, total, &tx, skip)?;
-        if flag.load(Ordering::SeqCst) {
-            return Err("cancelled".into());
-        }
-        Ok(done)
-    });
-    while let Some(message) = rx.recv().await {
-        let (bytes_done, bytes_total) = message?;
-        on_progress(CloneProgress {
-            progress: if bytes_total == 0 {
-                1.0
-            } else {
-                (bytes_done as f64 / bytes_total as f64).min(1.0)
-            },
-            bytes_done,
-            bytes_total,
-        });
-    }
-    worker.await.map_err(|e| format!("复制线程异常退出: {e}"))?
-}
-
-pub(crate) fn copy_tree(
-    from: &Path,
-    to: &Path,
-    flag: &AtomicBool,
-    done: &mut u64,
-    total: u64,
-    tx: &tokio::sync::mpsc::Sender<Result<(u64, u64), String>>,
-    skip: SkipRule,
-) -> Result<(), String> {
-    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("读取复制源目录失败: {e}"))?;
-        if flag.load(Ordering::SeqCst) {
-            return Err("cancelled".into());
-        }
-        let name = entry.file_name();
-        if skip.skips(&name.to_string_lossy()) {
-            continue;
-        }
-        let src = entry.path();
-        let dst = to.join(&name);
-        let meta = entry
-            .metadata()
-            .map_err(|e| format!("读取复制源属性失败 {}: {e}", src.display()))?;
-        // A relocation deletes the source afterwards. Silently skipping a
-        // link (or following it outside the tree) would lose or duplicate data.
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "复制源包含符号链接，请先处理后重试: {}",
-                src.display()
-            ));
-        }
-        if meta.is_dir() {
-            copy_tree(&src, &dst, flag, done, total, tx, skip.inside())?;
-        } else {
-            std::fs::copy(&src, &dst).map_err(|e| format!("复制失败 {}: {e}", src.display()))?;
-            *done += meta.len();
-            // A closed channel means the caller gave up; stop rather than keep
-            // writing into a directory it is already deleting.
-            if tx.blocking_send(Ok((*done, total))).is_err() {
-                return Err("cancelled".into());
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::bundle::import_instance_bundle_inner;
+    use super::copy::dir_size_skipping;
+    use super::manifest::MANIFEST_SCHEMA_VERSION;
     use super::*;
+    use bundle::{export_instance_bundle_inner, read_instance_bundle};
+    use copy::{copy_tree, skipped};
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn async_copy_reports_worker_failure_instead_of_success() {
