@@ -59,16 +59,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo fmt --check
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
         shell: bash
 
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
         shell: bash
 
-      - run: cargo test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
         shell: bash
 
-      - run: cargo check
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
         shell: bash
 
   # Full NSIS bundle is the slowest step and not required per-commit; it runs

@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           npm test
-          cargo test
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - run: npm run app:build
         shell: bash
