@@ -1,22 +1,16 @@
 import {
   useEffect,
-  Fragment,
-  memo,
   useCallback,
   useDeferredValue,
   useMemo,
-  useRef,
   useState,
   useTransition,
 } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   ArrowLeft,
-  ArrowUp,
   ArrowUpCircle,
   Blocks,
-  Check,
-  Download,
 
   Github,
   Link2,
@@ -24,15 +18,13 @@ import {
   RotateCcw,
   Search,
   Shuffle,
-  Star,
   Trash2,
   X,
 } from 'lucide-react'
 import { openExternal } from '@/lib/desktop'
 import { cn } from '@/lib/cn'
-import { formatBytes, formatCount, formatDate, formatRelative, formatSpeed } from '@/lib/format'
-import { hueTone, initials } from '@/lib/hue'
-import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
+import { formatCount, formatDate } from '@/lib/format'
+import { useMotion } from '@/lib/motion'
 import { sampleStratified } from '@/lib/sample'
 import { fetchRepoScreenshots } from '@/lib/screenshots'
 import { linkedPluginNames } from '@/data/instances'
@@ -47,11 +39,9 @@ import {
   type PluginTransferState,
 } from '@/stores'
 import { useShallow } from 'zustand/react/shallow'
-import { useIsDark } from '@/stores/uiStore'
 import {
   latestRelease,
   PLUGIN_CATEGORY_LABELS,
-  type Instance,
   type Plugin,
   type PluginCategory,
 } from '@/types'
@@ -59,12 +49,10 @@ import {
   Dropdown,
   Badge,
   Button,
-  Card,
   Chip,
   EmptyState,
   Input,
   Notice,
-  ProgressBar,
   Skeleton,
   Switch,
   Tooltip,
@@ -72,6 +60,21 @@ import {
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
 import { InstanceTile } from '@/components/instance'
+
+import {
+  STAGE_LABEL,
+  AuthorBadge,
+  PluginAvatar,
+  Popularity,
+  REGISTRY_FIRST_PAINT,
+  REGISTRY_PAGE,
+  RECOMMEND_COUNT,
+  SourceBadge,
+  TransferInline,
+  popularity,
+} from '@/features/plugins/visuals'
+import { PluginDiscovery } from '@/features/plugins/discovery'
+import { RegistryCard } from '@/features/plugins/RegistryCard'
 
 /* ------------------------------------------------------------------ *
  * panel — scope first: a plugin is always "installed into an instance"
@@ -177,591 +180,6 @@ export function PluginsPanel() {
  * ------------------------------------------------------------------ */
 
 /** How many market cards render before 加载更多 takes over. */
-const REGISTRY_PAGE = 60
-
-/**
- * Rows committed in the tab's first render. About five fit on screen, so two
- * screenfuls is plenty to look complete while keeping that commit small
- * enough not to stall the tab transition.
- */
-const REGISTRY_FIRST_PAINT = 12
-
-/** How many plugins the discovery strip shows per draw. */
-const RECOMMEND_COUNT = 12
-
-/**
- * Ranking signal for the strip's popular tier. Stars are weighted up because
- * plenty of registry entries are GitHub-source and carry no install count at
- * all — ranking those purely on `downloads` would bury every one of them in
- * the long tail regardless of how well regarded they are.
- */
-const popularity = (p: Plugin) => p.downloads + (p.stars ?? 0) * 10
-
-/** PCL-style stage labels — every phase of the pipeline gets a name. */
-const STAGE_LABEL: Record<string, string> = {
-  preparing: '准备中',
-  downloading: '下载中',
-  verifying: '校验中',
-  installing: '安装中',
-}
-
-function SourceBadge({ plugin }: { plugin: Plugin }) {
-  if (plugin.source.kind === 'npm') {
-    return (
-      <Tooltip content={plugin.source.pkg}>
-        <Badge tone="accent" icon={<Package2 size={9} />}>
-          npm
-        </Badge>
-      </Tooltip>
-    )
-  }
-  if (plugin.source.kind === 'tarball') {
-    return <Badge tone="outline">预构建包</Badge>
-  }
-  return (
-    <Badge tone="outline" icon={<Github size={9} />}>
-      源码
-    </Badge>
-  )
-}
-
-function Popularity({ plugin }: { plugin: Plugin }) {
-  return (
-    <>
-      {plugin.stars !== undefined && (
-        <span className="inline-flex items-center gap-0.5">
-          <Star size={11} className="text-warn" />
-          {formatCount(plugin.stars)}
-        </span>
-      )}
-      {plugin.downloads > 0 && <span>{formatCount(plugin.downloads)} 次安装</span>}
-    </>
-  )
-}
-
-/** Stable hue index from the plugin id, so a plugin keeps its colour everywhere. */
-const hueFor = (id: string) => {
-  let h = 0
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
-  return h
-}
-
-/** The GitHub owner behind a plugin (author / org), or empty when unknown. */
-const ownerOf = (plugin: Plugin): string => {
-  const fromUrl = plugin.repoUrl?.match(/github\.com\/([A-Za-z0-9-]+)(\/|$)/)?.[1]
-  const fromId = plugin.id.split('/')[0]
-  const owner = fromUrl ?? fromId
-  return owner && /^[A-Za-z0-9-]+$/.test(owner) ? owner : ''
-}
-
-/**
- * The plugin's identity tile. Prefers the repo owner's GitHub avatar — it
- * exists for every valid owner and is what the user recognises from the
- * plugin's README — and falls back to the coloured initials tile when the
- * owner can't be resolved or the image fails (offline, blocked CDN).
- * The initials render underneath, so a slow load never leaves a hole.
- */
-function PluginAvatar({ plugin, size = 42 }: { plugin: Plugin; size?: number }) {
-  const dark = useIsDark()
-  const tone = hueTone(hueFor(plugin.id), dark)
-  const [imgOk, setImgOk] = useState(true)
-  const owner = ownerOf(plugin)
-  const avatarUrl = owner
-    ? `https://github.com/${owner}.png?size=${Math.max(88, size * 2)}`
-    : null
-  return (
-    <span
-      className="relative flex shrink-0 select-none items-center justify-center overflow-hidden rounded-lg font-medium tracking-tight"
-      style={{
-        width: size,
-        height: size,
-        background: tone.soft,
-        color: tone.text,
-        boxShadow: `inset 0 0 0 1px ${tone.ring}`,
-        fontSize: size * 0.34,
-      }}
-    >
-      {initials(plugin.name)}
-      {avatarUrl && imgOk && (
-        <img
-          src={avatarUrl}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          onError={() => setImgOk(false)}
-          className="absolute inset-0 h-full w-full object-cover"
-        />
-      )}
-    </span>
-  )
-}
-
-/**
- * dsh-market-style author pill leading the meta line, so authorship is the
- * first thing read after the title. No avatar here on purpose — the plugin
- * tile on the left already *is* the owner's GitHub avatar, and doubling it
- * reads as a rendering bug. Clicking opens the author's GitHub profile.
- */
-function AuthorBadge({ plugin }: { plugin: Plugin }) {
-  const owner = ownerOf(plugin)
-  if (!owner) {
-    return <span className="text-xs font-medium text-ink-muted">{plugin.author}</span>
-  }
-  return (
-    <button
-      className="group/author inline-flex items-center gap-1 rounded-full bg-surface-sunken px-2 py-0.5 text-xs font-medium text-ink-muted ring-1 ring-inset ring-line transition-colors duration-150 hover:text-accent-ink hover:ring-accent-ink/30"
-      title={`查看 ${plugin.author} 的 GitHub 主页`}
-      onClick={(e) => {
-        e.stopPropagation()
-        void openExternal(`https://github.com/${owner}`)
-      }}
-    >
-      <span className="max-w-40 truncate">{plugin.author}</span>
-    </button>
-  )
-}
-
-/**
- * Inline five-phase progress: 准备 → 下载 → 校验 → 安装 → 完成. The bar and
- * caption belong to the card that started the install, so several plugins
- * can install at once without a global queue view.
- */
-function TransferInline({ instanceId, pluginId }: { instanceId: string; pluginId: string }) {
-  const transfer = useCatalogStore((s) => s.pluginTransfers[pluginKey(instanceId, pluginId)])
-  const cancel = useCatalogStore((s) => s.cancelPlugin)
-  const { t, scale } = useMotion()
-
-  return (
-    <AnimatePresence initial={false}>
-      {transfer && (
-        <motion.div
-          initial={scale === 0 ? false : { height: 0, opacity: 0 }}
-          animate={{ height: 'auto', opacity: 1 }}
-          exit={{ height: 0, opacity: 0 }}
-          transition={t(0.24)}
-          className="overflow-hidden"
-        >
-          <div className="pt-3">
-            <ProgressBar
-              value={transfer.progress}
-              height={4}
-              active={transfer.stage === 'downloading'}
-            />
-            <div className="mt-1.5 flex items-center justify-between gap-2 text-sm text-ink-faint">
-              <span>
-                {STAGE_LABEL[transfer.stage] ?? transfer.stage}
-                {transfer.stage === 'downloading' && transfer.bytesDone > 0 && (
-                  <span className="ml-1.5">{formatBytes(transfer.bytesDone)}</span>
-                )}
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="num">
-                  {transfer.stage === 'downloading' && transfer.bytesPerSec > 0
-                    ? formatSpeed(transfer.bytesPerSec)
-                    : `${Math.round(transfer.progress * 100)}%`}
-                </span>
-                <Button size="sm" variant="ghost" onClick={() => cancel(instanceId, pluginId)}>
-                  取消
-                </Button>
-              </span>
-            </div>
-          </div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  )
-}
-
-/**
- * The discovery overlay: a drawn batch on the left, the highlighted plugin
- * read in full on the right.
- *
- * This lives in an overlay rather than above the market list for two
- * reasons. A block at the top of the registry pushed the actual list down —
- * discovery got in the way of the browsing it was meant to support. And the
- * market row only has space for a truncated one-liner, which is exactly the
- * complaint: you cannot tell what a plugin is *for* from the list. Here the
- * summary is never clipped, both languages are shown, and the stats that say
- * whether a plugin is alive sit next to it.
- */
-function PluginDiscovery({
-  open,
-  onClose,
-  picks,
-  total,
-  instance,
-  onReroll,
-  onOpenDetail,
-}: {
-  open: boolean
-  onClose: () => void
-  picks: Plugin[]
-  total: number
-  instance?: Instance
-  onReroll: () => void
-  onOpenDetail: (id: string) => void
-}) {
-  const install = useCatalogStore((s) => s.installPlugin)
-  const { overlay, pop } = useMotion()
-  const [cursor, setCursor] = useState(0)
-  const listRef = useRef<HTMLDivElement>(null)
-
-  // A fresh batch always starts at the top; keep the cursor in range when the
-  // batch shrinks (a pick can vanish if the catalog reloads under us).
-  useEffect(() => setCursor((c) => (c < picks.length ? c : 0)), [picks])
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose()
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setCursor((c) => Math.min(picks.length - 1, c + 1))
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setCursor((c) => Math.max(0, c - 1))
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [open, picks.length, onClose])
-
-  useEffect(() => {
-    listRef.current?.querySelectorAll('[data-row]')[cursor]?.scrollIntoView({ block: 'nearest' })
-  }, [cursor])
-
-  const current = picks[cursor]
-  const installedVersion = instance?.plugins.find((ip) => ip.pluginId === current?.id)?.version
-  const npmPkg = current?.source.kind === 'npm' ? current.source.pkg : null
-
-  return (
-    <AnimatePresence>
-      {open && (
-        <motion.div key="discover" className={`fixed inset-0 ${MODAL_Z} flex items-center justify-center p-6`}>
-          <motion.div
-            variants={overlay}
-            initial="hidden"
-            animate="show"
-            exit="out"
-            onClick={onClose}
-            className={MODAL_SCRIM}
-          />
-          <motion.div
-            variants={pop}
-            initial="hidden"
-            animate="show"
-            exit="out"
-            className="relative flex h-[min(620px,82vh)] w-[880px] max-w-full flex-col overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
-          >
-            <div className="flex shrink-0 items-center gap-2.5 border-b border-line px-4 py-3">
-              <Shuffle size={15} className="shrink-0 text-ink-faint" />
-              <div className="min-w-0 flex-1">
-                <div className="text-base font-medium text-ink">随便看看</div>
-                <div className="text-sm text-ink-faint">
-                  从 {formatCount(total)} 个插件里挑了 {picks.length} 个
-                </div>
-              </div>
-              <Button size="sm" variant="secondary" onClick={onReroll}>
-                <RotateCcw size={12} />
-                换一批
-              </Button>
-              <Button size="sm" variant="ghost" onClick={onClose} aria-label="关闭">
-                <X size={14} />
-              </Button>
-            </div>
-
-            <div className="flex min-h-0 flex-1">
-              <div ref={listRef} className="w-[248px] shrink-0 overflow-y-auto border-r border-line p-1.5">
-                {picks.map((p, i) => (
-                  <button
-                    key={p.id}
-                    data-row
-                    onClick={() => setCursor(i)}
-                    className={cn(
-                      'flex w-full min-w-0 items-center gap-2.5 rounded-sm px-2 py-1.5 text-left transition-colors duration-100',
-                      i === cursor ? 'bg-accent-soft/70' : 'hover:bg-surface-hover',
-                    )}
-                  >
-                    <PluginAvatar plugin={p} size={26} />
-                    <div className="min-w-0 flex-1">
-                      <div
-                        className={cn(
-                          'truncate text-base',
-                          i === cursor ? 'text-accent-ink' : 'text-ink',
-                        )}
-                      >
-                        {p.name}
-                      </div>
-                      <div className="truncate text-xs text-ink-faint">{p.summary}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {current && (
-                <div key={current.id} className="min-w-0 flex-1 overflow-y-auto p-5">
-                  <div className="flex items-start gap-3">
-                    <PluginAvatar plugin={current} size={44} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <h2 className="text-lg font-medium text-ink">{current.name}</h2>
-                        {current.official && <Badge tone="accent">官方</Badge>}
-                        <SourceBadge plugin={current} />
-                        <Badge tone="outline">
-                          {PLUGIN_CATEGORY_LABELS[current.category as PluginCategory] ??
-                            current.category}
-                        </Badge>
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-ink-faint">
-                        <AuthorBadge plugin={current} />
-                        <Popularity plugin={current} />
-                        {current.addedAt && <span>收录于 {formatDate(current.addedAt)}</span>}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* The whole point of this panel: never truncated. */}
-                  <p className="mt-4 text-base leading-relaxed text-ink">{current.summary}</p>
-                  {current.summaryEn && (
-                    <p className="mt-2 text-sm leading-relaxed text-ink-faint">
-                      {current.summaryEn}
-                    </p>
-                  )}
-
-                  <div className="mt-4 flex flex-wrap items-center gap-3">
-                    {current.repoUrl && (
-                      <button
-                        className="inline-flex items-center gap-1 text-sm text-accent-ink hover:underline"
-                        onClick={() => void openExternal(current.repoUrl!)}
-                      >
-                        <Github size={12} />
-                        仓库主页
-                      </button>
-                    )}
-                    {npmPkg && (
-                      <button
-                        className="inline-flex items-center gap-1 text-sm text-accent-ink hover:underline"
-                        onClick={() =>
-                          void openExternal(`https://www.npmjs.com/package/${npmPkg}`)
-                        }
-                      >
-                        <Package2 size={12} />
-                        npm 页面
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="mt-5 flex items-center gap-2 border-t border-line pt-4">
-                    {installedVersion ? (
-                      <Badge tone="neutral">已安装 {installedVersion}</Badge>
-                    ) : (
-                      <Button
-                        variant="primary"
-                        onClick={() => {
-                          if (!instance) {
-                            useUIStore.getState().toast({
-                              kind: 'info',
-                              title: '先创建一个实例',
-                              message: '插件安装在实例内部；创建后即可一键安装。',
-                            })
-                            return
-                          }
-                          void install(instance.id, current.id)
-                        }}
-                      >
-                        <Download size={12} />
-                        安装到{instance ? `「${instance.name}」` : '实例'}
-                      </Button>
-                    )}
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        onOpenDetail(current.id)
-                        onClose()
-                      }}
-                    >
-                      完整详情
-                    </Button>
-                    <span className="ml-auto text-sm text-ink-faint">
-                      {cursor + 1} / {picks.length}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  )
-}
-
-/* ------------------------------------------------------------------ *
- * page
- * ------------------------------------------------------------------ */
-
-/**
- * One market result row, PCL-download-page style: identity tile, title with
- * a faint source subtitle, category tag + one-line summary, then a meta line
- * (compat · downloads · added · source) and the install action on the right.
- * Memoized, and — critically — owning its own transfer subscription: with
- * the live catalog (1800+ entries) a page-level progress subscription
- * re-renders the whole grid on every progress tick, which freezes the
- * renderer outright.
- */
-const RegistryCard = memo(function RegistryCard({
-  plugin,
-  instanceId,
-  instanceVersionId,
-  dshVersionName,
-  installedVersion,
-  onSelect,
-}: {
-  plugin: Plugin
-  /** Undefined while no instance exists — the row stays browsable. */
-  instanceId?: string
-  instanceVersionId?: string
-  dshVersionName?: string
-  installedVersion?: string
-  onSelect: (id: string) => void
-}) {
-  const install = useCatalogStore((s) => s.installPlugin)
-  const transfer = useCatalogStore((s) =>
-    instanceId ? s.pluginTransfers[pluginKey(instanceId, plugin.id)] : undefined,
-  )
-
-  const newest = plugin.releases[0]
-  let compat: 'ok' | 'bad' | 'unknown' = 'unknown'
-  if (newest && instanceVersionId) {
-    if (newest.compatible.includes(instanceVersionId)) compat = 'ok'
-    else if (newest.incompatible?.includes(instanceVersionId)) compat = 'bad'
-  }
-
-  const subtitle =
-    plugin.source.kind === 'npm'
-      ? plugin.source.pkg
-      : (plugin.repoUrl?.split('/').pop() ?? plugin.repoUrl)
-
-  const onInstall = () => {
-    if (!instanceId) {
-      useUIStore.getState().toast({
-        kind: 'info',
-        title: '先创建一个实例',
-        message: '插件安装在实例内部；创建后即可一键安装。',
-        action: {
-          label: '新建实例',
-          run: () => useUIStore.getState().push({ name: 'create' }),
-        },
-      })
-      return
-    }
-    void install(instanceId, plugin.id)
-  }
-
-  return (
-    <Card
-      interactive
-      className="group/row px-3.5 py-3 [content-visibility:auto] [contain-intrinsic-size:auto_136px]"
-    >
-      <div className="flex items-start gap-3">
-        <button
-          className="flex min-w-0 flex-1 items-start gap-3 text-left"
-          onClick={() => onSelect(plugin.id)}
-        >
-          <PluginAvatar plugin={plugin} />
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-              <span className="truncate text-base font-medium text-ink transition-colors group-hover/row:text-accent-ink">
-                {plugin.name}
-              </span>
-              {subtitle && (
-                <span className="truncate text-sm text-ink-faint">｜ {subtitle}</span>
-              )}
-              {plugin.official && <Badge tone="accent">官方</Badge>}
-            </div>
-            <div className="mt-1 flex min-w-0 items-center gap-1.5">
-              <Badge tone="outline">
-                {PLUGIN_CATEGORY_LABELS[plugin.category as PluginCategory] ?? plugin.category}
-              </Badge>
-              <p className="min-w-0 flex-1 truncate text-sm text-ink-muted">{plugin.summary}</p>
-            </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
-              {/* Badges carry their own outline, so they stay ungrouped; the
-                  plain metrics after them read as one `·`-separated run,
-                  matching the version and installed rows. */}
-              <AuthorBadge plugin={plugin} />
-              {!instanceId ? (
-                <Badge tone="neutral">创建实例后可安装</Badge>
-              ) : compat === 'ok' ? (
-                <Badge tone="ok" icon={<Check size={9} />}>
-                  兼容 {dshVersionName}
-                </Badge>
-              ) : compat === 'bad' ? (
-                <Badge tone="danger" icon={<X size={9} />}>
-                  不兼容 {dshVersionName}
-                </Badge>
-              ) : (
-                <Badge tone="warn">未验证</Badge>
-              )}
-              <SourceBadge plugin={plugin} />
-              {[
-                plugin.downloads > 0 ? (
-                  <span key="downloads" className="inline-flex items-center gap-1">
-                    <Download size={11} />
-                    {formatCount(plugin.downloads)}
-                  </span>
-                ) : null,
-                plugin.stars !== undefined ? (
-                  <span key="stars" className="inline-flex items-center gap-1">
-                    <Star size={11} className="text-warn" />
-                    {formatCount(plugin.stars)}
-                  </span>
-                ) : null,
-                plugin.addedAt ? (
-                  <span key="added" className="inline-flex items-center gap-1">
-                    <ArrowUp size={11} />
-                    {formatRelative(plugin.addedAt)}
-                  </span>
-                ) : null,
-              ]
-                .filter(Boolean)
-                .map((item, i) => (
-                  <Fragment key={`meta-${i}`}>
-                    {i > 0 && <span className="text-ink-faint/50">·</span>}
-                    {item}
-                  </Fragment>
-                ))}
-            </div>
-          </div>
-        </button>
-        {/* `Card interactive` puts a pointer cursor on the whole surface,
-            but only the title button opens the detail view — the action
-            column must not claim an affordance it does not have. */}
-        <div className="flex shrink-0 cursor-default flex-col items-end gap-1.5 pt-0.5">
-          {installedVersion && (
-            <span className="font-mono text-xs text-ink-faint">{installedVersion}</span>
-          )}
-          {installedVersion ? (
-            <Badge tone="neutral">已安装</Badge>
-          ) : transfer ? (
-            <Badge tone="warn">安装中…</Badge>
-          ) : (
-            <Button
-              size="sm"
-              variant={compat === 'bad' ? 'secondary' : 'primary'}
-              onClick={onInstall}
-            >
-              安装
-            </Button>
-          )}
-        </div>
-      </div>
-      {instanceId && <TransferInline instanceId={instanceId} pluginId={plugin.id} />}
-    </Card>
-  )
-})
-
 const TRUST_LABEL: Record<string, string> = {
   verified: '已验证',
   pinned: '已固定',
