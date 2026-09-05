@@ -17,6 +17,8 @@ export type VersionInstallState =
   | { kind: 'downloading'; progress: number; bytesDone: number; bytesPerSec: number }
   | { kind: 'extracting'; progress: number }
   | { kind: 'verifying' }
+  /** npm is installing the version's own dependencies (the long cold-install stage). */
+  | { kind: 'installing-deps'; progress: number }
   | {
       kind: 'installed'
       installedAt: string

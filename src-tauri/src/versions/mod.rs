@@ -146,6 +146,11 @@ pub enum ProgressEvent {
     Extracting { progress: f64 },
     #[serde(rename_all = "camelCase")]
     Verifying,
+    /// npm is materialising the version's own dependencies — the longest
+    /// stage of a cold install. Progress is a slow indeterminate ramp from
+    /// the npm child's wall clock, not a byte count.
+    #[serde(rename_all = "camelCase")]
+    InstallingDeps { progress: f64 },
 }
 
 /* --------------------------- cancel registry --------------------------- */

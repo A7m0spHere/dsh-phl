@@ -262,10 +262,14 @@ pub(crate) async fn run_install(
     // be the worse failure mode.
     if package_requires_deps(&staging) {
         on_progress
-            .send(ProgressEvent::Verifying)
+            .send(ProgressEvent::InstallingDeps { progress: 0.0 })
             .map_err(|e| e.to_string())?;
         let node = pick_npm_capable_node(root).unwrap_or_else(|| PathBuf::from("node"));
-        if let Err(e) = install_version_deps(&node, &staging, registry_base, flag, |_| {}).await {
+        if let Err(e) = install_version_deps(&node, &staging, registry_base, flag, &|p| {
+            let _ = on_progress.send(ProgressEvent::InstallingDeps { progress: p });
+        })
+        .await
+        {
             let _ = tokio::fs::remove_dir_all(&staging).await;
             return Err(if e == "cancelled" {
                 e
