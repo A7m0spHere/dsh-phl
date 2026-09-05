@@ -43,6 +43,11 @@ interface SettingsState {
    * the window is visible, so a tray-minimized PHL does no background work.
    */
   versionRefreshMinutes: number
+  /**
+   * Toast when a version that was GitHub-only becomes installable from npm.
+   * Rides the catalog sync above — no extra network activity of its own.
+   */
+  pendingReleaseAlerts: boolean
 
   portStart: number
   logLevel: LogLevel
@@ -77,6 +82,7 @@ const defaults = {
   concurrency: 2,
   keepArchives: false,
   versionRefreshMinutes: 30,
+  pendingReleaseAlerts: true,
   portStart: 3080,
   logLevel: 'info' as LogLevel,
   developerMode: false,

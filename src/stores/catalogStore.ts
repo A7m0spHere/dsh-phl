@@ -3,6 +3,35 @@ import { repository, Cancelled } from '@/services'
 import type { DshVersion, InstalledPlugin, InstanceTemplate, Plugin, Runtime } from '@/types'
 import { useUIStore } from './uiStore'
 import { useInstanceStore } from './instanceStore'
+import { useSettingsStore } from './settingsStore'
+import { detectPendingChanges, loadPendingSet, savePendingSet } from '@/lib/pendingReleases'
+
+/**
+ * Every settled version-catalog fetch runs through here: GitHub-only rows
+ * are remembered, remembered rows that reappear installable raise a toast —
+ * the "notify me when the pending version is published" behaviour, riding
+ * the existing manual/auto sync with no extra polling.
+ */
+function observePendingReleases(versions: DshVersion[]) {
+  try {
+    const { published, next } = detectPendingChanges(loadPendingSet(), versions)
+    savePendingSet(next)
+    if (published.length && useSettingsStore.getState().pendingReleaseAlerts) {
+      const first = published[0]
+      useUIStore.getState().toast({
+        kind: 'success',
+        title:
+          published.length === 1
+            ? `新版本已可安装：${first}`
+            : `${published.length} 个版本已可安装`,
+        message: '此前仅在 GitHub 发布，现已上架安装包源。',
+        action: { label: '安装', run: () => void useCatalogStore.getState().installVersion(`dsh-${first}`) },
+      })
+    }
+  } catch (err) {
+    console.warn('[phl] pending-release check failed:', err)
+  }
+}
 
 /** Live transfer state for one (instance, plugin) install. */
 export interface PluginTransferState {
@@ -129,28 +158,43 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
       // Modules land independently: each one is written into state as soon as
       // it settles, so a slow source never holds the others' data hostage.
       await Promise.all([
-        repository.listVersions().then(
-          (versions) =>
-            set({ versions, versionsLoaded: true, versionsSyncedAt: Date.now() }),
-          (err) => { swallow('版本目录')(err); set({ versionsLoaded: true }) },
-        ),
-        repository.listRuntimes().then(
-          (runtimes) => set({ runtimes }),
-          swallow('Runtime 列表'),
-        ),
-        repository.listPlugins().then(
-          (catalog) =>
+        // .then(ok).catch(err) — NOT .then(ok, err): the two-argument form
+        // leaves an exception thrown by the success callback (e.g. inside
+        // observePendingReleases) unhandled, which rejects the whole
+        // Promise.all before `versionsLoaded` is ever set — the versions page
+        // then sits on its skeleton forever with no error shown.
+        repository
+          .listVersions()
+          .then((versions) => {
+            set({ versions, versionsLoaded: true, versionsSyncedAt: Date.now() })
+            observePendingReleases(versions)
+          })
+          .catch((err) => {
+            swallow('版本目录')(err)
+            set({ versionsLoaded: true })
+          }),
+        // Same .then(ok).catch(err) discipline as listVersions above: with
+        // the two-argument form, an exception thrown by the success callback
+        // (e.g. reading catalog.plugins off a malformed result) escapes the
+        // handler, rejects Promise.all, and skips the per-source error toasts.
+        repository
+          .listRuntimes()
+          .then((runtimes) => set({ runtimes }))
+          .catch(swallow('Runtime 列表')),
+        repository
+          .listPlugins()
+          .then((catalog) =>
             set({
               plugins: catalog.plugins,
               pluginsOffline: !!catalog.offline,
               pluginsError: catalog.error,
             }),
-          swallow('插件市场'),
-        ),
-        repository.listTemplates().then(
-          (templates) => set({ templates }),
-          swallow('实例模板'),
-        ),
+          )
+          .catch(swallow('插件市场')),
+        repository
+          .listTemplates()
+          .then((templates) => set({ templates }))
+          .catch(swallow('实例模板')),
       ])
       set({ loaded: true })
       for (const [label, err] of failures) {
@@ -190,6 +234,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
       })
       const added = merged.filter((v) => !prev.has(v.id))
       set({ versions: merged, versionsLoaded: true, versionsSyncedAt: Date.now() })
+      observePendingReleases(merged)
       if (!silent) {
         useUIStore.getState().toast(
           added.length
