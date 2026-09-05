@@ -1,17 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'motion/react'
+import { useEffect, useState } from 'react'
+import { motion } from 'motion/react'
 import {
   BookOpen,
-  Download,
   FolderOpen,
-  HardDrive,
-  Info,
-  Keyboard,
-  Palette,
-  Settings2,
-  SlidersHorizontal,
   Sparkles,
-  Stethoscope,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import {
@@ -27,23 +19,18 @@ import {
   type MoveProgress,
 } from '@/lib/desktop'
 import { formatBytes, formatDateTime } from '@/lib/format'
-import { hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
 import { repository } from '@/services'
 import {
-  ACCENTS,
   normalizeRoot,
   useCatalogStore,
   useApiConfigStore,
   useInstanceStore,
-  useIsDark,
   useSettingsStore,
   useUIStore,
   useViewStore,
-  type Accent,
   type Density,
   type MotionLevel,
-  type SettingsSection,
   type Theme,
   type UIScale,
 } from '@/stores'
@@ -51,10 +38,8 @@ import {
   Button,
   Input,
   Notice,
-  ProgressBar,
   Segmented,
   SettingRow,
-  Spinner,
   Switch,
   Select,
 } from '@/components/ui'
@@ -63,36 +48,9 @@ import { PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
 import { ShortcutsSection } from '@/components/settings/ShortcutsSection'
 import { Logo } from '@/components/layout/Logo'
 
-const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
-  { id: 'general', label: '通用', icon: <Settings2 size={13} /> },
-  { id: 'downloads', label: '下载', icon: <Download size={13} /> },
-  { id: 'appearance', label: '外观', icon: <Palette size={13} /> },
-  { id: 'shortcuts', label: '快捷键', icon: <Keyboard size={13} /> },
-  { id: 'storage', label: '存储', icon: <HardDrive size={13} /> },
-  { id: 'diagnostics', label: '诊断', icon: <Stethoscope size={13} /> },
-  { id: 'advanced', label: '高级', icon: <SlidersHorizontal size={13} /> },
-  { id: 'about', label: '关于', icon: <Info size={13} /> },
-]
-
-/**
- * Common places to park a multi-gigabyte data directory.
- *
- * No "user directory" preset: the only correct value for it is whatever
- * `defaultRoot()` resolves on this machine, and the hardcoded placeholder
- * that used to sit here pointed the app at a nonexistent user's AppData once
- * the root started driving real file operations.
- */
-const ROOT_PRESETS = [
-  { label: 'D:\\PHL', path: 'D:\\PHL' },
-  { label: 'E:\\PHL', path: 'E:\\PHL' },
-]
-
-const MOVE_KIND_LABELS: Record<string, string> = {
-  instances: '实例目录',
-  versions: 'DSH 版本',
-  runtimes: 'Node Runtime',
-  cache: '下载缓存',
-}
+import { AccentPicker, InstanceColourLegend } from '@/features/settings/appearance'
+import { MigrationOverlay } from '@/features/settings/MigrationOverlay'
+import { ROOT_PRESETS, SECTIONS } from '@/features/settings/consts'
 
 export function SettingsPanel() {
   const section = useViewStore((s) => s.settingsSection)
@@ -113,65 +71,6 @@ export function SettingsPanel() {
         ))}
       </PanelGroup>
     </PanelShell>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-
-function AccentPicker() {
-  const accent = useUIStore((s) => s.accent)
-  const setAccent = useUIStore((s) => s.setAccent)
-  const dark = useIsDark()
-  const { spring } = useMotion()
-
-  return (
-    <div className="flex gap-1.5">
-      {ACCENTS.map((a) => (
-        <button
-          key={a.id}
-          title={a.label}
-          onClick={() => setAccent(a.id as Accent)}
-          className="relative flex h-7 w-7 items-center justify-center rounded-lg transition-transform duration-150 hover:scale-105"
-        >
-          {/* the swatch re-declares the accent tokens locally, so each chip
-              paints itself in the palette it would apply */}
-          <span
-            className={cn('h-5 w-5 rounded-md', dark && 'dark')}
-            data-accent={a.id}
-            style={{ background: 'hsl(var(--c-accent))' }}
-          />
-          {accent === a.id && (
-            <motion.span
-              layoutId="accent-ring"
-              transition={spring}
-              className="absolute inset-0 rounded-lg ring-2 ring-accent ring-offset-1 ring-offset-canvas"
-            />
-          )}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function InstanceColourLegend() {
-  const instances = useInstanceStore((s) => s.instances)
-  const dark = useIsDark()
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {instances.slice(0, 6).map((i) => {
-        const tone = hueTone(i.hue, dark)
-        return (
-          <span
-            key={i.id}
-            className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-2xs"
-            style={{ background: tone.soft, color: tone.text }}
-          >
-            <span className="h-[6px] w-[6px] rounded-full" style={{ background: tone.solid }} />
-            {i.name}
-          </span>
-        )
-      })}
-    </div>
   )
 }
 
@@ -1097,78 +996,5 @@ export function SettingsPage() {
         onCancel={() => migration && void cancelTransfer(migration.transferId)}
       />
     </div>
-  )
-}
-
-/**
- * Full-screen progress for a root migration. The root only flips when the
- * move reports success, so closing this overlay any way other than "done"
- * leaves the old root in charge.
- */
-function MigrationOverlay({
-  info,
-  progress,
-  onCancel,
-}: {
-  info: { from: string; to: string } | null
-  progress: MoveProgress | null
-  onCancel: () => void
-}) {
-  const { overlay, pop } = useMotion()
-  const kindLabel = progress ? (MOVE_KIND_LABELS[progress.kind] ?? progress.kind) : '准备中…'
-
-  return (
-    <AnimatePresence>
-      {info && (
-        <motion.div key="migration" className="absolute inset-0 z-40 flex items-center justify-center">
-          <motion.div
-            variants={overlay}
-            initial="hidden"
-            animate="show"
-            exit="out"
-            className="absolute inset-0 bg-canvas/70 backdrop-blur-sm"
-          />
-          <motion.div
-            variants={pop}
-            initial="hidden"
-            animate="show"
-            exit="out"
-            className="relative w-[420px] rounded-xl bg-surface-raised p-5 shadow-pop ring-1 ring-inset ring-line"
-          >
-            <div className="flex items-center gap-2.5">
-              <HardDrive size={15} className="text-accent" />
-              <span className="text-md font-medium text-ink">正在迁移数据</span>
-              <span className="num ml-auto text-sm text-ink-faint">
-                {progress ? Math.round(progress.progress * 100) : 0}%
-              </span>
-            </div>
-
-            <ProgressBar value={progress?.progress ?? 0} active className="mt-3.5" height={5} />
-
-            <div className="mt-3.5 space-y-1.5 text-sm">
-              <div className="flex items-center gap-2 text-ink">
-                <Spinner size={12} />
-                正在移动：{kindLabel}
-                {progress && (
-                  <span className="num ml-auto text-ink-faint">
-                    {formatBytes(progress.bytesDone)} / {formatBytes(progress.bytesTotal)}
-                  </span>
-                )}
-              </div>
-              <div className="break-all font-mono text-2xs leading-relaxed text-ink-faint">
-                {info.from}
-                <br />→ {info.to}
-              </div>
-            </div>
-
-            <div className="mt-4 flex justify-end">
-              <Button size="sm" variant="ghost" onClick={onCancel}>
-                取消
-              </Button>
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
   )
 }
