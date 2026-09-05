@@ -645,7 +645,7 @@ async fn fetch_github_releases(
 /// `versions/<name>/`, so the only tree they can ever be found in is the
 /// version's own `node_modules`. Extraction alone produces a version that
 /// cannot boot.
-fn package_requires_deps(version_dir: &Path) -> bool {
+pub(crate) fn package_requires_deps(version_dir: &Path) -> bool {
     #[derive(Deserialize)]
     struct PackageJson {
         #[serde(default)]
@@ -1145,7 +1145,7 @@ fn cancelled_flag(flag: &AtomicBool) -> bool {
 // deserialising a *completed install* failed and every version looked
 // uninstalled after a restart.
 #[serde(rename_all = "camelCase")]
-struct InstallMarker {
+pub(crate) struct InstallMarker {
     installed_at: String,
     /// Written since the transactional installer; `default` keeps markers
     /// from before that era readable.
@@ -1153,7 +1153,7 @@ struct InstallMarker {
     version: String,
 }
 
-async fn read_marker(version_dir: &Path) -> Option<InstallMarker> {
+pub(crate) async fn read_marker(version_dir: &Path) -> Option<InstallMarker> {
     let raw = tokio::fs::read_to_string(version_dir.join("phl-install.json"))
         .await
         .ok()?;

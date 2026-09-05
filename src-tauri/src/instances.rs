@@ -254,7 +254,7 @@ pub async fn create_instance(
     create_instance_inner(&state.root(), manifest).await
 }
 
-async fn create_instance_inner(
+pub(crate) async fn create_instance_inner(
     root: &Path,
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
