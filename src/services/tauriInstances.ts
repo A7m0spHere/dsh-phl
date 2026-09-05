@@ -1,6 +1,5 @@
 import * as desktop from '@/lib/desktop'
 import { slugify } from '@/lib/format'
-import { useSettingsStore } from '@/stores/settingsStore'
 import type { Instance, InstanceDraft, InstanceKind, InstanceTemplate } from '@/types'
 import { Cancelled, newTransferId } from './repository'
 import type { CreateProgress, PhlRepository } from './repository'
@@ -9,15 +8,15 @@ import type { CreateProgress, PhlRepository } from './repository'
  * Desktop overrides for the **instance module**: instances are directories
  * under `<root>/instances/<id>`, and `instance.json` is their identity.
  *
+ * Every call passes only stable ids — the data root is resolved Rust-side
+ * from `PhlState`, so the WebView never aims a destructive operation at a
+ * path of its own choosing.
+ *
  * The plugin list is deliberately not passed in either direction — Rust reads
  * it back from `node_modules` and `cordis.patch.yml`, which is what DSH itself
  * consults. A record kept alongside those files could only ever drift from
  * them.
  */
-
-function phlRoot(): string {
-  return useSettingsStore.getState().root
-}
 
 /**
  * The directory name. Two instances may share a display name, so the slug
@@ -92,7 +91,7 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
 export const instanceFromRecord = fromRecord
 
 async function listInstances(): Promise<Instance[]> {
-  const records = await desktop.listInstanceRecords(phlRoot())
+  const records = await desktop.listInstanceRecords()
   return records.map(fromRecord)
 }
 
@@ -134,14 +133,14 @@ async function createInstance(
     api: apiInheritance === 'none' ? { inheritance: 'none', providerIds: [] } : { inheritance: 'default', providerIds: [] },
   }
 
-  const record = await desktop.createInstanceDir(phlRoot(), manifest)
+  const record = await desktop.createInstanceDir(manifest)
 
   // Directory creation is a handful of syscalls with no cancellable stage, so
   // there is nothing to abort mid-flight. What must not happen is resolving
   // normally after the wizard was cancelled: the store would then add an
   // instance the user cancelled. Delete what we just made and report it.
   if (signal.aborted) {
-    await desktop.deleteInstanceDir(phlRoot(), id).catch(() => {})
+    await desktop.deleteInstanceDir(id).catch(() => {})
     throw new Cancelled()
   }
 
@@ -164,7 +163,6 @@ async function cloneInstance(source: Instance, name: string, port: number): Prom
   const id = newInstanceId(name)
   const record = await desktop.cloneInstanceDir({
     transferId: `i:${id}`,
-    root: phlRoot(),
     sourceId: source.id,
     manifest: {
       ...toManifest(source),
@@ -201,15 +199,15 @@ export const tauriInstanceOverrides: Pick<
   createInstance,
   cloneInstance,
   deleteInstance: async (id) => {
-    await desktop.deleteInstanceDir(phlRoot(), id)
+    await desktop.deleteInstanceDir(id)
   },
   saveInstance: async (instance) => {
-    await desktop.saveInstanceManifest(phlRoot(), toManifest(instance))
+    await desktop.saveInstanceManifest(toManifest(instance))
   },
-  measureDiskUsage: async (instance) => desktop.instanceDiskUsage(phlRoot(), instance.id),
-  listOrphanInstanceDirs: async () => desktop.scanOrphanInstances(phlRoot()),
+  measureDiskUsage: async (instance) => desktop.instanceDiskUsage(instance.id),
+  listOrphanInstanceDirs: async () => desktop.scanOrphanInstances(),
   removeOrphanInstanceDir: async (name) => {
-    await desktop.deleteOrphanInstance(phlRoot(), name)
+    await desktop.deleteOrphanInstance(name)
   },
   createSnapshot: async (instance, onProgress, signal) => {
     const transferId = newTransferId(`s:${instance.id}`)
@@ -217,7 +215,7 @@ export const tauriInstanceOverrides: Pick<
     const onAbort = () => void desktop.cancelTransfer(transferId)
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      return await desktop.createInstanceSnapshot(phlRoot(), instance.id, transferId, onProgress)
+      return await desktop.createInstanceSnapshot(instance.id, transferId, onProgress)
     } catch (err) {
       if (signal.aborted) throw new Cancelled()
       throw err instanceof Error ? err : new Error(String(err))
@@ -226,10 +224,10 @@ export const tauriInstanceOverrides: Pick<
     }
   },
   restoreSnapshot: async (instance, snapshotId) => {
-    const record = await desktop.restoreInstanceSnapshot(phlRoot(), instance.id, snapshotId)
+    const record = await desktop.restoreInstanceSnapshot(instance.id, snapshotId)
     return instanceFromRecord(record)
   },
   deleteSnapshot: async (instance, snapshotId) => {
-    await desktop.deleteInstanceSnapshot(phlRoot(), instance.id, snapshotId)
+    await desktop.deleteInstanceSnapshot(instance.id, snapshotId)
   },
 }

@@ -6,6 +6,7 @@ mod api_config;
 mod diagnostics;
 mod instances;
 mod launch;
+mod paths;
 mod plugins;
 mod runtimes;
 mod storage;
@@ -116,11 +117,14 @@ pub fn run() {
         .manage(versions::Transfers::default())
         .manage(launch::Launches::default())
         .manage(launch::Processes::default())
+        .manage(paths::PhlState::load())
         .invoke_handler(tauri::generate_handler![
             app_ready,
             exit_app,
             open_external,
             reveal_path,
+            paths::init_phl_root,
+            paths::set_phl_root,
             versions::default_root,
             versions::list_dsh_versions,
             versions::download_dsh_version,

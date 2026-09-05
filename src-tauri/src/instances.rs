@@ -27,6 +27,7 @@ use tauri::State;
 
 use crate::api_config::ApiBinding;
 use crate::launch::Processes;
+use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
@@ -173,23 +174,9 @@ async fn classify_manifest(dir: &Path) -> ManifestRead {
     }
 }
 
-/// Instance ids and profile names are pasted straight into a filesystem path,
-/// so they get the same whitelist treatment as version names: anything that
-/// is not a plain segment is rejected rather than normalised.
-fn sanitize_segment(value: &str, label: &str) -> Result<String, String> {
-    let ok = !value.is_empty()
-        && value.len() <= 64
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        && value != "."
-        && value != "..";
-    if ok {
-        Ok(value.to_string())
-    } else {
-        Err(format!("非法的{label}: {value}"))
-    }
-}
+// Instance ids and profile names are pasted straight into a filesystem path —
+// the whitelist lives in `paths::sanitize_segment`, shared with every module
+// that builds paths from user-supplied ids.
 
 fn instances_root(root: &Path) -> PathBuf {
     root.join("instances")
@@ -226,8 +213,14 @@ fn assert_inside_instances(root: &Path, dir: &Path) -> Result<(), String> {
 /* ------------------------------ commands ------------------------------ */
 
 #[tauri::command]
-pub async fn list_instances(root: String) -> Result<Vec<InstanceRecord>, String> {
-    let dir = instances_root(Path::new(&root));
+pub async fn list_instances(state: State<'_, PhlState>) -> Result<Vec<InstanceRecord>, String> {
+    list_instances_inner(&state.root()).await
+}
+
+/// The plain listing, shared with `run_diagnostics`, which walks instances
+/// for its report but has no Tauri state of its own.
+pub(crate) async fn list_instances_inner(root: &Path) -> Result<Vec<InstanceRecord>, String> {
+    let dir = instances_root(root);
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,
         // Nothing has been created yet — the very first launch lands here.
@@ -255,10 +248,16 @@ pub async fn list_instances(root: String) -> Result<Vec<InstanceRecord>, String>
 
 #[tauri::command]
 pub async fn create_instance(
-    root: String,
+    state: State<'_, PhlState>,
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
-    let root = Path::new(&root);
+    create_instance_inner(&state.root(), manifest).await
+}
+
+async fn create_instance_inner(
+    root: &Path,
+    manifest: InstanceManifest,
+) -> Result<InstanceRecord, String> {
     let dir = build_instance_tree(root, &manifest).await?;
     let manifest = apply_api_at_create(root, &dir, manifest).await;
     Ok(build_record(&dir, manifest).await)
@@ -285,8 +284,15 @@ async fn apply_api_at_create(
 }
 
 #[tauri::command]
-pub async fn save_instance(root: String, manifest: InstanceManifest) -> Result<(), String> {
-    let dir = instance_dir(Path::new(&root), &manifest.id)?;
+pub async fn save_instance(
+    state: State<'_, PhlState>,
+    manifest: InstanceManifest,
+) -> Result<(), String> {
+    save_instance_inner(&state.root(), manifest).await
+}
+
+async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<(), String> {
+    let dir = instance_dir(root, &manifest.id)?;
     // Load before write: refuses a missing instance and — critically — a
     // manifest this build cannot parse. Overwriting the latter would
     // "succeed" while destroying data a newer PHL might still read.
@@ -297,15 +303,18 @@ pub async fn save_instance(root: String, manifest: InstanceManifest) -> Result<(
 #[tauri::command]
 pub async fn delete_instance(
     processes: State<'_, Processes>,
-    root: String,
+    state: State<'_, PhlState>,
     id: String,
 ) -> Result<(), String> {
-    delete_instance_inner(Path::new(&root), &id, &processes).await
+    delete_instance_inner(&state.root(), &id, &processes).await
 }
 
 async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> Result<(), String> {
     let dir = instance_dir(root, id)?;
     assert_inside_instances(root, &dir)?;
+    // Canonical containment on top of the lexical one: a directory junction
+    // planted at the instance path must not redirect `remove_dir_all`.
+    ensure_under_root(&instances_root(root), &dir)?;
     // The UI blocks this too, but the guard belongs next to the irreversible
     // operation: a running instance's files are in use, and forcing the
     // delete would leave a half-deleted tree behind a live process.
@@ -321,21 +330,21 @@ async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> 
 #[tauri::command]
 pub async fn clone_instance(
     transfers: State<'_, Transfers>,
+    state: State<'_, PhlState>,
     transfer_id: String,
-    root: String,
     source_id: String,
     manifest: InstanceManifest,
     on_progress: Channel<CloneProgress>,
 ) -> Result<InstanceRecord, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_clone(&flag, Path::new(&root), &source_id, manifest, &on_progress).await;
+    let result = run_clone(&flag, &state.root(), &source_id, manifest, &on_progress).await;
     transfers.release(&transfer_id);
     result
 }
 
 #[tauri::command]
-pub async fn instance_disk_usage(root: String, id: String) -> Result<u64, String> {
-    let dir = instance_dir(Path::new(&root), &id)?;
+pub async fn instance_disk_usage(state: State<'_, PhlState>, id: String) -> Result<u64, String> {
+    let dir = instance_dir(&state.root(), &id)?;
     tokio::task::spawn_blocking(move || dir_size(&dir))
         .await
         .map_err(|e| e.to_string())
@@ -345,8 +354,12 @@ pub async fn instance_disk_usage(root: String, id: String) -> Result<u64, String
 /// creates, and plugin trees written before instances were real. Surfacing
 /// them gives the user a way to reclaim the space.
 #[tauri::command]
-pub async fn scan_orphan_instances(root: String) -> Result<Vec<OrphanDir>, String> {
-    let dir = instances_root(Path::new(&root));
+pub async fn scan_orphan_instances(state: State<'_, PhlState>) -> Result<Vec<OrphanDir>, String> {
+    scan_orphan_instances_inner(&state.root()).await
+}
+
+pub(crate) async fn scan_orphan_instances_inner(root: &Path) -> Result<Vec<OrphanDir>, String> {
+    let dir = instances_root(root);
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -378,10 +391,17 @@ pub async fn scan_orphan_instances(root: String) -> Result<Vec<OrphanDir>, Strin
 }
 
 #[tauri::command]
-pub async fn delete_orphan_instance(root: String, name: String) -> Result<(), String> {
-    let root = Path::new(&root);
-    let dir = instances_root(root).join(sanitize_segment(&name, "目录名")?);
+pub async fn delete_orphan_instance(
+    state: State<'_, PhlState>,
+    name: String,
+) -> Result<(), String> {
+    delete_orphan_instance_inner(&state.root(), &name).await
+}
+
+async fn delete_orphan_instance_inner(root: &Path, name: &str) -> Result<(), String> {
+    let dir = instances_root(root).join(sanitize_segment(name, "目录名")?);
     assert_inside_instances(root, &dir)?;
+    ensure_under_root(&instances_root(root), &dir)?;
     // Refuse anything that turns out to be a real instance after all — an
     // unparseable manifest must stay deletable, or the directory would be
     // unreclaimable from the UI, but a manifest from a *newer* PHL belongs to
@@ -458,10 +478,20 @@ async fn read_bundle_file(path: &str) -> Result<InstanceBundle, String> {
 }
 
 #[tauri::command]
-pub async fn export_instance_bundle(root: String, id: String, dest: String) -> Result<(), String> {
-    let root = Path::new(&root);
-    let dir = instance_dir(root, &id)?;
-    let manifest = load_manifest(&dir, &id).await?;
+pub async fn export_instance_bundle(
+    state: State<'_, PhlState>,
+    id: String,
+    dest: String,
+) -> Result<(), String> {
+    export_instance_bundle_inner(&state.root(), &id, &dest).await
+}
+
+/// Exports to `dest`, which comes from the user's save dialog and is
+/// deliberately *not* confined to the root — the confinement applies to what
+/// gets read, while the destination is the user's own choice of file.
+async fn export_instance_bundle_inner(root: &Path, id: &str, dest: &str) -> Result<(), String> {
+    let dir = instance_dir(root, id)?;
+    let manifest = load_manifest(&dir, id).await?;
     let plugins = scan_plugins(&profile_root(&dir, &manifest.profile)).await;
     let bundle = InstanceBundle {
         phl_bundle: 1,
@@ -477,7 +507,7 @@ pub async fn export_instance_bundle(root: String, id: String, dest: String) -> R
         instance: manifest,
     };
     let body = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
-    tokio::fs::write(&dest, body)
+    tokio::fs::write(dest, body)
         .await
         .map_err(|e| format!("无法写入 Bundle: {e}"))
 }
@@ -495,18 +525,26 @@ pub async fn read_instance_bundle(path: String) -> Result<BundlePreview, String>
     })
 }
 
+#[tauri::command]
+pub async fn import_instance_bundle(
+    state: State<'_, PhlState>,
+    path: String,
+    manifest: InstanceManifest,
+) -> Result<InstanceRecord, String> {
+    import_instance_bundle_inner(&state.root(), &path, manifest).await
+}
+
 /// Creates an instance from a bundle file. Identity (id, name, port) comes
 /// from the importer so collisions stay a frontend concern; everything that
 /// defines the *environment* — version, runtime, profile, env, args — comes
 /// from the bundle. Plugin files are not in a bundle by design: the records
 /// travel, the reinstall goes through the normal plugin pipeline.
-#[tauri::command]
-pub async fn import_instance_bundle(
-    root: String,
-    path: String,
+async fn import_instance_bundle_inner(
+    root: &Path,
+    path: &str,
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
-    let bundle = read_bundle_file(&path).await?;
+    let bundle = read_bundle_file(path).await?;
 
     let mut manifest = manifest;
     manifest.kind = bundle.instance.kind;
@@ -518,7 +556,6 @@ pub async fn import_instance_bundle(
     manifest.env = sanitize_imported_env(bundle.instance.env);
     manifest.args = bundle.instance.args;
 
-    let root = Path::new(&root);
     let dir = build_instance_tree(root, &manifest).await?;
     // Same "boots configured" promise as a normal create: the imported
     // instance inherits the global library unless the manifest says otherwise.
@@ -618,13 +655,13 @@ fn ensure_not_running(processes: &Processes, id: &str) -> Result<(), String> {
 pub async fn create_instance_snapshot(
     transfers: State<'_, Transfers>,
     processes: State<'_, Processes>,
+    state: State<'_, PhlState>,
     transfer_id: String,
-    root: String,
     id: String,
     on_progress: Channel<CloneProgress>,
 ) -> Result<SnapshotFile, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_snapshot_create(&flag, &processes, Path::new(&root), &id, &|p| {
+    let result = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
         let _ = on_progress.send(p);
     })
     .await;
@@ -722,11 +759,11 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 #[tauri::command]
 pub async fn restore_instance_snapshot(
     processes: State<'_, Processes>,
-    root: String,
+    state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<InstanceRecord, String> {
-    restore_snapshot_inner(Path::new(&root), &id, &snapshot_id, &processes).await
+    restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
 }
 
 async fn restore_snapshot_inner(
@@ -785,11 +822,11 @@ async fn restore_snapshot_inner(
 #[tauri::command]
 pub async fn delete_instance_snapshot(
     processes: State<'_, Processes>,
-    root: String,
+    state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
-    delete_snapshot_inner(Path::new(&root), &id, &snapshot_id, &processes).await
+    delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
 }
 
 async fn delete_snapshot_inner(
@@ -802,6 +839,7 @@ async fn delete_snapshot_inner(
     let dir = instance_dir(root, &id)?;
     ensure_not_running(processes, &id)?;
     let snap_dir = snapshot_dir(&dir, snapshot_id)?;
+    ensure_under_root(&instances_root(root), &snap_dir)?;
     if snap_dir.exists() {
         tokio::fs::remove_dir_all(&snap_dir)
             .await
@@ -1323,16 +1361,6 @@ mod tests {
     }
 
     #[test]
-    fn segments_reject_path_tricks() {
-        assert!(sanitize_segment("plugin-dev-a1b2", "id").is_ok());
-        assert!(sanitize_segment("default", "profile").is_ok());
-        assert!(sanitize_segment("..", "id").is_err());
-        assert!(sanitize_segment("a/b", "id").is_err());
-        assert!(sanitize_segment("a\\b", "id").is_err());
-        assert!(sanitize_segment("", "id").is_err());
-    }
-
-    #[test]
     fn deletion_is_confined_to_the_instances_dir() {
         let root = Path::new("phl");
         assert!(assert_inside_instances(root, &root.join("instances").join("foo")).is_ok());
@@ -1382,12 +1410,14 @@ mod tests {
     #[tokio::test]
     async fn instance_lifecycle_on_disk() {
         let root = temp_root("life");
-        let root_s = root.to_string_lossy().into_owned();
 
         // Nothing created yet: an absent instances/ dir is not an error.
-        assert!(list_instances(root_s.clone()).await.unwrap().is_empty());
+        assert!(list_instances_inner(root.as_path())
+            .await
+            .unwrap()
+            .is_empty());
 
-        let record = create_instance(root_s.clone(), manifest("demo-a1b2", "Demo"))
+        let record = create_instance_inner(root.as_path(), manifest("demo-a1b2", "Demo"))
             .await
             .unwrap();
         let dir = root.join("instances").join("demo-a1b2");
@@ -1405,20 +1435,20 @@ mod tests {
 
         // Creating the same id twice must not clobber the first one.
         assert!(
-            create_instance(root_s.clone(), manifest("demo-a1b2", "Demo"))
+            create_instance_inner(root.as_path(), manifest("demo-a1b2", "Demo"))
                 .await
                 .is_err()
         );
 
-        let listed = list_instances(root_s.clone()).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].manifest.name, "Demo");
 
         // Rename survives a round trip through disk.
         let mut renamed = manifest("demo-a1b2", "Renamed");
         renamed.port = 9001;
-        save_instance(root_s.clone(), renamed).await.unwrap();
-        let listed = list_instances(root_s.clone()).await.unwrap();
+        save_instance_inner(root.as_path(), renamed).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(listed[0].manifest.name, "Renamed");
         assert_eq!(listed[0].manifest.port, 9001);
 
@@ -1426,8 +1456,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!dir.exists());
-        assert!(list_instances(root_s).await.unwrap().is_empty());
-
+        assert!(list_instances_inner(root.as_path())
+            .await
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1442,8 +1474,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_manifest_round_trips_and_upgrades_on_first_write() {
         let root = temp_root("legacy");
-        let root_s = root.to_string_lossy().into_owned();
-        create_instance(root_s.clone(), manifest("legacy-001", "Legacy"))
+        create_instance_inner(root.as_path(), manifest("legacy-001", "Legacy"))
             .await
             .unwrap();
         let dir = instance_dir(root.as_path(), "legacy-001").unwrap();
@@ -1455,7 +1486,7 @@ mod tests {
 
         // A pre-schema manifest still lists, already carrying the migrated
         // version in memory even though the file has not changed yet.
-        let listed = list_instances(root_s.clone()).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].manifest.schema_version, MANIFEST_SCHEMA_VERSION);
         assert!(
@@ -1464,7 +1495,7 @@ mod tests {
         );
 
         // The first write stamps the version and keeps the original around.
-        save_instance(root_s.clone(), manifest("legacy-001", "Renamed"))
+        save_instance_inner(root.as_path(), manifest("legacy-001", "Renamed"))
             .await
             .unwrap();
         let on_disk: InstanceManifest =
@@ -1482,7 +1513,7 @@ mod tests {
 
         // The backup is a one-time artifact: a later write must not refresh it
         // with already-migrated content.
-        save_instance(root_s, manifest("legacy-001", "Renamed Again"))
+        save_instance_inner(root.as_path(), manifest("legacy-001", "Renamed Again"))
             .await
             .unwrap();
         let backup: InstanceManifest = serde_json::from_str(
@@ -1497,8 +1528,7 @@ mod tests {
     #[tokio::test]
     async fn manifest_from_a_newer_phl_is_hidden_refused_and_protected() {
         let root = temp_root("future");
-        let root_s = root.to_string_lossy().into_owned();
-        create_instance(root_s.clone(), manifest("future-01", "Future"))
+        create_instance_inner(root.as_path(), manifest("future-01", "Future"))
             .await
             .unwrap();
         let dir = instance_dir(root.as_path(), "future-01").unwrap();
@@ -1515,28 +1545,31 @@ mod tests {
 
         // Invisible in the instance list, and — unlike a corrupt manifest —
         // not offered as reclaimable junk either: a newer PHL can still read it.
-        assert!(list_instances(root_s.clone()).await.unwrap().is_empty());
-        assert!(scan_orphan_instances(root_s.clone())
+        assert!(list_instances_inner(root.as_path())
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(scan_orphan_instances_inner(root.as_path())
             .await
             .unwrap()
             .is_empty());
 
         // Every id-addressed path refuses with the actual reason.
-        let err = save_instance(root_s.clone(), manifest("future-01", "Overwrite"))
+        let err = save_instance_inner(root.as_path(), manifest("future-01", "Overwrite"))
             .await
             .unwrap_err();
         assert!(err.contains("过新"), "{err}");
-        let err = export_instance_bundle(
-            root_s.clone(),
-            "future-01".into(),
-            root.join("out.json").to_string_lossy().into_owned(),
+        let err = export_instance_bundle_inner(
+            root.as_path(),
+            "future-01",
+            &root.join("out.json").to_string_lossy(),
         )
         .await
         .unwrap_err();
         assert!(err.contains("过新"), "{err}");
 
         // And the reclaim door stays shut.
-        let err = delete_orphan_instance(root_s.clone(), "future-01".into())
+        let err = delete_orphan_instance_inner(root.as_path(), "future-01")
             .await
             .unwrap_err();
         assert!(err.contains("schema"), "{err}");
@@ -1548,8 +1581,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreadable_manifest_stays_visible_and_reclaimable() {
         let root = temp_root("corrupt");
-        let root_s = root.to_string_lossy().into_owned();
-        create_instance(root_s.clone(), manifest("bad-0001", "Bad"))
+        create_instance_inner(root.as_path(), manifest("bad-0001", "Bad"))
             .await
             .unwrap();
 
@@ -1559,12 +1591,15 @@ mod tests {
 
         // It must not simply vanish: absent from the instance list, but listed
         // in the reclaim view and deletable from there.
-        assert!(list_instances(root_s.clone()).await.unwrap().is_empty());
-        let orphans = scan_orphan_instances(root_s.clone()).await.unwrap();
+        assert!(list_instances_inner(root.as_path())
+            .await
+            .unwrap()
+            .is_empty());
+        let orphans = scan_orphan_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].name, "bad-0001");
 
-        delete_orphan_instance(root_s, "bad-0001".into())
+        delete_orphan_instance_inner(root.as_path(), "bad-0001")
             .await
             .unwrap();
         assert!(!dir.exists());
@@ -1575,8 +1610,7 @@ mod tests {
     #[tokio::test]
     async fn plugins_are_read_back_from_disk() {
         let root = temp_root("scan");
-        let root_s = root.to_string_lossy().into_owned();
-        create_instance(root_s.clone(), manifest("scan-0001", "Scan"))
+        create_instance_inner(root.as_path(), manifest("scan-0001", "Scan"))
             .await
             .unwrap();
 
@@ -1612,7 +1646,7 @@ mod tests {
         )
         .unwrap();
 
-        let listed = list_instances(root_s).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
         let plugins = &listed[0].plugins;
         assert_eq!(
             plugins.len(),
@@ -1643,8 +1677,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_dirs_are_reported_and_reclaimable() {
         let root = temp_root("orphan");
-        let root_s = root.to_string_lossy().into_owned();
-        create_instance(root_s.clone(), manifest("real-0001", "Real"))
+        create_instance_inner(root.as_path(), manifest("real-0001", "Real"))
             .await
             .unwrap();
 
@@ -1653,21 +1686,24 @@ mod tests {
         std::fs::create_dir_all(orphan.join("dsh-home")).unwrap();
         std::fs::write(orphan.join("dsh-home").join("blob"), vec![0u8; 2048]).unwrap();
 
-        let found = scan_orphan_instances(root_s.clone()).await.unwrap();
+        let found = scan_orphan_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "leftover");
         assert_eq!(found[0].size, 2048);
 
         // A real instance must never be removable through this door.
-        assert!(delete_orphan_instance(root_s.clone(), "real-0001".into())
+        assert!(delete_orphan_instance_inner(root.as_path(), "real-0001")
             .await
             .is_err());
 
-        delete_orphan_instance(root_s.clone(), "leftover".into())
+        delete_orphan_instance_inner(root.as_path(), "leftover")
             .await
             .unwrap();
         assert!(!orphan.exists());
-        assert!(scan_orphan_instances(root_s).await.unwrap().is_empty());
+        assert!(scan_orphan_instances_inner(root.as_path())
+            .await
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1728,8 +1764,7 @@ mod tests {
     #[tokio::test]
     async fn bundle_roundtrip_export_preview_import() {
         let root = temp_root("bundle");
-        let root_s = root.to_string_lossy().into_owned();
-        let source = create_instance(root_s.clone(), manifest("src-a1b2", "Source"))
+        let source = create_instance_inner(root.as_path(), manifest("src-a1b2", "Source"))
             .await
             .unwrap();
 
@@ -1747,13 +1782,9 @@ mod tests {
 
         let dest = root.join("out/source.phl-bundle.json");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        export_instance_bundle(
-            root_s.clone(),
-            "src-a1b2".into(),
-            dest.to_string_lossy().into_owned(),
-        )
-        .await
-        .unwrap();
+        export_instance_bundle_inner(root.as_path(), "src-a1b2", &dest.to_string_lossy())
+            .await
+            .unwrap();
 
         let preview = read_instance_bundle(dest.to_string_lossy().into_owned())
             .await
@@ -1766,13 +1797,10 @@ mod tests {
         let mut importer = manifest("dst-c3d4", "Restored");
         importer.version_id = "placeholder".into();
         importer.port = 9999;
-        let imported = import_instance_bundle(
-            root_s.clone(),
-            dest.to_string_lossy().into_owned(),
-            importer,
-        )
-        .await
-        .unwrap();
+        let imported =
+            import_instance_bundle_inner(root.as_path(), &dest.to_string_lossy(), importer)
+                .await
+                .unwrap();
 
         assert_eq!(imported.manifest.id, "dst-c3d4");
         assert_eq!(
@@ -1791,9 +1819,9 @@ mod tests {
         );
 
         // Identity collision is refused before anything is touched.
-        let err = import_instance_bundle(
-            root_s.clone(),
-            dest.to_string_lossy().into_owned(),
+        let err = import_instance_bundle_inner(
+            root.as_path(),
+            &dest.to_string_lossy(),
             manifest("dst-c3d4", "Again"),
         )
         .await
@@ -1822,8 +1850,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_create_restore_delete_roundtrip() {
         let root = temp_root("snap");
-        let root_s = root.to_string_lossy().into_owned();
-        let record = create_instance(root_s.clone(), manifest("snap-a1b2", "Snapped"))
+        let record = create_instance_inner(root.as_path(), manifest("snap-a1b2", "Snapped"))
             .await
             .unwrap();
         let dir = root.join("instances").join("snap-a1b2");
@@ -1864,7 +1891,7 @@ mod tests {
             "snapshot tree exists under snapshots/"
         );
         // Listed from the record, newest first.
-        let listed = list_instances(root_s.clone()).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
         assert_eq!(listed[0].snapshots.len(), 1);
         assert_eq!(listed[0].snapshots[0].id, snap.id);
 

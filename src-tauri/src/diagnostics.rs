@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::instances::{self, scan_orphan_instances};
+use crate::instances::{self};
 use crate::versions::now_iso;
 
 #[derive(Debug, Serialize)]
@@ -52,7 +52,9 @@ pub async fn run_diagnostics(root: String) -> Result<DiagnosticReport, String> {
     items.push(instance_refs_check(root_path).await);
 
     // 5. 孤立目录：无清单的 instances/* 目录，存储页提供回收入口。
-    let orphans = scan_orphan_instances(root.clone()).await.unwrap_or_default();
+    let orphans = instances::scan_orphan_instances_inner(root_path)
+        .await
+        .unwrap_or_default();
     items.push(DiagnosticItem {
         id: "orphan-dirs".into(),
         level: if orphans.is_empty() { "ok" } else { "warn" }.into(),
@@ -179,7 +181,11 @@ async fn versions_check(root: &Path) -> DiagnosticItem {
 
 async fn runtimes_check(root: &Path) -> DiagnosticItem {
     let dir = root.join("runtimes");
-    let node_binary = if cfg!(windows) { "node.exe" } else { "bin/node" };
+    let node_binary = if cfg!(windows) {
+        "node.exe"
+    } else {
+        "bin/node"
+    };
     let mut total = 0usize;
     let mut broken: Vec<String> = Vec::new();
     let mut entries = match tokio::fs::read_dir(&dir).await {
@@ -233,7 +239,7 @@ async fn runtimes_check(root: &Path) -> DiagnosticItem {
 /// An instance whose pinned version or runtime has been uninstalled shows up
 /// here — the launch guard would refuse it, this check explains it up front.
 async fn instance_refs_check(root: &Path) -> DiagnosticItem {
-    let records = match instances::list_instances(root.display().to_string()).await {
+    let records = match instances::list_instances_inner(root).await {
         Ok(records) => records,
         Err(e) => {
             return DiagnosticItem {
@@ -332,11 +338,17 @@ mod tests {
         let runtime = root.join("runtimes/node-22");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(runtime.join("phl-runtime.json"), "{}").unwrap();
-        let node = runtime.join(if cfg!(windows) { "node.exe" } else { "bin/node" });
+        let node = runtime.join(if cfg!(windows) {
+            "node.exe"
+        } else {
+            "bin/node"
+        });
         std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         std::fs::write(&node, "bin").unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned()).await.unwrap();
+        let report = run_diagnostics(root.to_string_lossy().into_owned())
+            .await
+            .unwrap();
         assert_eq!(item(&report, "root-writable").level, "ok");
         assert_eq!(item(&report, "versions").level, "ok");
         assert_eq!(item(&report, "runtimes").level, "ok");
@@ -354,7 +366,9 @@ mod tests {
         std::fs::create_dir_all(&version).unwrap();
         std::fs::write(version.join("phl-install.json"), "{}").unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned()).await.unwrap();
+        let report = run_diagnostics(root.to_string_lossy().into_owned())
+            .await
+            .unwrap();
         assert_eq!(item(&report, "versions").level, "warn");
         assert!(item(&report, "versions").detail.contains("lib/bin.js"));
 
@@ -366,7 +380,9 @@ mod tests {
             "profile":"web","createdAt":"2026-01-01T00:00:00Z"}"#;
         std::fs::write(instances.join("instance.json"), manifest.replace('\n', "")).unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned()).await.unwrap();
+        let report = run_diagnostics(root.to_string_lossy().into_owned())
+            .await
+            .unwrap();
         assert_eq!(item(&report, "instance-refs").level, "warn");
         assert!(item(&report, "instance-refs").detail.contains("Demo"));
 
@@ -381,7 +397,9 @@ mod tests {
         std::fs::write(cache.join("dsh-0.1.0.tgz.part"), vec![0u8; 128]).unwrap();
         std::fs::write(cache.join("dsh-0.1.0.tgz"), vec![0u8; 256]).unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned()).await.unwrap();
+        let report = run_diagnostics(root.to_string_lossy().into_owned())
+            .await
+            .unwrap();
         assert_eq!(report.cache_files, 2);
         assert_eq!(report.cache_bytes, 384);
         assert_eq!(item(&report, "cache").level, "warn");

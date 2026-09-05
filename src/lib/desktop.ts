@@ -238,6 +238,35 @@ export async function defaultRoot(): Promise<string | null> {
   }
 }
 
+/**
+ * Boot handshake with the backend's authoritative data root. The backend
+ * adopts `hint` (the root persisted in settings) only when it has no pointer
+ * file of its own yet — an existing install keeps its root through the
+ * upgrade, while the pointer file wins everywhere else. Returns the
+ * authoritative root, or null in the browser / on failure.
+ */
+export async function initPhlRoot(hint: string | null): Promise<string | null> {
+  if (!isDesktop) return null
+  try {
+    return await invoke<string>('init_phl_root', { hint })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * An explicit root change (first-run chooser, storage settings). The backend
+ * persists the choice; returns the root it accepted, or null on failure.
+ */
+export async function setPhlRoot(root: string): Promise<string | null> {
+  if (!isDesktop) return null
+  try {
+    return await invoke<string>('set_phl_root', { root })
+  } catch {
+    return null
+  }
+}
+
 export async function listDshVersions(registryBase: string): Promise<RemoteVersionMeta[]> {
   if (!isDesktop) return []
   return invoke<RemoteVersionMeta[]>('list_dsh_versions', { registryBase })
@@ -643,9 +672,9 @@ export interface RemoteBundlePreview {
   exportedAt: string
 }
 
-export async function exportInstanceBundle(root: string, id: string, dest: string): Promise<void> {
+export async function exportInstanceBundle(id: string, dest: string): Promise<void> {
   if (!isDesktop) throw new Error('导出 Bundle 仅在桌面端可用')
-  await invoke('export_instance_bundle', { root, id, dest })
+  await invoke('export_instance_bundle', { id, dest })
 }
 
 export async function readInstanceBundle(path: string): Promise<RemoteBundlePreview> {
@@ -654,18 +683,16 @@ export async function readInstanceBundle(path: string): Promise<RemoteBundlePrev
 }
 
 export async function importInstanceBundle(
-  root: string,
   path: string,
   manifest: RemoteInstanceManifest,
 ): Promise<RemoteInstanceRecord> {
   if (!isDesktop) throw new Error('导入 Bundle 仅在桌面端可用')
-  return invoke('import_instance_bundle', { root, path, manifest })
+  return invoke('import_instance_bundle', { path, manifest })
 }
 
 /* ------------------------------ snapshots ----------------------------- */
 
 export async function createInstanceSnapshot(
-  root: string,
   id: string,
   transferId: string,
   onProgress: (event: { progress: number; bytesDone: number; bytesTotal: number }) => void,
@@ -673,25 +700,20 @@ export async function createInstanceSnapshot(
   if (!isDesktop) throw new Error('创建快照仅在桌面端可用')
   const channel = new Channel<Parameters<typeof onProgress>[0]>()
   channel.onmessage = onProgress
-  return invoke('create_instance_snapshot', { root, id, transferId, onProgress: channel })
+  return invoke('create_instance_snapshot', { id, transferId, onProgress: channel })
 }
 
 export async function restoreInstanceSnapshot(
-  root: string,
   id: string,
   snapshotId: string,
 ): Promise<RemoteInstanceRecord> {
   if (!isDesktop) throw new Error('还原快照仅在桌面端可用')
-  return invoke('restore_instance_snapshot', { root, id, snapshotId })
+  return invoke('restore_instance_snapshot', { id, snapshotId })
 }
 
-export async function deleteInstanceSnapshot(
-  root: string,
-  id: string,
-  snapshotId: string,
-): Promise<void> {
+export async function deleteInstanceSnapshot(id: string, snapshotId: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('delete_instance_snapshot', { root, id, snapshotId })
+  await invoke('delete_instance_snapshot', { id, snapshotId })
 }
 
 /* ------------------------------ instances ----------------------------- */
@@ -744,35 +766,35 @@ export type RemoteInstanceManifest = Omit<
   'dshHome' | 'workspace' | 'plugins' | 'snapshots'
 >
 
-export async function listInstanceRecords(root: string): Promise<RemoteInstanceRecord[]> {
+/**
+ * Instance commands take only stable ids — the data root is resolved
+ * Rust-side from `PhlState`, so the WebView can never aim a destructive
+ * operation outside the real root.
+ */
+export async function listInstanceRecords(): Promise<RemoteInstanceRecord[]> {
   if (!isDesktop) return []
-  return invoke('list_instances', { root })
+  return invoke('list_instances', {})
 }
 
 export async function createInstanceDir(
-  root: string,
   manifest: RemoteInstanceManifest,
 ): Promise<RemoteInstanceRecord> {
   if (!isDesktop) throw new Error('创建实例目录仅在桌面端可用')
-  return invoke('create_instance', { root, manifest })
+  return invoke('create_instance', { manifest })
 }
 
-export async function saveInstanceManifest(
-  root: string,
-  manifest: RemoteInstanceManifest,
-): Promise<void> {
+export async function saveInstanceManifest(manifest: RemoteInstanceManifest): Promise<void> {
   if (!isDesktop) return
-  await invoke('save_instance', { root, manifest })
+  await invoke('save_instance', { manifest })
 }
 
-export async function deleteInstanceDir(root: string, id: string): Promise<void> {
+export async function deleteInstanceDir(id: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('delete_instance', { root, id })
+  await invoke('delete_instance', { id })
 }
 
 export interface CloneInstanceArgs {
   transferId: string
-  root: string
   sourceId: string
   manifest: RemoteInstanceManifest
   onProgress: (event: { progress: number; bytesDone: number; bytesTotal: number }) => void
@@ -786,29 +808,28 @@ export async function cloneInstanceDir(
   channel.onmessage = args.onProgress
   return invoke('clone_instance', {
     transferId: args.transferId,
-    root: args.root,
     sourceId: args.sourceId,
     manifest: args.manifest,
     onProgress: channel,
   })
 }
 
-export async function instanceDiskUsage(root: string, id: string): Promise<number> {
+export async function instanceDiskUsage(id: string): Promise<number> {
   if (!isDesktop) return 0
-  return invoke('instance_disk_usage', { root, id })
+  return invoke('instance_disk_usage', { id })
 }
 
 /** Directories under `instances/` with no manifest — reclaimable leftovers. */
-export async function scanOrphanInstances(
-  root: string,
-): Promise<{ name: string; size: number }[]> {
+export async function scanOrphanInstances(): Promise<
+  { name: string; size: number }[]
+> {
   if (!isDesktop) return []
-  return invoke('scan_orphan_instances', { root })
+  return invoke('scan_orphan_instances', {})
 }
 
-export async function deleteOrphanInstance(root: string, name: string): Promise<void> {
+export async function deleteOrphanInstance(name: string): Promise<void> {
   if (!isDesktop) return
-  await invoke('delete_orphan_instance', { root, name })
+  await invoke('delete_orphan_instance', { name })
 }
 
 /* ---------------------------- api config ------------------------------ */

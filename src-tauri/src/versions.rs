@@ -131,9 +131,7 @@ pub(crate) fn cancelled(flag: &AtomicBool) -> bool {
 
 #[tauri::command]
 pub fn default_root() -> String {
-    dirs::data_local_dir()
-        .map(|p| p.join("PHL").to_string_lossy().into_owned())
-        .unwrap_or_else(|| "PHL".into())
+    crate::paths::default_root().to_string_lossy().into_owned()
 }
 
 #[tauri::command]

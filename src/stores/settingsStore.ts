@@ -1,7 +1,14 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { PHL_ROOT } from '@/data/instances'
-import { chooseDirectory, defaultRoot, isDesktop, rootDataSummary } from '@/lib/desktop'
+import {
+  chooseDirectory,
+  defaultRoot,
+  initPhlRoot,
+  isDesktop,
+  rootDataSummary,
+  setPhlRoot,
+} from '@/lib/desktop'
 import { useUIStore } from './uiStore'
 import { normalizeRoot } from '@/lib/paths'
 export { normalizeRoot } from '@/lib/paths'
@@ -98,7 +105,14 @@ export const useSettingsStore = create<SettingsState>()(
       rootDecided: false,
       markRootDecided: () => set({ rootDecided: true }),
       set: (key, value) => set({ [key]: value } as Partial<SettingsState>),
-      setRoot: (root) => set({ root: normalizeRoot(root) || DEFAULT_ROOT }),
+      setRoot: (root) => {
+        const next = normalizeRoot(root) || DEFAULT_ROOT
+        set({ root: next })
+        // Mirror to the backend's authoritative root. Best-effort: if the
+        // backend is not there (browser) or the write fails, the local
+        // setting still stands and the pointer file stays where it was.
+        void setPhlRoot(next)
+      },
       /**
        * Everything except the data root. `defaults.root` is the prototype's
        * placeholder path, and the root now drives real filesystem commands —
@@ -116,6 +130,24 @@ export const useSettingsStore = create<SettingsState>()(
     },
   ),
 )
+
+/**
+ * The boot handshake with the backend's authoritative data root. The backend
+ * adopts the root persisted here only when it has no pointer file yet —
+ * existing installs keep their root through the upgrade to backend-owned
+ * roots, and from then on the pointer file (not localStorage) wins. The
+ * prototype placeholder is never offered: it is not a real directory.
+ */
+export async function syncPhlRootWithBackend(): Promise<void> {
+  if (!isDesktop) return
+  const stored = useSettingsStore.getState().root
+  const authoritative = await initPhlRoot(stored === PHL_ROOT ? null : stored)
+  if (!authoritative) return
+  const normalized = normalizeRoot(authoritative)
+  if (normalized && normalized !== useSettingsStore.getState().root) {
+    useSettingsStore.getState().setRoot(normalized)
+  }
+}
 
 /**
  * The prototype's fake root (`C:\Users\dev\…`) is only a placeholder. On a
