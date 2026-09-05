@@ -701,6 +701,8 @@ export async function deleteInstanceSnapshot(
  * the resolved paths and the plugin list read back out of `node_modules`.
  */
 export interface RemoteInstanceRecord {
+  /** On-disk manifest format version. Stamped by Rust — the frontend never sends it. */
+  schemaVersion?: number
   id: string
   name: string
   note?: string | null

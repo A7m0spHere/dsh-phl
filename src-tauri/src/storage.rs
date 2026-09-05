@@ -159,8 +159,16 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         if dst.exists() {
             let mut entries = std::fs::read_dir(&dst)
                 .map_err(|e| format!("无法检查目标目录 {}: {e}", dst.display()))?;
-            if entries.next().transpose().map_err(|e| e.to_string())?.is_some() {
-                return Err(format!("目标已存在非空目录 {} —— 请改用一个空目录", dst.display()));
+            if entries
+                .next()
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                return Err(format!(
+                    "目标已存在非空目录 {} —— 请改用一个空目录",
+                    dst.display()
+                ));
             }
         }
     }
@@ -194,7 +202,9 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
                     dst.display()
                 ));
             }
-            tokio::fs::remove_dir(&dst).await.map_err(|e| e.to_string())?;
+            tokio::fs::remove_dir(&dst)
+                .await
+                .map_err(|e| e.to_string())?;
         }
 
         // The full size, and below a copy that skips nothing. Relocating the
@@ -217,12 +227,20 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         }
 
         let copy_result = copy_tree_with_progress(
-            src.clone(), dst.clone(), Arc::clone(flag), SkipRule::Nothing,
-            &|p| on_progress(MoveProgress {
-                kind: kind.into(), progress: p.progress,
-                bytes_done: p.bytes_done, bytes_total: p.bytes_total,
-            }),
-        ).await;
+            src.clone(),
+            dst.clone(),
+            Arc::clone(flag),
+            SkipRule::Nothing,
+            &|p| {
+                on_progress(MoveProgress {
+                    kind: kind.into(),
+                    progress: p.progress,
+                    bytes_done: p.bytes_done,
+                    bytes_total: p.bytes_total,
+                })
+            },
+        )
+        .await;
         // The cancel check must precede the error check: copy_tree reports
         // cancellation as an Err("cancelled"), but a cancelled migration is a
         // normal outcome, not a failure.
@@ -266,8 +284,12 @@ mod tests {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "phl-storage-{}-{}-{}", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                "phl-storage-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
             std::fs::create_dir_all(&path).unwrap();
@@ -275,7 +297,9 @@ mod tests {
         }
     }
     impl Drop for TestRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[tokio::test]
@@ -288,9 +312,14 @@ mod tests {
         let summary = root_data_summary(from.to_string_lossy().into_owned());
         assert!(summary.has_data);
         assert_eq!(summary.config.entries, 1);
-        let result = move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.unwrap();
+        let result = move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {})
+            .await
+            .unwrap();
         assert_eq!(result.moved, vec!["config"]);
-        assert_eq!(std::fs::read(to.join("config/api.json")).unwrap(), b"test-config");
+        assert_eq!(
+            std::fs::read(to.join("config/api.json")).unwrap(),
+            b"test-config"
+        );
         assert!(!from.join("config").exists());
     }
 
@@ -305,11 +334,18 @@ mod tests {
         }
         std::fs::create_dir_all(to.join("config")).unwrap();
         std::fs::write(to.join("config/api.json"), b"existing").unwrap();
-        assert!(move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.is_err());
+        assert!(
+            move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {})
+                .await
+                .is_err()
+        );
         assert!(from.join("instances/data").exists());
         assert!(from.join("config/data").exists());
         assert!(!to.join("instances").exists());
-        assert_eq!(std::fs::read(to.join("config/api.json")).unwrap(), b"existing");
+        assert_eq!(
+            std::fs::read(to.join("config/api.json")).unwrap(),
+            b"existing"
+        );
     }
 
     #[tokio::test]
@@ -319,7 +355,11 @@ mod tests {
         std::fs::create_dir_all(from.join("instances")).unwrap();
         std::fs::create_dir_all(root.0.join("alias")).unwrap();
         let to = root.0.join("alias/../old/nested");
-        assert!(move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {}).await.is_err());
+        assert!(
+            move_root_inner(&Arc::new(AtomicBool::new(false)), &from, &to, &|_| {})
+                .await
+                .is_err()
+        );
         assert!(from.join("instances").exists());
     }
 
@@ -328,7 +368,14 @@ mod tests {
         let root = TestRoot::new();
         let from = root.0.join("old");
         std::fs::create_dir_all(from.join("config")).unwrap();
-        let result = move_root_inner(&Arc::new(AtomicBool::new(true)), &from, &root.0.join("new"), &|_| {}).await.unwrap();
+        let result = move_root_inner(
+            &Arc::new(AtomicBool::new(true)),
+            &from,
+            &root.0.join("new"),
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert!(result.cancelled);
         assert!(result.moved.is_empty());
         assert!(from.join("config").exists());

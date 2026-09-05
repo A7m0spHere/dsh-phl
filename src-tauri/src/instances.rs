@@ -38,6 +38,13 @@ use crate::versions::{now_iso, Transfers};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceManifest {
+    /// On-disk format version, stamped by the backend on every write. Absent
+    /// means the manifest predates schema versioning — same shape, migrated
+    /// in memory on read and stamped on the next write (original kept as a
+    /// `.bak`). A version from a *newer* PHL is never guessed at; see
+    /// `classify_manifest`.
+    #[serde(default)]
+    pub schema_version: u32,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -117,6 +124,54 @@ struct PluginMarker {
 }
 
 /* ------------------------------- paths -------------------------------- */
+
+/// The manifest format this build reads and writes. Bump only together with a
+/// migration story: older versions must keep parsing, and this build must
+/// refuse (not guess at) anything written by a newer one.
+pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// What reading an `instance.json` actually found. The distinctions matter:
+/// `Missing` means "not an instance at all", `Corrupt` is reclaimable junk,
+/// and `UnsupportedSchema` is a *valid instance this build cannot parse* —
+/// it must stay invisible to every destructive path.
+enum ManifestRead {
+    Ok(Box<InstanceManifest>),
+    Missing,
+    Corrupt(String),
+    UnsupportedSchema { found: u32, supported: u32 },
+}
+
+async fn classify_manifest(dir: &Path) -> ManifestRead {
+    let Ok(raw) = tokio::fs::read_to_string(manifest_path(dir)).await else {
+        return ManifestRead::Missing;
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(e) => return ManifestRead::Corrupt(format!("JSON 无法解析: {e}")),
+    };
+    // The version is inspected on the raw JSON, before a full parse: a
+    // manifest from a newer PHL may carry fields this struct would reject, and
+    // that failure must report itself as "too new", not as corruption.
+    let found = value
+        .get("schemaVersion")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    if found > MANIFEST_SCHEMA_VERSION {
+        return ManifestRead::UnsupportedSchema {
+            found,
+            supported: MANIFEST_SCHEMA_VERSION,
+        };
+    }
+    match serde_json::from_value::<InstanceManifest>(value) {
+        Ok(mut manifest) => {
+            // Legacy manifests migrate in memory; the stamp reaches disk the
+            // next time this manifest is written, with the original saved.
+            manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+            ManifestRead::Ok(Box::new(manifest))
+        }
+        Err(e) => ManifestRead::Corrupt(e.to_string()),
+    }
+}
 
 /// Instance ids and profile names are pasted straight into a filesystem path,
 /// so they get the same whitelist treatment as version names: anything that
@@ -219,7 +274,9 @@ async fn apply_api_at_create(
     dir: &Path,
     mut manifest: InstanceManifest,
 ) -> InstanceManifest {
-    let Some(binding) = manifest.api.clone() else { return manifest };
+    let Some(binding) = manifest.api.clone() else {
+        return manifest;
+    };
     match crate::api_config::apply_create_binding(root, dir, &manifest.id, binding).await {
         Some(applied) => manifest.api = Some(applied),
         None => eprintln!("[phl] api sync at create skipped for {}", manifest.id),
@@ -230,9 +287,10 @@ async fn apply_api_at_create(
 #[tauri::command]
 pub async fn save_instance(root: String, manifest: InstanceManifest) -> Result<(), String> {
     let dir = instance_dir(Path::new(&root), &manifest.id)?;
-    if !dir.exists() {
-        return Err(format!("实例不存在: {}", manifest.id));
-    }
+    // Load before write: refuses a missing instance and — critically — a
+    // manifest this build cannot parse. Overwriting the latter would
+    // "succeed" while destroying data a newer PHL might still read.
+    load_manifest(&dir, &manifest.id).await?;
     write_manifest(&dir, &manifest).await
 }
 
@@ -245,11 +303,7 @@ pub async fn delete_instance(
     delete_instance_inner(Path::new(&root), &id, &processes).await
 }
 
-async fn delete_instance_inner(
-    root: &Path,
-    id: &str,
-    processes: &Processes,
-) -> Result<(), String> {
+async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> Result<(), String> {
     let dir = instance_dir(root, id)?;
     assert_inside_instances(root, &dir)?;
     // The UI blocks this too, but the guard belongs next to the irreversible
@@ -304,8 +358,14 @@ pub async fn scan_orphan_instances(root: String) -> Result<Vec<OrphanDir>, Strin
         // Keyed on "can this be read as an instance", not on the file merely
         // existing: a directory whose manifest fails to parse is exactly the
         // one the user cannot see anywhere else, so it belongs in this list.
-        if !path.is_dir() || read_manifest(&path).await.is_some() {
+        // A manifest from a *newer* PHL is the exception — that is a valid
+        // instance a newer build can still read, not reclaimable junk.
+        if !path.is_dir() {
             continue;
+        }
+        match classify_manifest(&path).await {
+            ManifestRead::Ok(_) | ManifestRead::UnsupportedSchema { .. } => continue,
+            ManifestRead::Missing | ManifestRead::Corrupt(_) => {}
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let probe = path.clone();
@@ -322,11 +382,19 @@ pub async fn delete_orphan_instance(root: String, name: String) -> Result<(), St
     let root = Path::new(&root);
     let dir = instances_root(root).join(sanitize_segment(&name, "目录名")?);
     assert_inside_instances(root, &dir)?;
-    // Refuse anything that turns out to be a real instance after all — but an
+    // Refuse anything that turns out to be a real instance after all — an
     // unparseable manifest must stay deletable, or the directory would be
-    // unreclaimable from the UI.
-    if read_manifest(&dir).await.is_some() {
-        return Err("该目录是一个有效实例，请从实例页删除".into());
+    // unreclaimable from the UI, but a manifest from a *newer* PHL belongs to
+    // an instance a newer build can still read; deleting it here would trade
+    // a "wrong version" problem for permanent data loss.
+    match classify_manifest(&dir).await {
+        ManifestRead::Ok(_) => return Err("该目录是一个有效实例，请从实例页删除".into()),
+        ManifestRead::UnsupportedSchema { found, supported } => {
+            return Err(format!(
+                "该目录是 schema 版本 {found} 的实例（当前支持 {supported}），请升级 PHL 后再删除"
+            ))
+        }
+        ManifestRead::Missing | ManifestRead::Corrupt(_) => {}
     }
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir)
@@ -393,9 +461,7 @@ async fn read_bundle_file(path: &str) -> Result<InstanceBundle, String> {
 pub async fn export_instance_bundle(root: String, id: String, dest: String) -> Result<(), String> {
     let root = Path::new(&root);
     let dir = instance_dir(root, &id)?;
-    let manifest = read_manifest(&dir)
-        .await
-        .ok_or_else(|| format!("实例不存在或缺少清单: {id}"))?;
+    let manifest = load_manifest(&dir, &id).await?;
     let plugins = scan_plugins(&profile_root(&dir, &manifest.profile)).await;
     let bundle = InstanceBundle {
         phl_bundle: 1,
@@ -558,15 +624,9 @@ pub async fn create_instance_snapshot(
     on_progress: Channel<CloneProgress>,
 ) -> Result<SnapshotFile, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_snapshot_create(
-        &flag,
-        &processes,
-        Path::new(&root),
-        &id,
-        &|p| {
-            let _ = on_progress.send(p);
-        },
-    )
+    let result = run_snapshot_create(&flag, &processes, Path::new(&root), &id, &|p| {
+        let _ = on_progress.send(p);
+    })
     .await;
     transfers.release(&transfer_id);
     result
@@ -581,9 +641,7 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 ) -> Result<SnapshotFile, String> {
     let id = sanitize_segment(id, "实例 id")?;
     let dir = instance_dir(root, &id)?;
-    let manifest = read_manifest(&dir)
-        .await
-        .ok_or_else(|| format!("实例不存在或缺少清单: {id}"))?;
+    let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
 
     let dsh_home = dir.join("dsh-home");
@@ -600,15 +658,24 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     );
     let staging = snapshots_root(&dir).join(format!(".phl-new-{snap_id}"));
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Same copy-with-progress shape as cloning; the snapshot lands under a
     // staging name so a cancelled copy cannot look like a real snapshot.
     let dest = staging.join("dsh-home");
-    tokio::fs::create_dir_all(&dest).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&dest)
+        .await
+        .map_err(|e| e.to_string())?;
     let copy_result = copy_tree_with_progress(
-        dsh_home.clone(), dest, Arc::clone(flag), SkipRule::RunStateAtRoot, on_progress,
-    ).await;
+        dsh_home.clone(),
+        dest,
+        Arc::clone(flag),
+        SkipRule::RunStateAtRoot,
+        on_progress,
+    )
+    .await;
     // Cancellation is reported by `copy_tree` as Err("cancelled"), so the
     // cancel branch has to come *first*: propagating the error before it left
     // the staging tree — a full copy of dsh-home, potentially gigabytes —
@@ -632,7 +699,9 @@ async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         created_at: now_iso(),
         version_id: manifest.version_id,
         runtime_id: manifest.runtime_id,
-        plugin_count: scan_plugins(&profile_root(&dir, &manifest.profile)).await.len(),
+        plugin_count: scan_plugins(&profile_root(&dir, &manifest.profile))
+            .await
+            .len(),
         size: bytes_total,
     };
     let body = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
@@ -688,7 +757,9 @@ async fn restore_snapshot_inner(
     // current tree steps back in; the snapshot itself is never touched.
     let staging = dir.join(".phl-restore");
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Err(e) = copy_tree_sync(&snap_home, &staging.join("dsh-home")) {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(format!("还原快照失败: {e}"));
@@ -707,9 +778,7 @@ async fn restore_snapshot_inner(
     let _ = tokio::fs::remove_dir_all(&staging).await;
     let _ = tokio::fs::remove_dir_all(&backup).await;
 
-    let manifest = read_manifest(&dir)
-        .await
-        .ok_or_else(|| format!("实例缺少清单: {id}"))?;
+    let manifest = load_manifest(&dir, &id).await?;
     Ok(build_record(&dir, manifest).await)
 }
 
@@ -752,7 +821,8 @@ fn copy_tree_sync(from: &Path, to: &Path) -> Result<(), String> {
         if meta.is_dir() {
             copy_tree_sync(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target).map_err(|e| format!("复制 {} 失败: {e}", entry.path().display()))?;
+            std::fs::copy(entry.path(), &target)
+                .map_err(|e| format!("复制 {} 失败: {e}", entry.path().display()))?;
         }
     }
     Ok(())
@@ -800,10 +870,10 @@ async fn build_instance_tree(root: &Path, manifest: &InstanceManifest) -> Result
 }
 
 pub(crate) async fn read_manifest(dir: &Path) -> Option<InstanceManifest> {
-    let raw = tokio::fs::read_to_string(manifest_path(dir)).await.ok()?;
-    match serde_json::from_str::<InstanceManifest>(&raw) {
-        Ok(manifest) => Some(manifest),
-        Err(e) => {
+    match classify_manifest(dir).await {
+        ManifestRead::Ok(manifest) => Some(*manifest),
+        ManifestRead::Missing => None,
+        ManifestRead::Corrupt(e) => {
             // Silently returning None here made the instance vanish from the
             // list *and* from the orphan view (which used to key off the file
             // merely existing), leaving the user no signal at all beyond their
@@ -812,6 +882,27 @@ pub(crate) async fn read_manifest(dir: &Path) -> Option<InstanceManifest> {
             eprintln!("[phl] 无法解析 {}: {e}", manifest_path(dir).display());
             None
         }
+        ManifestRead::UnsupportedSchema { found, supported } => {
+            eprintln!(
+                "[phl] {}: schema 版本 {found} 超出当前支持的 {supported}，已隐藏该实例（请升级 PHL）",
+                manifest_path(dir).display()
+            );
+            None
+        }
+    }
+}
+
+/// Load a manifest for an id-addressed command. Unlike `read_manifest`, every
+/// failure mode is an explicit error — in particular a schema this build
+/// cannot parse must fail loudly instead of being overwritten by a save.
+pub(crate) async fn load_manifest(dir: &Path, id: &str) -> Result<InstanceManifest, String> {
+    match classify_manifest(dir).await {
+        ManifestRead::Ok(manifest) => Ok(*manifest),
+        ManifestRead::Missing => Err(format!("实例不存在或缺少清单: {id}")),
+        ManifestRead::Corrupt(e) => Err(format!("实例 {id} 清单损坏: {e}")),
+        ManifestRead::UnsupportedSchema { found, supported } => Err(format!(
+            "实例 {id} 的清单 schema 版本过新: {found}（当前支持 {supported}），请升级 PHL 后再操作"
+        )),
     }
 }
 
@@ -824,22 +915,41 @@ pub(crate) async fn set_instance_api(
     binding: &ApiBinding,
 ) -> Result<(), String> {
     let dir = instance_dir(root, id)?;
-    let mut manifest = read_manifest(&dir)
-        .await
-        .ok_or_else(|| format!("实例不存在或缺少清单: {id}"))?;
+    let mut manifest = load_manifest(&dir, id).await?;
     manifest.api = Some(binding.clone());
     write_manifest(&dir, &manifest).await
 }
 
 async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> Result<(), String> {
-    let body = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    // The schema version is backend-owned: whatever the caller sent, the file
+    // always records the format this build writes. Callers load their copy
+    // from disk (already migrated) or author a fresh one — either way the
+    // stamp must reflect this build, not round-trip stale state.
+    let mut manifest = manifest.clone();
+    manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+
+    let path = manifest_path(dir);
+    // One-time backup when this write changes the on-disk schema — a legacy
+    // manifest gaining its version stamp. If the upgrade write is somehow
+    // interrupted, the `.bak` still carries the last readable state.
+    if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+        let on_disk_version = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("schemaVersion").and_then(|v| v.as_u64()))
+            .unwrap_or(0) as u32;
+        if on_disk_version != MANIFEST_SCHEMA_VERSION {
+            let _ = tokio::fs::copy(&path, dir.join("instance.json.legacy.bak")).await;
+        }
+    }
+
+    let body = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     // Write beside the target and rename, so a crash mid-write cannot leave a
     // truncated manifest — that would make the instance unreadable entirely.
     let tmp = dir.join("instance.json.tmp");
     tokio::fs::write(&tmp, body)
         .await
         .map_err(|e| format!("无法写入实例清单: {e}"))?;
-    tokio::fs::rename(&tmp, manifest_path(dir))
+    tokio::fs::rename(&tmp, path)
         .await
         .map_err(|e| format!("无法写入实例清单: {e}"))
 }
@@ -941,9 +1051,15 @@ async fn run_clone(
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
     let copy_result = copy_tree_with_progress(
-        source.clone(), staging.clone(), Arc::clone(flag), SkipRule::RunStateAtRoot,
-        &|progress| { let _ = on_progress.send(progress); },
-    ).await;
+        source.clone(),
+        staging.clone(),
+        Arc::clone(flag),
+        SkipRule::RunStateAtRoot,
+        &|progress| {
+            let _ = on_progress.send(progress);
+        },
+    )
+    .await;
 
     if let Err(e) = copy_result {
         let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -1053,20 +1169,28 @@ pub(crate) async fn copy_tree_with_progress<F: Fn(CloneProgress) + Send + Sync>(
 ) -> Result<u64, String> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64), String>>(16);
     let worker = tokio::task::spawn_blocking(move || {
-        if flag.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        if flag.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
         let total = match skip {
             SkipRule::Nothing => dir_size(&from),
             SkipRule::RunStateAtRoot => dir_size_skipping(&from),
         };
         let mut done = 0;
         copy_tree(&from, &to, &flag, &mut done, total, &tx, skip)?;
-        if flag.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        if flag.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
         Ok(done)
     });
     while let Some(message) = rx.recv().await {
         let (bytes_done, bytes_total) = message?;
         on_progress(CloneProgress {
-            progress: if bytes_total == 0 { 1.0 } else { (bytes_done as f64 / bytes_total as f64).min(1.0) },
+            progress: if bytes_total == 0 {
+                1.0
+            } else {
+                (bytes_done as f64 / bytes_total as f64).min(1.0)
+            },
             bytes_done,
             bytes_total,
         });
@@ -1096,11 +1220,16 @@ pub(crate) fn copy_tree(
         }
         let src = entry.path();
         let dst = to.join(&name);
-        let meta = entry.metadata().map_err(|e| format!("读取复制源属性失败 {}: {e}", src.display()))?;
+        let meta = entry
+            .metadata()
+            .map_err(|e| format!("读取复制源属性失败 {}: {e}", src.display()))?;
         // A relocation deletes the source afterwards. Silently skipping a
         // link (or following it outside the tree) would lose or duplicate data.
         if meta.file_type().is_symlink() {
-            return Err(format!("复制源包含符号链接，请先处理后重试: {}", src.display()));
+            return Err(format!(
+                "复制源包含符号链接，请先处理后重试: {}",
+                src.display()
+            ));
         }
         if meta.is_dir() {
             copy_tree(&src, &dst, flag, done, total, tx, skip.inside())?;
@@ -1125,9 +1254,13 @@ mod tests {
     async fn async_copy_reports_worker_failure_instead_of_success() {
         let root = temp_root("async-copy-error");
         let result = copy_tree_with_progress(
-            root.join("missing"), root.join("target"), Arc::new(AtomicBool::new(false)),
-            SkipRule::Nothing, &|_| {},
-        ).await;
+            root.join("missing"),
+            root.join("target"),
+            Arc::new(AtomicBool::new(false)),
+            SkipRule::Nothing,
+            &|_| {},
+        )
+        .await;
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1143,9 +1276,15 @@ mod tests {
         }
         let flag = Arc::new(AtomicBool::new(false));
         let result = copy_tree_with_progress(
-            source, target.clone(), Arc::clone(&flag), SkipRule::Nothing,
-            &|_| { flag.store(true, Ordering::SeqCst); },
-        ).await;
+            source,
+            target.clone(),
+            Arc::clone(&flag),
+            SkipRule::Nothing,
+            &|_| {
+                flag.store(true, Ordering::SeqCst);
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err(), "cancelled");
         // No worker remains to recreate target after this removal.
         std::fs::remove_dir_all(&target).unwrap();
@@ -1162,6 +1301,7 @@ mod tests {
 
     fn manifest(id: &str, name: &str) -> InstanceManifest {
         InstanceManifest {
+            schema_version: 0,
             id: id.into(),
             name: name.into(),
             note: None,
@@ -1264,9 +1404,11 @@ mod tests {
         assert!(record.plugins.is_empty());
 
         // Creating the same id twice must not clobber the first one.
-        assert!(create_instance(root_s.clone(), manifest("demo-a1b2", "Demo"))
-            .await
-            .is_err());
+        assert!(
+            create_instance(root_s.clone(), manifest("demo-a1b2", "Demo"))
+                .await
+                .is_err()
+        );
 
         let listed = list_instances(root_s.clone()).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -1285,6 +1427,120 @@ mod tests {
             .unwrap();
         assert!(!dir.exists());
         assert!(list_instances(root_s).await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Serializes a manifest and strips the schema stamp, simulating a file
+    /// written before schema versioning existed.
+    fn legacy_manifest_body(m: &InstanceManifest) -> String {
+        let mut value = serde_json::to_value(m).unwrap();
+        value.as_object_mut().unwrap().remove("schemaVersion");
+        serde_json::to_string_pretty(&value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_manifest_round_trips_and_upgrades_on_first_write() {
+        let root = temp_root("legacy");
+        let root_s = root.to_string_lossy().into_owned();
+        create_instance(root_s.clone(), manifest("legacy-001", "Legacy"))
+            .await
+            .unwrap();
+        let dir = instance_dir(root.as_path(), "legacy-001").unwrap();
+        std::fs::write(
+            manifest_path(&dir),
+            legacy_manifest_body(&manifest("legacy-001", "Legacy")),
+        )
+        .unwrap();
+
+        // A pre-schema manifest still lists, already carrying the migrated
+        // version in memory even though the file has not changed yet.
+        let listed = list_instances(root_s.clone()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].manifest.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert!(
+            !dir.join("instance.json.legacy.bak").exists(),
+            "reading alone must not rewrite anything"
+        );
+
+        // The first write stamps the version and keeps the original around.
+        save_instance(root_s.clone(), manifest("legacy-001", "Renamed"))
+            .await
+            .unwrap();
+        let on_disk: InstanceManifest =
+            serde_json::from_str(&std::fs::read_to_string(manifest_path(&dir)).unwrap()).unwrap();
+        assert_eq!(on_disk.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(on_disk.name, "Renamed");
+        let backup: InstanceManifest = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("instance.json.legacy.bak")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            backup.name, "Legacy",
+            "the pre-upgrade manifest is preserved"
+        );
+
+        // The backup is a one-time artifact: a later write must not refresh it
+        // with already-migrated content.
+        save_instance(root_s, manifest("legacy-001", "Renamed Again"))
+            .await
+            .unwrap();
+        let backup: InstanceManifest = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("instance.json.legacy.bak")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup.name, "Legacy");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn manifest_from_a_newer_phl_is_hidden_refused_and_protected() {
+        let root = temp_root("future");
+        let root_s = root.to_string_lossy().into_owned();
+        create_instance(root_s.clone(), manifest("future-01", "Future"))
+            .await
+            .unwrap();
+        let dir = instance_dir(root.as_path(), "future-01").unwrap();
+        let mut value = serde_json::to_value(manifest("future-01", "Future")).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "schemaVersion".into(),
+            serde_json::json!(MANIFEST_SCHEMA_VERSION + 7),
+        );
+        std::fs::write(
+            manifest_path(&dir),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        // Invisible in the instance list, and — unlike a corrupt manifest —
+        // not offered as reclaimable junk either: a newer PHL can still read it.
+        assert!(list_instances(root_s.clone()).await.unwrap().is_empty());
+        assert!(scan_orphan_instances(root_s.clone())
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Every id-addressed path refuses with the actual reason.
+        let err = save_instance(root_s.clone(), manifest("future-01", "Overwrite"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("过新"), "{err}");
+        let err = export_instance_bundle(
+            root_s.clone(),
+            "future-01".into(),
+            root.join("out.json").to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("过新"), "{err}");
+
+        // And the reclaim door stays shut.
+        let err = delete_orphan_instance(root_s.clone(), "future-01".into())
+            .await
+            .unwrap_err();
+        assert!(err.contains("schema"), "{err}");
+        assert!(dir.exists(), "the instance was never touched");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1308,7 +1564,9 @@ mod tests {
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].name, "bad-0001");
 
-        delete_orphan_instance(root_s, "bad-0001".into()).await.unwrap();
+        delete_orphan_instance(root_s, "bad-0001".into())
+            .await
+            .unwrap();
         assert!(!dir.exists());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1356,9 +1614,16 @@ mod tests {
 
         let listed = list_instances(root_s).await.unwrap();
         let plugins = &listed[0].plugins;
-        assert_eq!(plugins.len(), 2, "staging dirs and unmarked packages skipped");
+        assert_eq!(
+            plugins.len(),
+            2,
+            "staging dirs and unmarked packages skipped"
+        );
 
-        let widget = plugins.iter().find(|p| p.plugin_id == "acme/widget").unwrap();
+        let widget = plugins
+            .iter()
+            .find(|p| p.plugin_id == "acme/widget")
+            .unwrap();
         assert_eq!(widget.version, "1.2.0");
         assert!(widget.enabled);
         // The registry id must survive the round trip: enable/uninstall use it
@@ -1366,7 +1631,10 @@ mod tests {
         assert_eq!(widget.registry_id, "@acme/widget");
 
         let solo = plugins.iter().find(|p| p.plugin_id == "who/solo").unwrap();
-        assert!(!solo.enabled, "cordis.patch.yml is the enabled-state source");
+        assert!(
+            !solo.enabled,
+            "cordis.patch.yml is the enabled-state source"
+        );
         assert_eq!(solo.registry_id, "solo");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1413,7 +1681,11 @@ mod tests {
         std::fs::write(from.join("dsh-home").join("a"), vec![7u8; 512]).unwrap();
         std::fs::write(from.join("logs").join("noisy"), vec![7u8; 4096]).unwrap();
 
-        assert_eq!(dir_size_skipping(&from), 512, "logs excluded from the total");
+        assert_eq!(
+            dir_size_skipping(&from),
+            512,
+            "logs excluded from the total"
+        );
 
         let to = root.join("dst");
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -1424,8 +1696,16 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let flag = AtomicBool::new(false);
             let mut done = 0u64;
-            copy_tree(&src, &dst, &flag, &mut done, 512, &tx, SkipRule::RunStateAtRoot)
-                .map(|()| done)
+            copy_tree(
+                &src,
+                &dst,
+                &flag,
+                &mut done,
+                512,
+                &tx,
+                SkipRule::RunStateAtRoot,
+            )
+            .map(|()| done)
         });
 
         let mut events = 0;
@@ -1435,7 +1715,10 @@ mod tests {
         let done = worker.join().unwrap().unwrap();
 
         assert!(to.join("dsh-home").join("a").exists());
-        assert!(!to.join("logs").exists(), "run state not carried into a clone");
+        assert!(
+            !to.join("logs").exists(),
+            "run state not carried into a clone"
+        );
         assert_eq!(done, 512);
         assert!(events > 0, "progress was reported");
 
@@ -1472,7 +1755,9 @@ mod tests {
         .await
         .unwrap();
 
-        let preview = read_instance_bundle(dest.to_string_lossy().into_owned()).await.unwrap();
+        let preview = read_instance_bundle(dest.to_string_lossy().into_owned())
+            .await
+            .unwrap();
         assert_eq!(preview.name, "Source");
         assert_eq!(preview.plugin_count, 1);
 
@@ -1522,10 +1807,14 @@ mod tests {
     async fn bundle_import_refuses_unknown_format_version() {
         let root = temp_root("bundlever");
         let path = root.join("bad.phl-bundle.json");
-        std::fs::write(&path, r#"{"phlBundle":99,"exportedAt":"","instance":{},"plugins":[]}"#)
-            .unwrap();
-        let err =
-            read_instance_bundle(path.to_string_lossy().into_owned()).await.unwrap_err();
+        std::fs::write(
+            &path,
+            r#"{"phlBundle":99,"exportedAt":"","instance":{},"plugins":[]}"#,
+        )
+        .unwrap();
+        let err = read_instance_bundle(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
         assert!(err.contains("不支持的 Bundle 版本"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1554,15 +1843,9 @@ mod tests {
         let snap = {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<CloneProgress>(16);
             let drainer = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-            let snap = run_snapshot_create(
-                &flag,
-                &processes,
-                root.as_path(),
-                "snap-a1b2",
-                &|p| {
-                    let _ = tx.try_send(p);
-                },
-            )
+            let snap = run_snapshot_create(&flag, &processes, root.as_path(), "snap-a1b2", &|p| {
+                let _ = tx.try_send(p);
+            })
             .await
             .unwrap();
             drop(tx);
@@ -1574,7 +1857,10 @@ mod tests {
         assert_eq!(snap.plugin_count, 1);
         assert!(snap.size > 0, "snapshot size is the measured copy");
         assert!(
-            dir.join("snapshots").join(&snap.id).join("dsh-home").exists(),
+            dir.join("snapshots")
+                .join(&snap.id)
+                .join("dsh-home")
+                .exists(),
             "snapshot tree exists under snapshots/"
         );
         // Listed from the record, newest first.
@@ -1590,7 +1876,11 @@ mod tests {
             .unwrap();
         assert!(pkg.exists(), "restore brings the recorded plugin tree back");
         assert_eq!(restored.plugins.len(), 1);
-        assert_eq!(scan_snapshots(&dir).await.len(), 1, "restore keeps the snapshot");
+        assert_eq!(
+            scan_snapshots(&dir).await.len(),
+            1,
+            "restore keeps the snapshot"
+        );
 
         delete_snapshot_inner(root.as_path(), "snap-a1b2", &snap.id, &processes)
             .await
