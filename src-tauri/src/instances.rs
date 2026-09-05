@@ -95,6 +95,10 @@ pub struct InstalledPluginInfo {
     /// The id used in `cordis.patch.yml`. Handed back so the frontend can
     /// enable or uninstall without consulting the (possibly offline) catalog.
     pub registry_id: String,
+    /// verified | pinned | unverified — from the install record (T-107).
+    /// Markers written before trust existed read back as `unknown`.
+    #[serde(default)]
+    pub trust: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +126,8 @@ struct PluginMarker {
     version: String,
     #[serde(default)]
     registry_id: String,
+    #[serde(default)]
+    trust: String,
 }
 
 /* ------------------------------- paths -------------------------------- */
@@ -1073,6 +1079,11 @@ async fn collect_packages(
             registry_id: marker.registry_id,
             plugin_id,
             version: marker.version,
+            trust: if marker.trust.is_empty() {
+                "unknown".to_string()
+            } else {
+                marker.trust
+            },
         });
     }
 }

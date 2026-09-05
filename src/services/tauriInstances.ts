@@ -1,6 +1,7 @@
 import * as desktop from '@/lib/desktop'
 import { slugify } from '@/lib/format'
 import type { Instance, InstanceDraft, InstanceKind, InstanceTemplate } from '@/types'
+import type { InstalledPlugin } from '@/types/plugin'
 import { Cancelled, newTransferId } from './repository'
 import type { CreateProgress, PhlRepository } from './repository'
 
@@ -52,6 +53,17 @@ function toManifest(instance: Instance): desktop.RemoteInstanceManifest {
 }
 
 /**
+ * The backend only ever writes the four known trust levels, but the wire
+ * type is a string — narrow it here so the rest of the app can trust the
+ * union.
+ */
+function asTrust(value: string | undefined): NonNullable<InstalledPlugin['trust']> {
+  return value === 'verified' || value === 'pinned' || value === 'unverified'
+    ? value
+    : 'unknown'
+}
+
+/**
  * `diskUsage` is filled in separately: walking the tree is far too slow to do
  * while listing, and nothing on the instances page needs it. The storage
  * section asks for it on demand.
@@ -70,7 +82,6 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     dshHome: record.dshHome,
     workspace: record.workspace,
     profile: record.profile,
-    plugins: record.plugins,
     createdAt: record.createdAt,
     lastRunAt: record.lastRunAt ?? undefined,
     totalRuntime: record.totalRuntime,
@@ -78,6 +89,7 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     favorite: record.favorite,
     env: record.env,
     args: record.args,
+    plugins: record.plugins.map((p) => ({ ...p, trust: asTrust(p.trust) })),
     // Read back from `<instance>/snapshots/*/snapshot.json`. This used to be
     // hardcoded to `[]` from when snapshots were not implemented, which meant
     // every reload dropped them from the UI while the (potentially multi-GB)
