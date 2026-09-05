@@ -712,6 +712,29 @@ export async function verifyInstance(instanceId: string): Promise<RemoteVerifyRe
   return invoke<RemoteVerifyResult>('verify_instance', { instanceId })
 }
 
+/* ------------------------------ repair -------------------------------- */
+
+/** Mirrors the Rust `RepairOutcome`. */
+export interface RepairOutcome {
+  applied: string[]
+  /** Recognized but needing a download — routed to the install flows. */
+  requiresUser: string[]
+  rejected: string[]
+}
+
+/**
+ * Executes the local-only repairs (recreate workspace, sweep transaction
+ * leftovers) for an instance; download-needing actions come back in
+ * `requiresUser`. The caller re-runs verify afterwards.
+ */
+export async function repairInstance(
+  instanceId: string,
+  actions: string[],
+): Promise<RepairOutcome> {
+  if (!isDesktop) return { applied: [], requiresUser: [], rejected: actions }
+  return invoke<RepairOutcome>('repair_instance', { instanceId, actions })
+}
+
 /* ------------------------------ snapshots ----------------------------- */
 
 export async function createInstanceSnapshot(
