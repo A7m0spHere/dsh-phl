@@ -69,6 +69,36 @@ pub struct VersionSourceMeta {
 pub struct InstalledVersionInfo {
     pub name: String,
     pub installed_at: String,
+    /// `healthy` | `degraded` — degraded means dependency pruning happened
+    /// during install (`phl-deps.json` records which packages were skipped).
+    #[serde(default = "default_install_health")]
+    pub install_health: String,
+    #[serde(default)]
+    pub skipped_dependencies: Vec<String>,
+}
+
+fn default_install_health() -> String {
+    "healthy".into()
+}
+
+/// Best-effort read of the dependency-install record; an absent or unreadable
+/// file simply means "installed before this field existed, healthy".
+fn read_deps_marker(version_dir: &Path) -> (String, Vec<String>) {
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct DepsMarker {
+        #[serde(default)]
+        install_health: String,
+        #[serde(default)]
+        skipped: Vec<String>,
+    }
+    match std::fs::read_to_string(version_dir.join("phl-deps.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<DepsMarker>(&raw).ok())
+    {
+        Some(m) if !m.install_health.is_empty() => (m.install_health, m.skipped),
+        _ => (default_install_health(), Vec::new()),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,9 +311,12 @@ pub async fn list_installed_versions(
             Some(marker) => marker.installed_at,
             None => continue, // no marker → not a completed install
         };
+        let (install_health, skipped_dependencies) = read_deps_marker(&path);
         out.push(InstalledVersionInfo {
             name: entry.file_name().to_string_lossy().into_owned(),
             installed_at,
+            install_health,
+            skipped_dependencies,
         });
     }
     out.sort_by(|a, b| a.installed_at.cmp(&b.installed_at));
@@ -732,6 +765,51 @@ fn remove_dep_from_manifest(version_dir: &Path, name: &str) -> bool {
     std::fs::write(&path, modified).is_ok()
 }
 
+/// The official npm registry. Mirrors can lag or drop packages; a 404 from a
+/// mirror is retried here once before any prune decision is made.
+pub(crate) const OFFICIAL_NPM_REGISTRY: &str = "https://registry.npmjs.org";
+
+/// The only dependencies a 404 may ever drop from the scratch manifest.
+///
+/// DSH ships a workspace manifest: its experimental sub-packages are declared
+/// as (dev-)dependencies but are not always published, so npm's full-tree
+/// solve 404s on them even though nothing imports them at runtime. Anything
+/// outside this prefix 404ing is a real problem — silently pruning a core
+/// dependency must never be able to look like a successful install.
+pub(crate) const PRUNE_ALLOWLIST: &[&str] = &["@deepseek-ai/dsh-experimental-"];
+
+pub(crate) fn prune_allowed(pkg: &str) -> bool {
+    PRUNE_ALLOWLIST.iter().any(|prefix| pkg.starts_with(prefix))
+}
+
+/// What the retry loop does with a 404 on `pkg`.
+pub(crate) enum NotFoundAction {
+    /// The current registry is a mirror that may simply lag: retry the whole
+    /// solve against the official registry before deciding anything.
+    RetryOfficial,
+    /// Confirmed missing on the official registry, and allowlisted: drop it
+    /// from the scratch manifest and retry. The install is marked degraded.
+    Prune,
+    /// Confirmed missing and not allowlisted: a required dependency is gone,
+    /// and the install must fail rather than ship without it.
+    Fatal,
+}
+
+pub(crate) fn decide_not_found(
+    pkg: &str,
+    fallback_pending: bool,
+    using_official: bool,
+) -> NotFoundAction {
+    if !using_official && fallback_pending {
+        return NotFoundAction::RetryOfficial;
+    }
+    if prune_allowed(pkg) {
+        NotFoundAction::Prune
+    } else {
+        NotFoundAction::Fatal
+    }
+}
+
 /// Pull the package name out of npm's not-found line:
 /// `npm error 404  The requested resource '@scope/name@^1.0.0' could not be found`
 fn parse_404_package(stderr_text: &str) -> Option<String> {
@@ -782,8 +860,12 @@ pub(crate) async fn install_version_deps(
         let _ = std::fs::write(version_dir.join("package.json"), &original_manifest);
     }
     let skipped = outcome?;
+    // The install succeeded, but a pruned dependency means the environment is
+    // a known-degraded derivative of the manifest — recorded where both the
+    // verifier and the UI can find it.
     let marker = serde_json::json!({
         "installedAt": now_iso(),
+        "installHealth": if skipped.is_empty() { "healthy" } else { "degraded" },
         "skipped": skipped,
     });
     let _ = std::fs::write(version_dir.join("phl-deps.json"), marker.to_string());
@@ -802,9 +884,22 @@ async fn install_deps_attempts(
     on_progress: &(dyn Fn(f64) + Send + Sync),
     skipped: &mut Vec<String>,
 ) -> Result<Vec<String>, String> {
+    let mut effective_registry = registry_base.to_string();
+    // A mirror 404 gets exactly one retry against the official registry
+    // before any prune decision — a lagging mirror must not read as "the
+    // package is gone".
+    let mut fallback_pending = registry_base.trim_end_matches('/') != OFFICIAL_NPM_REGISTRY;
+
     for attempt in 0..12_u8 {
-        match run_npm_install(node_program, npm_cli, version_dir, registry_base, flag, on_progress)
-            .await
+        match run_npm_install(
+            node_program,
+            npm_cli,
+            version_dir,
+            &effective_registry,
+            flag,
+            on_progress,
+        )
+        .await
         {
             Ok(()) => return Ok(std::mem::take(skipped)),
             Err(e) if e == "cancelled" => return Err("cancelled".into()),
@@ -826,14 +921,41 @@ async fn install_deps_attempts(
                         format!("npm install 失败: {tail}")
                     });
                 };
-                if !remove_dep_from_manifest(version_dir, &pkg) {
-                    let _ = tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
-                    return Err(format!("依赖 {pkg} 在 registry 上不存在，且无法从清单中移除它"));
-                }
-                skipped.push(pkg);
-                if attempt == 11 {
-                    let _ = tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
-                    return Err("跳过的依赖过多，安装中止".into());
+                let using_official = effective_registry == OFFICIAL_NPM_REGISTRY;
+                match decide_not_found(&pkg, fallback_pending, using_official) {
+                    NotFoundAction::RetryOfficial => {
+                        eprintln!(
+                            "[phl] 依赖 {pkg} 在 {effective_registry} 上 404，改用官方 registry 重试"
+                        );
+                        effective_registry = OFFICIAL_NPM_REGISTRY.to_string();
+                        fallback_pending = false;
+                        continue;
+                    }
+                    NotFoundAction::Prune => {
+                        eprintln!(
+                            "[phl] 依赖 {pkg} 官方 registry 也 404，属于可跳过的实验性依赖，从清单中移除后重试"
+                        );
+                        if !remove_dep_from_manifest(version_dir, &pkg) {
+                            let _ =
+                                tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
+                            return Err(format!("依赖 {pkg} 在 registry 上不存在，且无法从清单中移除它"));
+                        }
+                        skipped.push(pkg);
+                        if attempt == 11 {
+                            let _ =
+                                tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
+                            return Err("跳过的依赖过多，安装中止".into());
+                        }
+                    }
+                    NotFoundAction::Fatal => {
+                        eprintln!(
+                            "[phl] 依赖 {pkg} 官方 registry 也 404，且不属于可跳过的实验性依赖"
+                        );
+                        let _ = tokio::fs::remove_dir_all(version_dir.join("node_modules")).await;
+                        return Err(format!(
+                            "依赖 {pkg} 在 registry 上不存在，且不属于可跳过的实验性依赖，安装中止"
+                        ));
+                    }
                 }
             }
         }
@@ -974,6 +1096,10 @@ fn cancelled_flag(flag: &AtomicBool) -> bool {
 #[serde(rename_all = "camelCase")]
 struct InstallMarker {
     installed_at: String,
+    /// Written since the transactional installer; `default` keeps markers
+    /// from before that era readable.
+    #[serde(default)]
+    version: String,
 }
 
 async fn read_marker(version_dir: &Path) -> Option<InstallMarker> {
@@ -1001,6 +1127,93 @@ pub(crate) fn sanitize_version(name: &str) -> Result<String, String> {
     }
 }
 
+/// The transactional swap both installers share: the fully staged tree
+/// replaces `dest`, the previous tree waits in `backup` until the final
+/// check passes, and any failure puts the previous tree back. `staging` and
+/// `dest` must be on the same drive — both installers stage under the
+/// parent of `dest` to guarantee that.
+///
+/// This is the whole transaction vocabulary in one place: stage, backup,
+/// commit, verify, rollback, cleanup — deliberately not a generic framework.
+pub(crate) async fn promote_staged(
+    staging: &Path,
+    dest: &Path,
+    backup: &Path,
+    final_check: &(dyn Fn(&Path) -> Result<(), String> + Send + Sync),
+) -> Result<(), String> {
+    let had_previous = dest.exists();
+    if had_previous {
+        let _ = tokio::fs::remove_dir_all(backup).await;
+        if let Err(e) = tokio::fs::rename(dest, backup).await {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            return Err(format!("无法备份现有安装，版本未更新: {e}"));
+        }
+    }
+    if let Err(e) = tokio::fs::rename(staging, dest).await {
+        if had_previous {
+            let _ = tokio::fs::rename(backup, dest).await;
+        }
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Err(format!("无法放置新版本: {e}"));
+    }
+    if let Err(e) = final_check(dest) {
+        // The new tree is in place but wrong; the backup is the only copy of
+        // what worked before, so it goes back before anything else happens.
+        let _ = tokio::fs::remove_dir_all(dest).await;
+        if had_previous {
+            let _ = tokio::fs::rename(backup, dest).await;
+        }
+        return Err(format!("最终校验失败，已恢复原版本: {e}"));
+    }
+    // Success: the backup is now redundant space, not a rollback point —
+    // the staging dir is gone (renamed), so nothing references it.
+    let _ = tokio::fs::remove_dir_all(backup).await;
+    Ok(())
+}
+
+/// One transaction-scoped directory name: `<parent>/.phl-txn/<name>.<role>-<token>`.
+/// A failed or cancelled attempt can only ever leave a `.phl-txn` child
+/// behind, never something that reads as an installed version or runtime.
+pub(crate) fn txn_dir(parent: &Path, name: &str, role: &str, token: u128) -> PathBuf {
+    parent.join(".phl-txn").join(format!("{name}.{role}-{token}"))
+}
+
+pub(crate) fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Minimal health check a staged version must pass before it may replace a
+/// good install: manifest present, DSH entrypoint present, dependencies
+/// materialised when the manifest requires them, and the marker naming this
+/// exact version.
+fn check_version_health(dir: &Path, version_name: &str) -> Result<(), String> {
+    if !dir.join("package.json").exists() {
+        return Err("package.json 缺失".into());
+    }
+    if !dir.join("lib").join("bin.js").exists() {
+        return Err("DSH 入口 lib/bin.js 缺失".into());
+    }
+    if package_requires_deps(dir) && !dir.join("node_modules").exists() {
+        return Err("依赖目录 node_modules 缺失".into());
+    }
+    let raw = std::fs::read_to_string(dir.join("phl-install.json"))
+        .map_err(|e| format!("安装标记读取失败: {e}"))?;
+    let marker: InstallMarker =
+        serde_json::from_str(&raw).map_err(|e| format!("安装标记解析失败: {e}"))?;
+    if marker.version != version_name {
+        let found = if marker.version.is_empty() {
+            "<空>".to_string()
+        } else {
+            marker.version
+        };
+        return Err(format!("安装标记版本 {found} 与目标 {version_name} 不一致"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_install(
     flag: &Arc<AtomicBool>,
@@ -1023,12 +1236,18 @@ async fn run_install(
     let dest = versions_dir.join(&version_name);
     let archive_path = cache_dir.join(format!("dsh-{version_name}.tgz"));
     let part_path = cache_dir.join(format!("dsh-{version_name}.tgz.part"));
+    let token = now_millis();
+    let staging = txn_dir(&versions_dir, &version_name, "staging", token);
+    let backup = txn_dir(&versions_dir, &version_name, "backup", token);
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(staging.parent().expect("txn parent"))
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // If a previous failed run left a half-extracted directory, start clean.
-    if dest.exists() {
-        tokio::fs::remove_dir_all(&dest).await.map_err(|e| e.to_string())?;
-    }
+    // The existing install is never touched until a verified replacement is
+    // fully staged: a download, integrity, extraction or dependency failure
+    // must leave the old version exactly where it was.
+    let _ = tokio::fs::remove_dir_all(&staging).await;
 
     let downloaded = download(flag, tarball_url, &part_path, total_hint, &|progress, bytes_done, bytes_per_sec| {
         let _ = on_progress.send(ProgressEvent::Downloading { progress, bytes_done, bytes_per_sec });
@@ -1038,38 +1257,34 @@ async fn run_install(
     on_progress
         .send(ProgressEvent::Verifying)
         .map_err(|e| e.to_string())?;
-    verify_integrity(&downloaded.sha512, integrity)?;
+    if let Err(e) = verify_integrity(&downloaded.sha512, integrity) {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(e);
+    }
 
     on_progress
         .send(ProgressEvent::Extracting { progress: 0.0 })
         .map_err(|e| e.to_string())?;
-    extract(&part_path, &dest, &|progress| {
+    if let Err(e) = extract(&part_path, &staging, &|progress| {
         let _ = on_progress.send(ProgressEvent::Extracting { progress });
     }, flag)
-    .await?;
-
-    let installed_at = now_iso();
-    let marker = serde_json::json!({
-        "installedAt": installed_at,
-        "tarball": tarball_url,
-        "integrity": integrity.unwrap_or(""),
-        "bytes": downloaded.bytes,
-    });
-    tokio::fs::write(dest.join("phl-install.json"), marker.to_string())
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(e);
+    }
 
     // The tarball is only the package itself — pull its declared deps into
-    // the version's own node_modules now, while the user is watching an
+    // the staging tree's own node_modules now, while the user is watching an
     // install. A version that boots into a surprise 30-second npm run would
     // be the worse failure mode.
-    if package_requires_deps(&dest) {
+    if package_requires_deps(&staging) {
         on_progress
             .send(ProgressEvent::Verifying)
             .map_err(|e| e.to_string())?;
         let node = pick_npm_capable_node(root).unwrap_or_else(|| PathBuf::from("node"));
-        if let Err(e) = install_version_deps(&node, &dest, registry_base, flag, |_| {}).await {
-            let _ = tokio::fs::remove_dir_all(&dest).await;
+        if let Err(e) = install_version_deps(&node, &staging, registry_base, flag, |_| {}).await {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
             return Err(if e == "cancelled" {
                 e
             } else {
@@ -1077,6 +1292,33 @@ async fn run_install(
             });
         }
     }
+
+    // The marker is written last into staging: its presence is what makes a
+    // directory read as a completed install anywhere on disk.
+    let marker = serde_json::json!({
+        "installedAt": now_iso(),
+        "version": version_name,
+        "tarball": tarball_url,
+        "integrity": integrity.unwrap_or(""),
+        "bytes": downloaded.bytes,
+    });
+    if let Err(e) = tokio::fs::write(staging.join("phl-install.json"), marker.to_string()).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(e.to_string());
+    }
+
+    on_progress
+        .send(ProgressEvent::Verifying)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = check_version_health(&staging, &version_name) {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(format!("安装校验未通过，版本未安装: {e}"));
+    }
+
+    promote_staged(&staging, &dest, &backup, &|installed: &Path| {
+        check_version_health(installed, &version_name)
+    })
+    .await?;
 
     if keep_archive {
         tokio::fs::rename(&part_path, &archive_path).await.map_err(|e| e.to_string())?;
@@ -1532,6 +1774,145 @@ mod tests {
         assert!(safe_join(&dest, Path::new("../evil")).is_err());
         assert!(safe_join(&dest, Path::new("a/../../../evil")).is_err());
         assert!(safe_join(&dest, Path::new("/etc/passwd")).is_err());
+    }
+
+    #[tokio::test]
+    async fn promote_replaces_the_old_install_and_cleans_the_backup() {
+        let root = std::env::temp_dir().join(format!("phl-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = root.join("versions");
+        let dest = versions.join("0.1.0");
+        std::fs::create_dir_all(dest.join("lib")).unwrap();
+        std::fs::write(dest.join("lib").join("bin.js"), "// old").unwrap();
+
+        let token = now_millis();
+        let staging = txn_dir(&versions, "0.1.0", "staging", token);
+        let backup = txn_dir(&versions, "0.1.0", "backup", token);
+        std::fs::create_dir_all(staging.join("lib")).unwrap();
+        std::fs::write(staging.join("lib").join("bin.js"), "// new").unwrap();
+
+        promote_staged(&staging, &dest, &backup, &|_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("lib").join("bin.js")).unwrap(),
+            "// new"
+        );
+        assert!(!backup.exists(), "backup removed after a verified swap");
+        assert!(!staging.exists(), "staging consumed by the rename");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn promote_rolls_the_previous_install_back_when_the_final_check_fails() {
+        let root = std::env::temp_dir().join(format!("phl-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = root.join("versions");
+        let dest = versions.join("0.1.0");
+        std::fs::create_dir_all(dest.join("lib")).unwrap();
+        std::fs::write(dest.join("lib").join("bin.js"), "// old").unwrap();
+
+        let token = now_millis();
+        let staging = txn_dir(&versions, "0.1.0", "staging", token);
+        let backup = txn_dir(&versions, "0.1.0", "backup", token);
+        std::fs::create_dir_all(staging.join("lib")).unwrap();
+        std::fs::write(staging.join("lib").join("bin.js"), "// broken").unwrap();
+
+        let err = promote_staged(&staging, &dest, &backup, &|_| Err("坏树".into()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("已恢复原版本"), "{err}");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("lib").join("bin.js")).unwrap(),
+            "// old",
+            "the previous install is back"
+        );
+        assert!(!staging.exists(), "the broken staging tree did not survive");
+        assert!(!backup.exists(), "the backup was consumed by the rollback");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn version_health_gates_incomplete_trees() {
+        let dir = std::env::temp_dir().join(format!("phl-health-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"dsh"}"#).unwrap();
+
+        // No marker at all → rejected before anything can read it as installed.
+        assert!(check_version_health(&dir, "0.1.0").is_err());
+
+        let marker = |v: &str| {
+            std::fs::write(
+                dir.join("phl-install.json"),
+                serde_json::json!({ "installedAt": now_iso(), "version": v }).to_string(),
+            )
+            .unwrap();
+        };
+
+        // Marker naming a different version → rejected.
+        marker("0.2.0");
+        assert!(check_version_health(&dir, "0.1.0").is_err());
+
+        // Matching marker but no entrypoint → rejected.
+        marker("0.1.0");
+        assert!(check_version_health(&dir, "0.1.0").is_err());
+
+        // Complete tree passes.
+        std::fs::write(dir.join("lib").join("bin.js"), "// bin").unwrap();
+        check_version_health(&dir, "0.1.0").unwrap();
+
+        // A manifest that requires deps without node_modules → rejected.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"dsh","dependencies":{"commander":"^15.0.0"}}"#,
+        )
+        .unwrap();
+        assert!(check_version_health(&dir, "0.1.0").is_err());
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        check_version_health(&dir, "0.1.0").unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_denied_for_packages_outside_the_allowlist() {
+        // Allowlisted experimental workspace package: prunable.
+        assert!(prune_allowed("@deepseek-ai/dsh-experimental-agent-team"));
+        assert!(prune_allowed("@deepseek-ai/dsh-experimental-"));
+        // Everything else — core runtime deps especially — must never prune.
+        assert!(!prune_allowed("commander"));
+        assert!(!prune_allowed("@deepseek-ai/dsh"));
+        assert!(!prune_allowed("@deepseek-ai/dsh-app-boot"));
+        // A lookalike that skips the required suffix is still core.
+        assert!(!prune_allowed("@deepseek-ai/dsh-experimentaloffice"));
+    }
+
+    #[test]
+    fn mirror_404s_fall_back_to_official_before_any_prune_decision() {
+        use NotFoundAction::*;
+        let exp = "@deepseek-ai/dsh-experimental-agent-team";
+        let core = "commander";
+
+        // Mirror 404 → retry official first, whatever the package is.
+        assert!(matches!(
+            decide_not_found(exp, true, false),
+            RetryOfficial
+        ));
+        assert!(matches!(decide_not_found(core, true, false), RetryOfficial));
+
+        // Official 404 → the allowlist decides.
+        assert!(matches!(decide_not_found(exp, false, true), Prune));
+        assert!(matches!(decide_not_found(core, false, true), Fatal));
+
+        // Already on the official registry: a pending fallback flag must not
+        // loop forever — the allowlist decides immediately.
+        assert!(matches!(decide_not_found(exp, true, true), Prune));
+        assert!(matches!(decide_not_found(core, true, true), Fatal));
     }
 
     #[test]

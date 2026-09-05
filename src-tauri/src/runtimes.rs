@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::launch::node_binary;
 use crate::paths::{ensure_under_root, PhlState};
+use crate::versions::now_millis;
 use crate::versions::{
     cancelled, download, extract, http_client, now_iso, parse_semver, safe_join, sanitize_version,
     strip_first, Downloaded, ProgressEvent, Transfers,
@@ -241,15 +243,20 @@ async fn run_runtime_install(
     let runtimes_dir = root.join("runtimes");
     let cache_dir = root.join("cache");
     let dest = runtimes_dir.join(&version_name);
-    let staging = runtimes_dir.join(format!(".phl-new-{version_name}"));
+    // Transaction-scoped staging/backup names, same vocabulary as the
+    // version installer: a failed attempt can only leave a `.phl-txn`
+    // child behind, never something that reads as an installed runtime.
+    let token = now_millis();
+    let staging = crate::versions::txn_dir(&runtimes_dir, &version_name, "staging", token);
+    let backup = crate::versions::txn_dir(&runtimes_dir, &version_name, "backup", token);
     let part_path = cache_dir.join(format!("{filename}.part"));
     tokio::fs::create_dir_all(&runtimes_dir).await.map_err(|e| e.to_string())?;
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| e.to_string())?;
 
     // Everything below lands in the staging dir; the installed tree for this
     // major is only touched once a complete replacement exists. Deleting the
-    // old tree up front (as the version installer does) would leave instances
-    // pointing at a runtime that a failed download just destroyed.
+    // old tree up front would leave instances pointing at a runtime that a
+    // failed download just destroyed.
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
     let downloaded: Downloaded = download(flag, &url, &part_path, None, &|progress, bytes_done, bytes_per_sec| {
@@ -291,6 +298,14 @@ async fn run_runtime_install(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Health gate before the swap: the extracted tree must carry a runnable
+    // node that reports exactly the requested version. A runtime that cannot
+    // start its own binary must never replace a working one.
+    if let Err(e) = check_runtime_health(&staging, &version).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(format!("Runtime 校验未通过，安装中止: {e}"));
+    }
+
     if keep_archive {
         tokio::fs::rename(&part_path, cache_dir.join(&filename))
             .await
@@ -299,21 +314,72 @@ async fn run_runtime_install(
         let _ = tokio::fs::remove_file(&part_path).await;
     }
 
-    // Swap in. Windows cannot rename over an existing directory, so the old
-    // tree steps aside first; if the final rename still fails, it steps back.
-    let backup = runtimes_dir.join(format!(".phl-old-{version_name}"));
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-    let had_old = dest.exists();
-    if had_old {
-        tokio::fs::rename(&dest, &backup).await.map_err(|e| e.to_string())?;
+    // Swap in through the shared promote path: backup, rename, final verify
+    // (marker version must match), rollback of the old tree on any failure.
+    crate::versions::promote_staged(
+        &staging,
+        &dest,
+        &backup,
+        &|installed: &Path| {
+            let marker = std::fs::read_to_string(installed.join("phl-runtime.json"))
+                .map_err(|e| format!("Runtime 标记读取失败: {e}"))?;
+            let parsed: RuntimeMarker = serde_json::from_str(&marker)
+                .map_err(|e| format!("Runtime 标记解析失败: {e}"))?;
+            if parsed.version != version {
+                return Err(format!(
+                    "Runtime 标记版本 {} 与目标 {version} 不一致",
+                    parsed.version
+                ));
+            }
+            // The zip layout puts node.exe at the top level, the tar layout
+            // in bin/ — same distinction `runtime_bin_dir` encodes.
+            let bin = if cfg!(windows) {
+                installed.to_path_buf()
+            } else {
+                installed.join("bin")
+            };
+            if !bin.join(node_binary()).exists() {
+                return Err("node 可执行文件缺失".into());
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A staged runtime must contain its node binary, and that binary must run
+/// and report the requested version. Spawned on a blocking thread — this is
+/// a process launch, not a syscall.
+async fn check_runtime_health(staging: &Path, version: &str) -> Result<(), String> {
+    let node = staging.join(node_binary());
+    if !node.exists() {
+        return Err("node 可执行文件缺失".into());
     }
-    if let Err(e) = tokio::fs::rename(&staging, &dest).await {
-        if had_old {
-            let _ = tokio::fs::rename(&backup, &dest).await;
+    let reported = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(&node);
+        command.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
         }
-        return Err(format!("无法放置 Runtime 目录: {e}"));
+        command
+            .output()
+            .map_err(|e| format!("无法运行 node --version: {e}"))
+    })
+    .await
+    .map_err(|e| format!("校验线程异常退出: {e}"))??;
+    if !reported.status.success() {
+        return Err(format!(
+            "node --version 退出码 {}",
+            reported.status.code().unwrap_or(-1)
+        ));
     }
-    let _ = tokio::fs::remove_dir_all(&backup).await;
+    let stdout = String::from_utf8_lossy(&reported.stdout).trim().to_string();
+    if stdout != format!("v{version}") {
+        return Err(format!("node --version 返回 {stdout}，期望 v{version}"));
+    }
     Ok(())
 }
 

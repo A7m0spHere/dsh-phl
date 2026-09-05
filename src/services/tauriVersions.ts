@@ -41,23 +41,32 @@ async function listVersions(): Promise<DshVersion[]> {
     }),
   ])
 
-  const installedAt = new Map(installed.map((i) => [i.name, i.installedAt]))
+  const installedInfo = new Map(installed.map((i) => [i.name, i]))
   const versions: DshVersion[] = []
 
   for (const meta of remote ?? []) {
     versions.push({
       ...meta,
       channel: meta.channel as DshVersion['channel'],
-      state: installedAt.has(meta.name)
-        ? { kind: 'installed', installedAt: installedAt.get(meta.name)! }
-        : { kind: 'available' },
+      state: (() => {
+        const info = installedInfo.get(meta.name)
+        return info
+          ? {
+              kind: 'installed' as const,
+              installedAt: info.installedAt,
+              installHealth:
+                info.installHealth === 'degraded' ? ('degraded' as const) : ('healthy' as const),
+              skippedDependencies: info.skippedDependencies,
+            }
+          : ({ kind: 'available' as const } as const)
+      })(),
     })
-    installedAt.delete(meta.name)
+    installedInfo.delete(meta.name)
   }
 
   // Locally installed but no longer in the remote catalog (or the catalog
   // request failed entirely) — still a first-class installed version.
-  for (const [name, at] of installedAt) {
+  for (const [name, info] of installedInfo) {
     versions.push({
       id: `dsh-${name}`,
       name,
@@ -66,7 +75,12 @@ async function listVersions(): Promise<DshVersion[]> {
       size: 0,
       requiresNode: [], // no catalog entry to read `engines.node` from
       notes: [],
-      state: { kind: 'installed', installedAt: at },
+      state: {
+        kind: 'installed',
+        installedAt: info.installedAt,
+        installHealth: info.installHealth === 'degraded' ? 'degraded' : 'healthy',
+        skippedDependencies: info.skippedDependencies,
+      },
     })
   }
   return versions

@@ -226,6 +226,9 @@ interface DshVersionShape {
 export interface InstalledVersionInfo {
   name: string
   installedAt: string
+  /** `healthy` | `degraded` (dependency pruning happened at install). */
+  installHealth?: string
+  skippedDependencies?: string[]
 }
 
 /** PHL's own data root (`%LOCALAPPDATA%\PHL` by default). */
