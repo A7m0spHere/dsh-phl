@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::paths::{ensure_under_root, PhlState};
 use crate::versions::{
     cancelled, download, extract, http_client, now_iso, parse_semver, safe_join, sanitize_version,
     strip_first, Downloaded, ProgressEvent, Transfers,
@@ -78,8 +79,10 @@ pub async fn list_node_runtimes(dist_base: String) -> Result<Vec<NodeRuntimeMeta
 }
 
 #[tauri::command]
-pub async fn list_installed_runtimes(root: String) -> Result<Vec<InstalledRuntimeInfo>, String> {
-    let dir = Path::new(&root).join("runtimes");
+pub async fn list_installed_runtimes(
+    phl: State<'_, PhlState>,
+) -> Result<Vec<InstalledRuntimeInfo>, String> {
+    let dir = phl.root().join("runtimes");
     let mut out = Vec::new();
     // First launch: nothing installed yet.
     let mut entries = match tokio::fs::read_dir(&dir).await {
@@ -139,11 +142,11 @@ pub async fn system_node_version() -> Option<String> {
 #[tauri::command]
 pub async fn download_node_runtime(
     transfers: State<'_, Transfers>,
+    phl: State<'_, PhlState>,
     transfer_id: String,
     dist_base: String,
     version_name: String,
     version: String,
-    root: String,
     keep_archive: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<(), String> {
@@ -153,7 +156,7 @@ pub async fn download_node_runtime(
         &dist_base,
         &version_name,
         &version,
-        Path::new(&root),
+        &phl.root(),
         keep_archive,
         &on_progress,
     )
@@ -163,9 +166,14 @@ pub async fn download_node_runtime(
 }
 
 #[tauri::command]
-pub async fn remove_runtime_dir(root: String, runtime_name: String) -> Result<(), String> {
+pub async fn remove_runtime_dir(
+    phl: State<'_, PhlState>,
+    runtime_name: String,
+) -> Result<(), String> {
     let safe = sanitize_version(&runtime_name)?;
-    let dir = Path::new(&root).join("runtimes").join(safe);
+    let root = phl.root();
+    let dir = root.join("runtimes").join(&safe);
+    ensure_under_root(&root.join("runtimes"), &dir)?;
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
     }
@@ -175,8 +183,10 @@ pub async fn remove_runtime_dir(root: String, runtime_name: String) -> Result<()
 /// Bytes on disk per installed runtime, for the Runtimes overview. The dist
 /// index does not publish sizes, so this is the only honest number there is.
 #[tauri::command]
-pub async fn runtimes_disk_usage(root: String) -> Result<HashMap<String, u64>, String> {
-    let dir = Path::new(&root).join("runtimes");
+pub async fn runtimes_disk_usage(
+    phl: State<'_, PhlState>,
+) -> Result<HashMap<String, u64>, String> {
+    let dir = phl.root().join("runtimes");
     let mut out = HashMap::new();
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,

@@ -944,6 +944,15 @@ pub(crate) async fn load_manifest(dir: &Path, id: &str) -> Result<InstanceManife
     }
 }
 
+/// Resolves an instance's active profile directory — the one owning
+/// `node_modules` and `cordis.patch.yml` — from the instance id. Plugin
+/// commands key on this id so the WebView never supplies a filesystem path.
+pub(crate) async fn profile_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
+    let dir = instance_dir(root, id)?;
+    let manifest = load_manifest(&dir, id).await?;
+    Ok(profile_root(&dir, &manifest.profile))
+}
+
 /// Persist just the API binding on an existing manifest — the sync path must
 /// update `syncedAt`/`syncedHash` without a full manifest round-trip from the
 /// frontend (which could race a concurrent rename on the instance).

@@ -21,13 +21,6 @@ function catalogBase(): string {
   return 'https://awesome-dsh-plugin.com'
 }
 
-/** Catalog cache lives next to the version tarball cache. */
-function cacheDir(): string {
-  const { root } = useSettingsStore.getState()
-  const sep = root.includes('\\') ? '\\' : '/'
-  return `${root}${sep}cache`
-}
-
 /** Mirrors the version module's npm registry resolution. */
 function npmRegistryBase(): string {
   const { source, customSource } = useSettingsStore.getState()
@@ -37,9 +30,8 @@ function npmRegistryBase(): string {
 }
 
 /**
- * The directory that owns `node_modules` and `cordis.patch.yml` for an
- * instance — mirrors DSH's own `~/.dsh/profiles/<profile>` layout, but kept
- * inside the instance's DSH home so instances stay fully isolated.
+ * The profile directory name for an instance — informational only since the
+ * plugin commands key on the instance id and Rust resolves the directory.
  */
 export function pluginProfileRoot(instance: Instance): string {
   const sep = instance.dshHome.includes('\\') ? '\\' : '/'
@@ -63,7 +55,7 @@ function fallbackRegistryId(installed: InstalledPlugin): string {
 
 async function listPlugins(): Promise<PluginCatalog> {
   try {
-    const remote = await desktop.listDshPlugins(catalogBase(), cacheDir())
+    const remote = await desktop.listDshPlugins(catalogBase())
     return { plugins: remote.map((meta) => ({ ...meta, category: meta.category as Plugin['category'] })) }
   } catch (err) {
     // The Rust side already tried every mirror plus its on-disk cache. The
@@ -95,7 +87,7 @@ async function installPlugin(
       pluginId: plugin.id,
       source: plugin.source,
       registryBase: npmRegistryBase(),
-      instanceRoot: pluginProfileRoot(instance),
+      instanceId: instance.id,
       onProgress,
     })
     return { version: outcome.version, registryId: outcome.registryId }
@@ -121,13 +113,9 @@ export const tauriPluginOverrides: Pick<
   installPlugin,
   latestPluginVersion,
   setPluginEnabled: async (instance, installed, enabled) => {
-    await desktop.setPluginEnabled(
-      pluginProfileRoot(instance),
-      fallbackRegistryId(installed),
-      enabled,
-    )
+    await desktop.setPluginEnabled(instance.id, fallbackRegistryId(installed), enabled)
   },
   uninstallPlugin: async (instance, installed) => {
-    await desktop.uninstallPlugin(pluginProfileRoot(instance), fallbackRegistryId(installed))
+    await desktop.uninstallPlugin(instance.id, fallbackRegistryId(installed))
   },
 }

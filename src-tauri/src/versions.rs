@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256, Sha512};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::paths::{ensure_under_root, PhlState};
+
 const DSH_PACKAGE: &str = "@deepseek-ai%2Fdsh";
 const DSH_PACKAGE_RAW: &str = "@deepseek-ai/dsh";
 const GITHUB_RELEASES: &str =
@@ -225,11 +227,11 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
 #[allow(clippy::too_many_arguments)]
 pub async fn download_dsh_version(
     transfers: State<'_, Transfers>,
+    phl: State<'_, PhlState>,
     transfer_id: String,
     tarball_url: String,
     integrity: Option<String>,
     version_name: String,
-    root: String,
     registry_base: String,
     keep_archive: bool,
     total_bytes: Option<u64>,
@@ -241,7 +243,7 @@ pub async fn download_dsh_version(
         &tarball_url,
         integrity.as_deref(),
         &version_name,
-        Path::new(&root),
+        &phl.root(),
         &registry_base,
         keep_archive,
         total_bytes,
@@ -258,8 +260,10 @@ pub fn cancel_transfer(transfers: State<'_, Transfers>, transfer_id: String) {
 }
 
 #[tauri::command]
-pub async fn list_installed_versions(root: String) -> Result<Vec<InstalledVersionInfo>, String> {
-    let dir = Path::new(&root).join("versions");
+pub async fn list_installed_versions(
+    phl: State<'_, PhlState>,
+) -> Result<Vec<InstalledVersionInfo>, String> {
+    let dir = phl.root().join("versions");
     let mut out = Vec::new();
     // A missing directory just means nothing has been installed yet — the
     // very first launch always lands here.
@@ -287,9 +291,16 @@ pub async fn list_installed_versions(root: String) -> Result<Vec<InstalledVersio
 }
 
 #[tauri::command]
-pub async fn remove_version_dir(root: String, version_name: String) -> Result<(), String> {
+pub async fn remove_version_dir(
+    phl: State<'_, PhlState>,
+    version_name: String,
+) -> Result<(), String> {
     let safe = sanitize_version(&version_name)?;
-    let dir = Path::new(&root).join("versions").join(safe);
+    let root = phl.root();
+    let dir = root.join("versions").join(&safe);
+    // Canonical containment: a junction planted at the version path must not
+    // redirect `remove_dir_all` outside the data root.
+    ensure_under_root(&root.join("versions"), &dir)?;
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir).await.map_err(|e| e.to_string())?;
     }

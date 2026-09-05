@@ -106,7 +106,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
     const root = useSettingsStore.getState().root
     set({ config: null, snapshots: {}, loaded: false })
     if (desktop.isDesktop) {
-      const config = await desktop.loadApiConfig(root)
+      const config = await desktop.loadApiConfig()
       if (root === useSettingsStore.getState().root) set({ config, loaded: true })
       return
     }
@@ -118,11 +118,10 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({ kind: 'info', title: '请等待当前 API 配置保存完成后重试' })
       return null
     }
-    const root = useSettingsStore.getState().root
     set({ saving: true })
     try {
       if (desktop.isDesktop) {
-        const saved = await desktop.saveApiConfig(root, next)
+        const saved = await desktop.saveApiConfig(next)
         set({ config: saved })
         return saved
       }
@@ -221,10 +220,9 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
     if (syncing) return null
     set({ syncing: instanceId })
     try {
-      const root = useSettingsStore.getState().root
       let applied: ApiBinding
       if (desktop.isDesktop) {
-        applied = await desktop.syncInstanceApi(root, instanceId, binding, config)
+        applied = await desktop.syncInstanceApi(instanceId, binding, config)
       } else {
         applied = { ...binding, syncedAt: new Date().toISOString(), syncedHash: 'browser' }
       }
@@ -248,8 +246,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
   async importFromInstance(instanceId) {
     if (!desktop.isDesktop) return null
     try {
-      const root = useSettingsStore.getState().root
-      const imported = await desktop.importInstanceApi(root, instanceId)
+      const imported = await desktop.importInstanceApi(instanceId)
       if (!imported) return null
       // Persist right away: an imported-but-unsaved seed would vanish on the
       // next launch while the UI already behaved as if the library existed.
@@ -269,11 +266,10 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
     if (!desktop.isDesktop) return
     const { config } = get()
     if (!config) return
-    const root = useSettingsStore.getState().root
     const entries = await Promise.all(
       Object.entries(bindings).map(async ([id, binding]) => {
         try {
-          return [id, await desktop.instanceLiveSnapshot(root, id, binding, config)] as const
+          return [id, await desktop.instanceLiveSnapshot(id, binding, config)] as const
         } catch {
           return [id, undefined] as const
         }

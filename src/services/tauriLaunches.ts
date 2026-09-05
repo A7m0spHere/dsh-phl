@@ -1,5 +1,4 @@
 import * as desktop from '@/lib/desktop'
-import { useSettingsStore } from '@/stores/settingsStore'
 import { registryBase } from './tauriVersions'
 import type { Instance, LaunchPhase } from '@/types'
 import { Cancelled, LaunchError, newTransferId } from './repository'
@@ -20,10 +19,6 @@ import type { LaunchContext, LaunchProgress, LaunchOutcome, PhlRepository } from
  * one and the same.
  */
 export const WEB_PROFILE = 'web'
-
-function phlRoot(): string {
-  return useSettingsStore.getState().root
-}
 
 async function launch(
   instance: Instance,
@@ -85,7 +80,6 @@ async function launch(
     onProgress({ phase: 'resolve-runtime', progress: 0.08 })
     const outcome = await desktop.launchInstance({
       transferId,
-      root: phlRoot(),
       instanceId: instance.id,
       versionName: instance.versionId.replace(/^dsh-/, ''),
       runtimeName: instance.runtimeId,

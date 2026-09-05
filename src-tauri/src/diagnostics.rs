@@ -9,7 +9,10 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use tauri::State;
+
 use crate::instances::{self};
+use crate::paths::PhlState;
 use crate::versions::now_iso;
 
 #[derive(Debug, Serialize)]
@@ -35,8 +38,12 @@ pub struct DiagnosticReport {
 }
 
 #[tauri::command]
-pub async fn run_diagnostics(root: String) -> Result<DiagnosticReport, String> {
-    let root_path = Path::new(&root);
+pub async fn run_diagnostics(phl: State<'_, PhlState>) -> Result<DiagnosticReport, String> {
+    run_diagnostics_inner(&phl.root()).await
+}
+
+/// The plain report, callable from tests with a temp root.
+async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, String> {
     let mut items = Vec::new();
 
     // 1. 数据目录存在且可写 — 没有这一条，其它一切都会以诡异的方式失败。
@@ -85,7 +92,7 @@ pub async fn run_diagnostics(root: String) -> Result<DiagnosticReport, String> {
     });
 
     Ok(DiagnosticReport {
-        root,
+        root: root_path.to_string_lossy().into_owned(),
         items,
         cache_bytes,
         cache_files,
@@ -97,9 +104,13 @@ pub async fn run_diagnostics(root: String) -> Result<DiagnosticReport, String> {
 /// archives the user chose to keep. Both are safe to delete; they only ever
 /// speed up a reinstall. Returns the bytes freed.
 #[tauri::command]
-pub async fn clear_download_cache(root: String) -> Result<u64, String> {
-    let cache = Path::new(&root).join("cache");
-    let (bytes, _) = cache_summary(Path::new(&root)).await;
+pub async fn clear_download_cache(phl: State<'_, PhlState>) -> Result<u64, String> {
+    clear_download_cache_inner(&phl.root()).await
+}
+
+async fn clear_download_cache_inner(root: &Path) -> Result<u64, String> {
+    let cache = root.join("cache");
+    let (bytes, _) = cache_summary(root).await;
     if cache.exists() {
         tokio::fs::remove_dir_all(&cache)
             .await
@@ -346,9 +357,7 @@ mod tests {
         std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         std::fs::write(&node, "bin").unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let report = run_diagnostics_inner(&root).await.unwrap();
         assert_eq!(item(&report, "root-writable").level, "ok");
         assert_eq!(item(&report, "versions").level, "ok");
         assert_eq!(item(&report, "runtimes").level, "ok");
@@ -366,9 +375,7 @@ mod tests {
         std::fs::create_dir_all(&version).unwrap();
         std::fs::write(version.join("phl-install.json"), "{}").unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let report = run_diagnostics_inner(&root).await.unwrap();
         assert_eq!(item(&report, "versions").level, "warn");
         assert!(item(&report, "versions").detail.contains("lib/bin.js"));
 
@@ -380,9 +387,7 @@ mod tests {
             "profile":"web","createdAt":"2026-01-01T00:00:00Z"}"#;
         std::fs::write(instances.join("instance.json"), manifest.replace('\n', "")).unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let report = run_diagnostics_inner(&root).await.unwrap();
         assert_eq!(item(&report, "instance-refs").level, "warn");
         assert!(item(&report, "instance-refs").detail.contains("Demo"));
 
@@ -397,16 +402,12 @@ mod tests {
         std::fs::write(cache.join("dsh-0.1.0.tgz.part"), vec![0u8; 128]).unwrap();
         std::fs::write(cache.join("dsh-0.1.0.tgz"), vec![0u8; 256]).unwrap();
 
-        let report = run_diagnostics(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let report = run_diagnostics_inner(&root).await.unwrap();
         assert_eq!(report.cache_files, 2);
         assert_eq!(report.cache_bytes, 384);
         assert_eq!(item(&report, "cache").level, "warn");
 
-        let freed = clear_download_cache(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let freed = clear_download_cache_inner(&root).await.unwrap();
         assert_eq!(freed, 384);
         assert!(!cache.exists(), "cache dir removed wholesale");
 

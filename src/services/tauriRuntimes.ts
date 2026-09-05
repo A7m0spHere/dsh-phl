@@ -12,10 +12,6 @@ import type { PhlRepository, TransferProgress } from './repository'
  * 「系统 Node」 entry is whatever `node --version` finds on PATH.
  */
 
-function phlRoot(): string {
-  return useSettingsStore.getState().root
-}
-
 /** npm 镜像选择同样适用于 Node 的二进制分发；自定义 npm 源对 dist 无意义。 */
 function distBase(): string {
   const { source } = useSettingsStore.getState()
@@ -28,11 +24,11 @@ async function listRuntimes(): Promise<Runtime[]> {
       console.warn('[phl] runtime catalog unavailable:', err)
       return null
     }),
-    desktop.listInstalledRuntimes(phlRoot()).catch((err) => {
+    desktop.listInstalledRuntimes().catch((err) => {
       console.warn('[phl] installed-runtime scan unavailable:', err)
       return []
     }),
-    desktop.runtimesDiskUsage(phlRoot()).catch(() => ({} as Record<string, number>)),
+    desktop.runtimesDiskUsage().catch(() => ({} as Record<string, number>)),
     desktop.systemNodeVersion().catch(() => null),
   ])
 
@@ -111,7 +107,6 @@ async function installRuntime(
       distBase: distBase(),
       versionName: runtime.id,
       version: runtime.version,
-      root: phlRoot(),
       keepArchive: useSettingsStore.getState().keepArchives,
       onProgress,
     })
@@ -131,6 +126,6 @@ export const tauriRuntimeOverrides: Pick<
   listRuntimes,
   installRuntime,
   removeRuntime: async (id) => {
-    await desktop.removeRuntimeDir(phlRoot(), id)
+    await desktop.removeRuntimeDir(id)
   },
 }

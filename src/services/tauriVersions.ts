@@ -26,10 +26,6 @@ export function registryBase(): string {
   return 'https://registry.npmjs.org'
 }
 
-function phlRoot(): string {
-  return useSettingsStore.getState().root
-}
-
 /** Version ids are `dsh-<name>`; the install directory uses the bare name. */
 const versionName = (id: string) => id.replace(/^dsh-/, '')
 
@@ -39,7 +35,7 @@ async function listVersions(): Promise<DshVersion[]> {
       console.warn('[phl] version catalog unavailable:', err)
       return null
     }),
-    desktopVersions.listInstalledVersions(phlRoot()).catch((err) => {
+    desktopVersions.listInstalledVersions().catch((err) => {
       console.warn('[phl] installed-version scan unavailable:', err)
       return []
     }),
@@ -97,7 +93,6 @@ async function installVersion(
       tarballUrl: version.source.tarball,
       integrity: version.source.integrity,
       versionName: version.name,
-      root: phlRoot(),
       // Rust installs the package's own dependencies after extraction —
       // against the same registry the catalog is read from.
       registryBase: registryBase(),
@@ -149,6 +144,6 @@ export const tauriRepository: PhlRepository = {
   listVersions,
   installVersion,
   removeVersion: async (id) => {
-    await desktopVersions.removeVersionDir(phlRoot(), versionName(id))
+    await desktopVersions.removeVersionDir(versionName(id))
   },
 }
