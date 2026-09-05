@@ -439,6 +439,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// T-110 Version 行：坏压缩包（非 gzip 内容）→ 解压失败，不产生半成品树。
+    #[tokio::test]
+    async fn corrupt_archive_fails_extraction_without_a_partial_tree() {
+        let dir = std::env::temp_dir().join(format!("phl-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("dsh-bad.tgz.part");
+        std::fs::write(&part, b"this is not gzip at all").unwrap();
+
+        let dest = dir.join("staging");
+        let result = extract(&part, &dest, &|_| {}, &Arc::new(AtomicBool::new(false))).await;
+        assert!(result.is_err(), "garbage bytes cannot extract");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn extract_stops_when_cancelled() {
         let dir = std::env::temp_dir().join(format!("phl-cancel-{}", std::process::id()));
