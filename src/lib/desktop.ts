@@ -947,6 +947,8 @@ export async function fetchProviderModels(args: {
   api?: string
   apiKeyEnv: string
   apiKey?: string
+  /** Lets the backend fall back to this provider's OS-stored credential. */
+  providerId?: string
 }): Promise<RemoteModel[]> {
   if (!isDesktop) throw new Error('获取模型列表仅在桌面端可用')
   return invoke('fetch_provider_models', {
@@ -954,6 +956,7 @@ export async function fetchProviderModels(args: {
     api: args.api ?? null,
     apiKeyEnv: args.apiKeyEnv,
     apiKey: args.apiKey ?? null,
+    providerId: args.providerId ?? null,
   })
 }
 

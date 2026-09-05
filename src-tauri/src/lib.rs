@@ -3,6 +3,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, WindowEvent};
 
 mod api_config;
+mod credentials;
 mod diagnostics;
 mod instances;
 mod launch;
@@ -120,6 +121,7 @@ pub fn run() {
         .manage(launch::Launches::default())
         .manage(launch::Processes::default())
         .manage(paths::PhlState::load())
+        .manage(credentials::Creds::platform_default())
         .invoke_handler(tauri::generate_handler![
             app_ready,
             exit_app,

@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
+use crate::credentials::{CredentialStore, Creds};
 use crate::paths::PhlState;
 
 /// Key in `settings.yaml` holding the model catalog / providers.
@@ -377,24 +378,67 @@ fn settings_path(dir: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub async fn load_api_config(phl: State<'_, PhlState>) -> Result<Option<ApiConfig>, String> {
+pub async fn load_api_config(
+    phl: State<'_, PhlState>,
+    creds: State<'_, Creds>,
+) -> Result<Option<ApiConfig>, String> {
     let path = api_config_path(&phl.root());
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
-    let config: ApiConfig =
+    let mut config: ApiConfig =
         serde_json::from_str(&raw).map_err(|e| format!("API 配置库解析失败: {e}"))?;
     if config.version != 1 {
         return Err(format!("不支持的 API 配置版本: {}", config.version));
     }
+    // Migrate plaintext keys (the pre-credential-store format) into the OS
+    // store and rewrite the file without them. Failure leaves the old file
+    // untouched — an un-migrated plaintext key beats a broken load.
+    match migrate_stored_keys(&mut config, &creds) {
+        Ok(n) if n > 0 => {
+            let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+            let tmp = path.with_extension("json.tmp");
+            tokio::fs::write(&tmp, body)
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::fs::rename(&tmp, &path)
+                .await
+                .map_err(|e| e.to_string())?;
+            eprintln!("[phl] 已将 {n} 个密钥迁移到系统凭据管理器，api.json 已去除明文");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[phl] 凭据迁移失败，api.json 中的明文密钥暂保留: {e}"),
+    }
     Ok(Some(config))
+}
+
+/// Moves every provider's locally stored key into the credential store and
+/// clears the plaintext field. Idempotent: an already-migrated config has no
+/// keys to move. A store failure aborts before anything is cleared.
+fn migrate_stored_keys(config: &mut ApiConfig, creds: &Creds) -> Result<usize, String> {
+    let mut migrated = 0;
+    for p in &mut config.providers {
+        let key = p
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+        if let Some(key) = key {
+            creds.set(&p.id, &key)?;
+            p.api_key = None;
+            migrated += 1;
+        }
+    }
+    Ok(migrated)
 }
 
 #[tauri::command]
 pub async fn save_api_config(
     phl: State<'_, PhlState>,
+    creds: State<'_, Creds>,
     mut config: ApiConfig,
 ) -> Result<ApiConfig, String> {
     if config.version != 1 {
@@ -411,7 +455,26 @@ pub async fn save_api_config(
             ));
         }
     }
+    // Keys typed in the UI go to the credential store, never to disk. A
+    // store failure must not fall back to writing plaintext: the save fails
+    // and the old file stands.
+    let migrated = migrate_stored_keys(&mut config, &creds)
+        .map_err(|e| format!("无法将密钥写入系统凭据管理器，未保存: {e}"))?;
+    // Providers removed from the library take their credentials with them.
+    let path = api_config_path(&phl.root());
+    if let Ok(old_raw) = tokio::fs::read_to_string(&path).await {
+        if let Ok(old) = serde_json::from_str::<ApiConfig>(&old_raw) {
+            for op in &old.providers {
+                if !config.providers.iter().any(|np| np.id == op.id) {
+                    if let Err(e) = creds.delete(&op.id) {
+                        eprintln!("[phl] 清理已删除供应商的凭据失败: {e}");
+                    }
+                }
+            }
+        }
+    }
     config.updated_at = crate::versions::now_iso();
+    let _ = migrated;
     let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let path = api_config_path(&phl.root());
     if let Some(parent) = path.parent() {
@@ -684,10 +747,23 @@ const ENV_MISSING: &str = "ENV_MISSING:";
 /// session, which is why the temp-key escape hatch exists at all.
 #[tauri::command]
 pub async fn fetch_provider_models(
+    creds: State<'_, Creds>,
     base_url: String,
     api: Option<String>,
     api_key_env: String,
     api_key: Option<String>,
+    provider_id: Option<String>,
+) -> Result<Vec<RemoteModel>, String> {
+    fetch_models_inner(&creds, base_url, api, api_key_env, api_key, provider_id).await
+}
+
+async fn fetch_models_inner(
+    creds: &Creds,
+    base_url: String,
+    api: Option<String>,
+    api_key_env: String,
+    api_key: Option<String>,
+    provider_id: Option<String>,
 ) -> Result<Vec<RemoteModel>, String> {
     let url = models_url(&base_url);
     if url.is_empty() {
@@ -703,6 +779,12 @@ pub async fn fetch_provider_models(
     let key = api_key
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
+        .or_else(|| {
+            provider_id
+                .as_deref()
+                .and_then(|id| creds.get(id).ok().flatten())
+                .filter(|v| !v.trim().is_empty())
+        })
         .or_else(|| {
             std::env::var(env_name)
                 .ok()
@@ -801,6 +883,42 @@ pub(crate) fn provider_launch_keys(
         .collect()
 }
 
+/// Launch-time key resolution with the credential store in the chain: a
+/// one-time key carried on the config wins, then the OS credential store,
+/// then nothing (the caller falls back to the system variable). Credentials
+/// that cannot be read are skipped, not fatal — a broken store degrades to
+/// today's env-var behavior.
+pub(crate) async fn resolve_launch_keys(
+    config: &ApiConfig,
+    binding: &ApiBinding,
+    creds: &Creds,
+) -> Vec<(String, String)> {
+    let mut out = provider_launch_keys(config, binding);
+    let ids = bound_provider_ids(config, binding);
+    for p in &config.providers {
+        if !ids.iter().any(|id| id == &p.id) {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|(name, _): &(String, String)| name == &p.api_key_env)
+        {
+            continue;
+        }
+        let stored = creds
+            .get(&p.id)
+            .ok()
+            .flatten()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if stored {
+            let key = creds.get(&p.id).ok().flatten().unwrap_or_default();
+            out.push((p.api_key_env.clone(), key));
+        }
+    }
+    out
+}
+
 /* ---------------------------- live snapshot ----------------------------- */
 
 /// Everything the frontend needs to render one instance's *actual* API state
@@ -830,11 +948,12 @@ pub struct InstanceLiveSnapshot {
 #[tauri::command]
 pub async fn instance_live_snapshot(
     phl: State<'_, PhlState>,
+    creds: State<'_, Creds>,
     instance_id: String,
     binding: ApiBinding,
     config: ApiConfig,
 ) -> Result<InstanceLiveSnapshot, String> {
-    snapshot_inner(&phl.root(), &instance_id, &binding, &config).await
+    snapshot_inner(&phl.root(), &instance_id, &binding, &config, &creds).await
 }
 
 async fn snapshot_inner(
@@ -842,6 +961,7 @@ async fn snapshot_inner(
     instance_id: &str,
     binding: &ApiBinding,
     config: &ApiConfig,
+    creds: &Creds,
 ) -> Result<InstanceLiveSnapshot, String> {
     let dir = crate::instances::instance_dir(root, instance_id)?;
     let managed = binding.inheritance != "none";
@@ -904,7 +1024,14 @@ async fn snapshot_inner(
                 .as_deref()
                 .map(|k| !k.trim().is_empty())
                 .unwrap_or(false);
+            let in_store = creds
+                .get(&p.id)
+                .ok()
+                .flatten()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
             if !stored
+                && !in_store
                 && std::env::var(&p.api_key_env).is_err()
                 && !env_extra.contains_key(&p.api_key_env)
             {
@@ -1003,6 +1130,11 @@ pub(crate) async fn apply_create_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A credential store backed by the real OS on Windows; the test entries
+    /// it touches are namespaced and cleaned up by each test that uses one.
+    fn test_creds() -> Creds {
+        Creds::platform_default()
+    }
 
     fn provider(name: &str, env: &str) -> Provider {
         Provider {
@@ -1315,7 +1447,7 @@ mod tests {
         // not as "has local changes".
         let (root, _dir) = temp_root_with_instance("never-synced");
         let b = ApiBinding::default(); // inheritance default, syncedHash None
-        let snap = snapshot_inner(&root, "never-synced", &b, &config())
+        let snap = snapshot_inner(&root, "never-synced", &b, &config(), &test_creds())
             .await
             .unwrap();
         assert!(!snap.local_changes);
@@ -1333,7 +1465,9 @@ mod tests {
         let b = sync_inner(&dir, &ApiBinding::default(), &c).await.unwrap();
 
         // Fresh sync: the file matches, so a snapshot must not claim changes.
-        let fresh = snapshot_inner(&root, "snapshot", &b, &c).await.unwrap();
+        let fresh = snapshot_inner(&root, "snapshot", &b, &c, &test_creds())
+            .await
+            .unwrap();
         assert!(!fresh.local_changes);
         assert!(!fresh.default_model_changed);
         assert_eq!(fresh.live.as_ref().unwrap().providers.len(), 2);
@@ -1370,7 +1504,9 @@ mod tests {
         tokio::fs::write(settings_path(&dir), serde_yaml::to_string(&doc).unwrap())
             .await
             .unwrap();
-        let snap = snapshot_inner(&root, "snapshot", &b, &c).await.unwrap();
+        let snap = snapshot_inner(&root, "snapshot", &b, &c, &test_creds())
+            .await
+            .unwrap();
         assert!(snap.local_changes, "tampered managed provider surfaces");
         assert!(snap.default_model_changed, "edited default model surfaces");
         let live = snap.live.unwrap();
@@ -1443,7 +1579,7 @@ mod tests {
             synced_at: None,
             synced_hash: None,
         };
-        let snap = snapshot_inner(&root, "unmanaged", &b, &config())
+        let snap = snapshot_inner(&root, "unmanaged", &b, &config(), &test_creds())
             .await
             .unwrap();
         assert!(!snap.local_changes);
@@ -1508,7 +1644,7 @@ mod tests {
         std::fs::write(api_config_path(&root), serde_json::to_string(&c).unwrap()).unwrap();
         let b = ApiBinding::default();
         let applied = sync_inner(&dir, &b, &c).await.unwrap();
-        let snap = snapshot_inner(&root, "stored-key", &applied, &c)
+        let snap = snapshot_inner(&root, "stored-key", &applied, &c, &test_creds())
             .await
             .unwrap();
         assert_eq!(
@@ -1610,10 +1746,12 @@ mod tests {
     async fn missing_env_key_short_circuits_with_prefix() {
         // No network is reached: the key question must fail fast, and the
         // ENV_MISSING marker is what the UI keys its temp-key input on.
-        let e = fetch_provider_models(
+        let e = fetch_models_inner(
+            &test_creds(),
             "https://example.invalid/v1".into(),
             None,
             "PHL_TEST_DEFINITELY_UNSET_KEY".into(),
+            None,
             None,
         )
         .await
@@ -1623,11 +1761,16 @@ mod tests {
 
     #[tokio::test]
     async fn empty_base_url_rejected() {
-        assert!(
-            fetch_provider_models("".into(), None, "X".into(), Some("k".into()))
-                .await
-                .is_err()
-        );
+        assert!(fetch_models_inner(
+            &test_creds(),
+            "".into(),
+            None,
+            "X".into(),
+            Some("k".into()),
+            None
+        )
+        .await
+        .is_err());
     }
 
     /// End-to-end against a throwaway local server: exercises the real
@@ -1653,11 +1796,13 @@ mod tests {
             );
             let _ = sock.write_all(resp.as_bytes()).await;
         });
-        let out = fetch_provider_models(
+        let out = fetch_models_inner(
+            &test_creds(),
             format!("http://{addr}"),
             None,
             "IRRELEVANT_WHEN_TEMP_KEY_GIVEN".into(),
             Some("test-key".into()),
+            None,
         )
         .await
         .unwrap();
@@ -1677,10 +1822,12 @@ mod tests {
     async fn provider_models_probe() {
         // DeepSeek's endpoint accepts any well-formed key for /models on some
         // deployments; if it 401s, the error text itself is the probe output.
-        match fetch_provider_models(
+        match fetch_models_inner(
+            &test_creds(),
             "https://api.deepseek.com".into(),
             None,
             "DEEPSEEK_API_KEY".into(),
+            None,
             None,
         )
         .await
