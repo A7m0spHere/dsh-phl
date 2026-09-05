@@ -210,10 +210,13 @@ function ProviderFields({
   form,
   patch,
   withEnabled,
+  /** The edited provider's id — keys the OS credential manager lookup. */
+  providerId,
 }: {
   form: ProviderForm
   patch: (p: Partial<ProviderForm>) => void
   withEnabled?: boolean
+  providerId?: string
 }) {
   return (
     <div className="grid grid-cols-2 gap-x-3 gap-y-3">
@@ -274,6 +277,9 @@ function ProviderFields({
               form.apiKeyEnv.trim() ||
               suggestEnvName(form.name || form.displayName || 'provider'),
             apiKey: form.apiKey,
+            // The id the OS credential manager entry is keyed by; absent
+            // while creating a brand-new provider.
+            providerId,
           }}
         />
       </div>
@@ -480,7 +486,13 @@ function ModelEditor({
 }: {
   models: ApiModelRef[]
   onChange: (m: ApiModelRef[]) => void
-  fetchCtx?: { api?: string; baseURL: string; apiKeyEnv: string; apiKey?: string }
+  fetchCtx?: {
+    api?: string
+    baseURL: string
+    apiKeyEnv: string
+    apiKey?: string
+    providerId?: string
+  }
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [listing, setListing] = useState<RemoteModel[] | null>(null)
@@ -539,8 +551,9 @@ function ModelEditor({
         api: fetchCtx.api,
         apiKeyEnv: fetchCtx.apiKeyEnv,
         // The form's just-typed / stored key is tried first; the backend
-        // still falls back to the environment when both are blank.
+        // then consults the OS credential store and finally the environment.
         apiKey: tempKey.trim() || fetchCtx.apiKey?.trim() || undefined,
+        providerId: fetchCtx.providerId,
       })
       if (seq !== fetchSeq.current) return
       discoveryCache.set(cacheKey, out)
@@ -959,6 +972,7 @@ function ProviderCard({
             >
               <div className="mt-3 border-t border-line pt-3">
                 <ProviderFields
+                  providerId={provider.id}
                   form={form}
                   patch={(p) => setForm((f) => ({ ...f, ...p }))}
                   withEnabled

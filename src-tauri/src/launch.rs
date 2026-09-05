@@ -118,6 +118,7 @@ pub async fn launch_instance(
     launches: State<'_, Launches>,
     processes: State<'_, Processes>,
     phl: State<'_, PhlState>,
+    creds: State<'_, crate::credentials::Creds>,
     transfer_id: String,
     instance_id: String,
     version_name: String,
@@ -150,6 +151,7 @@ pub async fn launch_instance(
         env,
         args,
         api,
+        &creds,
         &on_progress,
     )
     .await;
@@ -207,6 +209,7 @@ async fn run_launch(
     env: HashMap<String, String>,
     args: Vec<String>,
     api: Option<crate::api_config::ApiBinding>,
+    creds: &crate::credentials::Creds,
     on_progress: &Channel<LaunchEvent>,
 ) -> Result<LaunchOutcome, String> {
     // Every one of these is pasted into a path or an argv — same whitelist as
@@ -361,7 +364,9 @@ async fn run_launch(
     // that makes "paste the key once in PHL" work for every instance.
     if let Some(binding) = &launch_binding {
         if let Some(config) = crate::api_config::load_config_file(root).await {
-            for (name, value) in crate::api_config::provider_launch_keys(&config, binding) {
+            for (name, value) in
+                crate::api_config::resolve_launch_keys(&config, binding, creds).await
+            {
                 if env.contains_key(&name) || std::env::var(&name).is_ok() {
                     continue;
                 }
