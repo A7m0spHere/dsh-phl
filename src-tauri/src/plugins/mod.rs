@@ -1,0 +1,154 @@
+//! Plugin Market backing: the DSH community catalog (awesome-dsh-plugin
+//! `plugins.json`) plus a real download / verify / install pipeline.
+//!
+//! Source priority follows the ecosystem convention: a repo-verified npm
+//! package beats an author-built tarball, which beats pulling the GitHub
+//! repo source. Installation lands in the instance profile's `node_modules`
+//! and registers the plugin in `cordis.patch.yml` — the same files DSH's own
+//! `dsh plugin add` manages — so PHL never invents a private layout.
+//!
+//! Split along its seams (Batch F): `catalog` (the community registry),
+//! `resolve` (source → tarball URL), `security` (trust levels + GitHub
+//! commit pinning), `install` (the staging/swap pipeline) and `cordis`
+//! (line-level cordis.patch.yml editing).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::{Deserialize, Serialize};
+
+pub(crate) mod catalog;
+pub(crate) mod cordis;
+pub(crate) mod install;
+pub(crate) mod resolve;
+pub(crate) mod security;
+
+pub(crate) use cordis::disabled_plugin_ids;
+pub(crate) use resolve::sanitize_pkg_path;
+pub(crate) use security::compute_trust;
+
+pub(crate) const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The aggregated `plugins.json` is ~2.5 MB and the main site can take 40 s+
+/// on a slow link — the default 15 s aborts mid-transfer, which is exactly
+/// the "插件市场加载失败" report. Catalog fetches get their own ceiling.
+pub(crate) const REGISTRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Catalog sources, tried in order. `dsh-ai.org` serves a byte-compatible
+/// copy of the same `plugins.json` (same schema, CI-refreshed) and is the
+/// community's stand-in when the main domain is slow or unreachable. The
+/// jsDelivr/raw entries were dropped on purpose: the repo only carries the
+/// per-plugin YAML sources, never the aggregated JSON.
+pub(crate) const REGISTRY_FALLBACKS: &[&str] =
+    &["https://awesome-dsh-plugin.com", "https://dsh-ai.org"];
+
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("PHL/0.1 (dsh-phl)")
+        .connect_timeout(HTTP_TIMEOUT)
+        .build()
+        .expect("reqwest client")
+}
+
+/* ----------------------------- wire types ----------------------------- */
+
+/// Tagged exactly like the frontend `PluginSource` union.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PluginSourceWire {
+    Npm {
+        pkg: String,
+    },
+    Tarball {
+        url: String,
+        integrity: Option<String>,
+    },
+    Github {
+        repo: String,
+    },
+}
+
+/// Mirrors the frontend `Plugin`. Live registry entries carry no releases —
+/// the concrete version resolves against npm at install time.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMeta {
+    pub id: String,
+    pub name: String,
+    pub author: String,
+    pub category: String,
+    pub summary: String,
+    pub summary_en: Option<String>,
+    pub repo_url: Option<String>,
+    pub screenshots: Vec<String>,
+    pub source: PluginSourceWire,
+    pub official: bool,
+    pub downloads: u64,
+    pub stars: Option<u64>,
+    pub added_at: Option<String>,
+    pub releases: Vec<PluginReleaseMeta>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginReleaseMeta {
+    pub version: String,
+    pub published_at: String,
+    pub source: Option<PluginSourceWire>,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "stage")]
+pub enum PluginProgressEvent {
+    Preparing,
+    #[serde(rename_all = "camelCase")]
+    Downloading {
+        progress: f64,
+        bytes_done: u64,
+        bytes_per_sec: u64,
+    },
+    Verifying,
+    #[serde(rename_all = "camelCase")]
+    Installing {
+        progress: f64,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallOutcome {
+    pub version: String,
+    /// The id written into `cordis.patch.yml` (npm package name or repo name).
+    pub registry_id: String,
+    /// verified | pinned | unverified — from install-time facts (T-107).
+    pub trust: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginVersionInfo {
+    pub version: Option<String>,
+}
+
+pub(crate) fn source_kind(source: &PluginSourceWire) -> &'static str {
+    match source {
+        PluginSourceWire::Npm { .. } => "npm",
+        PluginSourceWire::Tarball { .. } => "tarball",
+        PluginSourceWire::Github { .. } => "github",
+    }
+}
+
+fn sanitize_cache_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn cancelled(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::SeqCst)
+}
