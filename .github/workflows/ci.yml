@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (typecheck · test · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # The build doubles as the `dist/` the Rust job needs: tauri's
+      # `generate_context!` reads ../dist at compile time.
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 1
+
+  rust:
+    name: Rust (fmt · clippy · test · check)
+    runs-on: windows-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 on Windows compiles against WebView2 with no extra system
+      # packages, so the Windows-first crate checks on a Windows runner.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+        shell: bash
+
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+        shell: bash
+
+      - run: cargo test
+        shell: bash
+
+      - run: cargo check
+        shell: bash
+
+  # Full NSIS bundle is the slowest step and not required per-commit; it runs
+  # for tags (release pipeline) and on demand.
+  tauri-build:
+    name: Windows bundle
+    runs-on: windows-latest
+    needs: [frontend, rust]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm run app:build
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
