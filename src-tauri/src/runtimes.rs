@@ -80,6 +80,15 @@ pub async fn list_node_runtimes(dist_base: String) -> Result<Vec<NodeRuntimeMeta
     Ok(group_catalog(entries))
 }
 
+/// The full semver recorded by an installed runtime, or None when the
+/// directory carries no readable marker. Shared with the environment
+/// verifier, which compares it against what the binary actually reports.
+pub(crate) fn runtime_version(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("phl-runtime.json")).ok()?;
+    let marker: RuntimeMarker = serde_json::from_str(&raw).ok()?;
+    Some(marker.version)
+}
+
 #[tauri::command]
 pub async fn list_installed_runtimes(
     phl: State<'_, PhlState>,

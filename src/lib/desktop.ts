@@ -681,6 +681,37 @@ export async function importInstanceBundle(
   return invoke('import_instance_bundle', { path, manifest })
 }
 
+/* ------------------------------ verify -------------------------------- */
+
+/** Mirrors the Rust `VerifyCheck` — one item of the environment report. */
+export interface RemoteVerifyCheck {
+  id: string
+  category: string
+  severity: 'info' | 'warning' | 'error'
+  status: 'pass' | 'warn' | 'fail'
+  message: string
+  repairable: boolean
+  repairAction?: string | null
+}
+
+/** Mirrors the Rust `VerifyResult` — the instance's Environment Health. */
+export interface RemoteVerifyResult {
+  overall: 'healthy' | 'degraded' | 'broken'
+  checks: RemoteVerifyCheck[]
+}
+
+/**
+ * Read-only environment verification: inspects the manifest, the pinned DSH
+ * version tree, config files, API references and launch conditions without
+ * modifying anything.
+ */
+export async function verifyInstance(instanceId: string): Promise<RemoteVerifyResult> {
+  if (!isDesktop) {
+    return { overall: 'healthy', checks: [] }
+  }
+  return invoke<RemoteVerifyResult>('verify_instance', { instanceId })
+}
+
 /* ------------------------------ snapshots ----------------------------- */
 
 export async function createInstanceSnapshot(

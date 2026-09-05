@@ -10,6 +10,7 @@ mod paths;
 mod plugins;
 mod runtimes;
 mod storage;
+mod verify;
 mod versions;
 
 /// Emitted when the OS (or the custom title bar) asks the window to close.
@@ -168,6 +169,7 @@ pub fn run() {
             storage::free_space,
             storage::root_data_summary,
             storage::move_root_data,
+            verify::verify_instance,
             diagnostics::run_diagnostics,
             diagnostics::clear_download_cache,
         ])

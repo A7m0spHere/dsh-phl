@@ -43,6 +43,7 @@ import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceTile, LaunchTimeline, StatusPill, useInstanceActions } from '@/components/instance'
 import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
+import { EnvironmentHealthCard } from '@/components/instance/EnvironmentHealthCard'
 
 /* ------------------------------------------------------------------ *
  * context panel — sibling instances, so switching stays one click away
@@ -685,6 +686,11 @@ export function InstanceDetailPage({ id }: { id: string }) {
               </ul>
             )}
           </SectionCard>
+        </motion.div>
+
+        {/* ---- 环境健康 ---- */}
+        <motion.div variants={riseItem}>
+          <EnvironmentHealthCard instanceId={instance.id} />
         </motion.div>
 
         {/* ---- 快照 ---- */}
