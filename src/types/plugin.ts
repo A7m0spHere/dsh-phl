@@ -150,6 +150,14 @@ export interface InstalledPlugin {
   registryId?: string
   /** Local, unpublished plugin being developed against this instance. */
   linked?: boolean
+  /**
+   * Install-time trust level, read back from the install record (T-107):
+   * `verified` = npm exact version with a matching registry integrity,
+   * `pinned` = checksummed tarball or GitHub commit SHA, `unverified` =
+   * moving target (HEAD / no checksum). `unknown` = installed before the
+   * field existed.
+   */
+  trust?: 'verified' | 'pinned' | 'unverified' | 'unknown'
 }
 
 /**

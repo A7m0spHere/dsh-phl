@@ -790,7 +790,14 @@ export interface RemoteInstanceRecord {
   api?: ApiBinding | null
   dshHome: string
   workspace: string
-  plugins: { pluginId: string; version: string; enabled: boolean; registryId: string }[]
+  plugins: {
+    pluginId: string
+    version: string
+    enabled: boolean
+    registryId: string
+    /** verified | pinned | unverified | unknown (T-107). */
+    trust?: string
+  }[]
   snapshots: RemoteSnapshotInfo[]
 }
 

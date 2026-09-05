@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use base64::Engine;
+
 use crate::paths::PhlState;
 use crate::versions::{download, extract, http_client, now_iso, verify_integrity, Transfers};
 
@@ -102,6 +104,8 @@ pub struct PluginInstallOutcome {
     pub version: String,
     /// The id written into `cordis.patch.yml` (npm package name or repo name).
     pub registry_id: String,
+    /// verified | pinned | unverified — from install-time facts (T-107).
+    pub trust: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,10 +328,77 @@ struct NpmDist {
     integrity: Option<String>,
 }
 
+#[derive(Clone)]
 struct ResolvedSource {
     url: String,
     integrity: Option<String>,
     version: String,
+    /// The commit SHA a GitHub source was pinned to, when resolution
+    /// succeeded. `None` means the content of this install is whatever the
+    /// remote served at fetch time — the defining property of an unverified
+    /// source.
+    commit: Option<String>,
+}
+
+/// Trust levels (T-107), derived only from install-time facts:
+///
+/// - `verified` — npm exact version whose registry `dist.integrity` matched
+///   the downloaded bytes.
+/// - `pinned` — the content is fixed to something immutable: a tarball with
+///   a declared checksum, or a GitHub source resolved to a commit SHA.
+/// - `unverified` — whatever the remote serves right now (GitHub HEAD,
+///   checksum-less tarball). Installs carry a warning and updates re-warn.
+fn compute_trust(source: &PluginSourceWire, resolved: &ResolvedSource) -> &'static str {
+    match source {
+        PluginSourceWire::Npm { .. } => {
+            if resolved.integrity.is_some() {
+                "verified"
+            } else {
+                "unverified"
+            }
+        }
+        PluginSourceWire::Tarball { .. } => {
+            if resolved.integrity.is_some() {
+                "pinned"
+            } else {
+                "unverified"
+            }
+        }
+        PluginSourceWire::Github { .. } => {
+            if resolved.commit.is_some() {
+                "pinned"
+            } else {
+                "unverified"
+            }
+        }
+    }
+}
+
+/// Resolves a GitHub repo's HEAD to its current commit SHA so the install
+/// downloads an immutable tarball instead of a moving target. Best-effort:
+/// every failure (offline, rate limit, proxy down) degrades to HEAD, which
+/// the trust model then labels unverified rather than failing the install.
+async fn resolve_commit(repo: &str) -> Option<String> {
+    const MIRRORS: &[&str] = &["https://gh-proxy.com/"];
+    let api = format!("https://api.github.com/repos/{repo}/commits/HEAD");
+    let mut urls: Vec<String> = MIRRORS.iter().map(|m| format!("{m}{api}")).collect();
+    urls.push(api);
+    for url in urls {
+        let response = http_client()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .ok()?;
+        let value: serde_json::Value = response.json().await.ok()?;
+        if let Some(sha) = value.get("sha").and_then(|s| s.as_str()) {
+            if sha.len() >= 40 {
+                return Some(sha[..40].to_string());
+            }
+        }
+    }
+    None
 }
 
 async fn resolve_source(
@@ -382,23 +453,43 @@ async fn resolve_source(
                 url: pv.dist.tarball.clone(),
                 integrity: pv.dist.integrity.clone(),
                 version,
+                commit: None,
             })
         }
         PluginSourceWire::Tarball { url, integrity } => Ok(ResolvedSource {
             url: url.clone(),
             integrity: integrity.clone(),
             version: requested_version.unwrap_or("latest").to_string(),
+            commit: None,
         }),
         PluginSourceWire::Github { repo } => {
             let repo = repo.trim_matches('/');
             if repo.split('/').count() != 2 {
                 return Err(format!("非法的 GitHub 仓库: {repo}"));
             }
-            Ok(ResolvedSource {
-                url: format!("https://codeload.github.com/{repo}/tar.gz/HEAD"),
-                integrity: None,
-                version: requested_version.unwrap_or("HEAD").to_string(),
-            })
+            // Pin to the commit whenever it can be resolved: a HEAD tarball
+            // is a moving target, and an install that cannot say what bytes
+            // it shipped is exactly what the trust model exists to expose.
+            match resolve_commit(repo).await {
+                Some(sha) => {
+                    let short = &sha[..7];
+                    Ok(ResolvedSource {
+                        url: format!("https://codeload.github.com/{repo}/tar.gz/{sha}"),
+                        integrity: None,
+                        version: requested_version
+                            .filter(|v| *v != "HEAD")
+                            .unwrap_or(short)
+                            .to_string(),
+                        commit: Some(sha),
+                    })
+                }
+                None => Ok(ResolvedSource {
+                    url: format!("https://codeload.github.com/{repo}/tar.gz/HEAD"),
+                    integrity: None,
+                    version: requested_version.unwrap_or("HEAD").to_string(),
+                    commit: None,
+                }),
+            }
         }
     }
 }
@@ -580,6 +671,20 @@ async fn run_plugin_install(
     let _ = tokio::fs::remove_file(&part_path).await;
     install_result?;
 
+    let trust = compute_trust(source, &resolved);
+    if trust == "unverified" {
+        eprintln!(
+            "[phl] 插件 {plugin_id} 来自未固定来源（{}），无法校验内容一致性",
+            source_kind(source)
+        );
+    }
+    // npm spells integrity `sha512-<base64>`; the digest computed over the
+    // downloaded bytes is recorded in the same shape, so any future
+    // re-verification can compare against what actually landed.
+    let actual = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(&downloaded.sha512)
+    );
     let marker = serde_json::json!({
         "installedAt": now_iso(),
         // The catalog id (`owner/repo`) is *not* the registry id (npm package
@@ -590,7 +695,11 @@ async fn run_plugin_install(
         "kind": source_kind(source),
         "registryId": registry_id,
         "source": source,
+        // The commit a GitHub install was pinned to; absent for HEAD installs.
+        "ref": resolved.commit,
         "integrity": resolved.integrity.unwrap_or_default(),
+        "actualIntegrity": actual,
+        "trust": trust,
         "bytes": downloaded.bytes,
     });
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
@@ -612,6 +721,7 @@ async fn run_plugin_install(
     Ok(PluginInstallOutcome {
         version: resolved.version,
         registry_id,
+        trust: trust.to_string(),
     })
 }
 
@@ -904,6 +1014,78 @@ mod tests {
 - id: bar
   name: bar
 ";
+
+    #[test]
+    fn trust_is_derived_from_source_facts_not_optimism() {
+        let npm = ResolvedSource {
+            url: "https://registry/x.tgz".into(),
+            integrity: Some("sha512-abc".into()),
+            version: "1.0.0".into(),
+            commit: None,
+        };
+        let npm_bare = ResolvedSource {
+            integrity: None,
+            ..npm.clone()
+        };
+        let tarball = ResolvedSource {
+            url: "https://example.com/p.tgz".into(),
+            integrity: Some("sha512-abc".into()),
+            version: "latest".into(),
+            commit: None,
+        };
+        let tarball_bare = ResolvedSource {
+            integrity: None,
+            ..tarball.clone()
+        };
+        let gh_head = ResolvedSource {
+            url: "https://codeload.github.com/a/b/tar.gz/HEAD".into(),
+            integrity: None,
+            version: "HEAD".into(),
+            commit: None,
+        };
+        let gh_pinned = ResolvedSource {
+            commit: Some("a".repeat(40)),
+            ..gh_head.clone()
+        };
+
+        assert_eq!(
+            compute_trust(&PluginSourceWire::Npm { pkg: "x".into() }, &npm),
+            "verified"
+        );
+        assert_eq!(
+            compute_trust(&PluginSourceWire::Npm { pkg: "x".into() }, &npm_bare),
+            "unverified",
+            "npm without integrity cannot be called verified"
+        );
+        assert_eq!(
+            compute_trust(
+                &PluginSourceWire::Tarball {
+                    url: String::new(),
+                    integrity: None
+                },
+                &tarball
+            ),
+            "pinned"
+        );
+        assert_eq!(
+            compute_trust(
+                &PluginSourceWire::Tarball {
+                    url: String::new(),
+                    integrity: None
+                },
+                &tarball_bare
+            ),
+            "unverified"
+        );
+        assert_eq!(
+            compute_trust(&PluginSourceWire::Github { repo: "a/b".into() }, &gh_pinned),
+            "pinned"
+        );
+        assert_eq!(
+            compute_trust(&PluginSourceWire::Github { repo: "a/b".into() }, &gh_head),
+            "unverified"
+        );
+    }
 
     #[test]
     fn block_ends_at_a_sibling_not_at_a_nested_item() {

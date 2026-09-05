@@ -762,6 +762,40 @@ const RegistryCard = memo(function RegistryCard({
   )
 })
 
+const TRUST_LABEL: Record<string, string> = {
+  verified: '已验证',
+  pinned: '已固定',
+  unverified: '未验证',
+  unknown: '信任未知',
+}
+
+const TRUST_HINT: Record<string, string> = {
+  verified: 'npm 固定版本，安装时已通过 registry sha512 校验',
+  pinned: '内容固定（校验和或 commit SHA），重装可复现',
+  unverified: '来源未固定（如 GitHub HEAD），内容可能随时变化，请确认来源可信',
+  unknown: '安装记录缺少信任信息（旧版本 PHL 安装）',
+}
+
+/**
+ * 未固定来源的插件在更新前必须再次确认：HEAD 归档的内容自上次安装后可能
+ * 已经被上游替换，这次“更新”实际上是一次不可审查的换血 (T-108)。
+ */
+async function updateWithTrustWarning(
+  plugin: { name: string; trust?: string },
+  run: () => Promise<void>,
+): Promise<void> {
+  if (plugin.trust === 'unverified' || plugin.trust === 'unknown') {
+    const ok = await useUIStore.getState().confirm({
+      title: '更新未验证来源的插件？',
+      message: `「${plugin.name}」的安装来源未固定（${plugin.trust === 'unknown' ? '信任未知' : '如 GitHub HEAD'}），更新会以当前远端内容替换现有文件，且无法提前校验内容是否被改动。`,
+      confirmLabel: '仍然更新',
+      cancelLabel: '取消',
+    })
+    if (!ok) return
+  }
+  await run()
+}
+
 export function PluginsPage() {
   const instances = useInstanceStore((s) => s.instances)
   const plugins = useCatalogStore((s) => s.plugins)
@@ -1455,6 +1489,13 @@ export function PluginsPage() {
                       </span>
                       {p.linked && <Badge tone="accent">本地链接</Badge>}
                       {p.meta && <SourceBadge plugin={p.meta} />}
+                      {p.trust && p.trust !== 'verified' && (
+                        <Tooltip content={TRUST_HINT[p.trust]}>
+                          <Badge tone={p.trust === 'pinned' ? 'accent' : 'warn'}>
+                            {TRUST_LABEL[p.trust]}
+                          </Badge>
+                        </Tooltip>
+                      )}
                       {p.compat === 'bad' && <Badge tone="danger">不兼容当前版本</Badge>}
                       {p.compat === 'unknown' && !p.linked && <Badge tone="warn">兼容性未知</Badge>}
                     </div>
@@ -1484,7 +1525,7 @@ export function PluginsPage() {
                         <Button
                           size="sm"
                           variant="primary"
-                          onClick={() => void install(instance.id, p.pluginId)}
+                          onClick={() => void updateWithTrustWarning(p, () => install(instance.id, p.pluginId))}
                         >
                           <ArrowUpCircle size={12} />
                           更新
