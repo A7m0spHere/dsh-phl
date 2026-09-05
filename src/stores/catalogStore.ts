@@ -327,10 +327,19 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
       await repository.removeVersion(id)
     } catch (err) {
       console.warn('[phl] removeVersion failed:', err)
+      // Tauri rejections arrive as plain strings — `instanceof Error` would
+      // drop the backend's actual reason and show the generic fallback.
+      const message =
+        typeof err === 'string' && err.trim()
+          ? err
+          : err instanceof Error && err.message
+            ? err.message
+            : '版本目录无法移除，可能被其他程序占用。'
       useUIStore.getState().toast({
         kind: 'error',
         title: '删除版本失败',
-        message: err instanceof Error && err.message ? err.message : '版本目录无法移除，可能被其他程序占用。',
+        message,
+        duration: 6000,
       })
       return
     }

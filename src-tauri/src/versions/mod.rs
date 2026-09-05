@@ -47,6 +47,8 @@ pub(crate) use dependencies::{
 };
 pub(crate) use download::{download, verify_integrity, Downloaded};
 pub(crate) use extract::{extract, safe_join, strip_first};
+#[cfg(test)]
+pub(crate) use install::remove_version_dir_inner;
 pub(crate) use install::{
     now_millis, promote_staged, read_marker, run_install, sanitize_version, txn_dir,
 };
@@ -645,5 +647,68 @@ mod net_tests {
                 panic!("catalog failed: {e}");
             }
         }
+    }
+    #[tokio::test]
+    async fn deleting_a_version_in_use_by_a_running_instance_is_refused_by_name() {
+        use crate::instances::{create_instance_inner, InstanceManifest};
+        use crate::launch::{ProcessEntry, Processes};
+        use std::collections::HashMap;
+
+        let root = std::env::temp_dir().join(format!("phl-rmver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let manifest = InstanceManifest {
+            schema_version: 0,
+            id: "pinver-01".into(),
+            name: "占用版本的实例".into(),
+            note: None,
+            kind: "sandbox".into(),
+            hue: 0,
+            version_id: "dsh-0.1.0".into(),
+            runtime_id: "node-system".into(),
+            port: 34490,
+            auto_port: true,
+            profile: "web".into(),
+            created_at: now_iso(),
+            last_run_at: None,
+            total_runtime: 0,
+            favorite: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            api: None,
+        };
+        create_instance_inner(&root, manifest).await.unwrap();
+
+        // Simulate the completed install on disk.
+        let version = root.join("versions").join("0.1.0");
+        std::fs::create_dir_all(version.join("lib")).unwrap();
+        std::fs::write(version.join("package.json"), r#"{"name":"dsh"}"#).unwrap();
+        std::fs::write(version.join("lib").join("bin.js"), "// bin").unwrap();
+        std::fs::write(version.join("phl-install.json"), "{}").unwrap();
+
+        // The instance is running.
+        let processes = Processes::default();
+        processes
+            .0
+            .lock()
+            .unwrap()
+            .insert("pinver-01".into(), ProcessEntry { pid: 1, port: 1 });
+
+        let err = remove_version_dir_inner(&root, &processes, "0.1.0")
+            .await
+            .unwrap_err();
+        assert!(err.contains("占用版本的实例"), "{err}");
+        assert!(err.contains("停止"), "{err}");
+        assert!(version.exists(), "the version directory was not touched");
+
+        // After the instance stops, the delete goes through.
+        processes.0.lock().unwrap().remove("pinver-01");
+        remove_version_dir_inner(&root, &processes, "0.1.0")
+            .await
+            .unwrap();
+        assert!(!version.exists(), "version removed once nothing pins it");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
