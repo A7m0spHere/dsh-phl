@@ -12,7 +12,7 @@
 //! returns what it did, the UI re-checks, and the health badge tells the
 //! truth.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -28,7 +28,7 @@ const RESIDUE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// The repair actions this module executes itself. Everything else that
 /// verify can flag (install-version, install-runtime, reinstall-*) needs a
 /// download and stays a user-routed action.
-const LOCAL_ACTIONS: &[&str] = &["recreate-workspace", "cleanup-txn"];
+const LOCAL_ACTIONS: &[&str] = &["recreate-workspace", "recreate-skeleton", "cleanup-txn"];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +183,7 @@ pub(crate) async fn repair_instance_inner(
         }
         let result = match action.as_str() {
             "recreate-workspace" => recreate_workspace(root, instance_id).await,
+            "recreate-skeleton" => recreate_skeleton(root, instance_id).await,
             "cleanup-txn" => cleanup_txn(root).await,
             _ => unreachable!("LOCAL_ACTIONS is the whitelist above"),
         };
@@ -205,6 +206,33 @@ fn is_known_remote_action(action: &str) -> bool {
         action,
         "install-version" | "reinstall-version" | "install-runtime" | "reinstall-runtime"
     )
+}
+
+/// Recreates the instance's whole derivable skeleton — `dsh-home` with its
+/// profile's empty `node_modules`, plus `logs`. This is the local half of
+/// "rebuild from manifest" (T-204): after the environment was wiped, the
+/// directory tree the manifest implies comes back exactly as a fresh create
+/// would have made it, and the pinned DSH version / runtime are restored
+/// through the normal install flows the UI routes to.
+async fn recreate_skeleton(root: &Path, instance_id: &str) -> Result<(), String> {
+    let dir = crate::instances::instance_dir(root, instance_id)?;
+    let manifest = crate::instances::load_manifest(&dir, instance_id).await?;
+    for relative in [
+        PathBuf::from("dsh-home")
+            .join("profiles")
+            .join(&manifest.profile)
+            .join("node_modules"),
+        PathBuf::from("logs"),
+        PathBuf::from("workspace"),
+    ] {
+        let target = dir.join(&relative);
+        if !target.exists() {
+            tokio::fs::create_dir_all(&target)
+                .await
+                .map_err(|e| format!("无法重建 {}: {e}", relative.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// The workspace directory is fully derivable from the manifest — recreating
@@ -310,6 +338,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.applied, vec!["recreate-workspace"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_wiped_environment_skeleton_is_rebuildable_from_the_manifest() {
+        let root = temp_root("rebuild");
+        let id = "rebuild-1";
+        create_instance_inner(&root, manifest(id)).await.unwrap();
+
+        // Simulate "deleted the local environment, kept the manifest": the
+        // instance directory keeps only instance.json.
+        let dir = root.join("instances").join(id);
+        for name in ["dsh-home", "workspace", "logs"] {
+            tokio::fs::remove_dir_all(dir.join(name)).await.unwrap();
+        }
+
+        let outcome = repair_instance_inner(&root, id, &["recreate-skeleton".into()])
+            .await
+            .unwrap();
+        assert_eq!(outcome.applied, vec!["recreate-skeleton"]);
+        assert!(dir.join("workspace").exists());
+        assert!(dir.join("logs").exists());
+        assert!(
+            dir.join("dsh-home")
+                .join("profiles")
+                .join("web")
+                .join("node_modules")
+                .exists(),
+            "profile skeleton comes back exactly as a fresh create"
+        );
+
+        // And verify agrees the derivable half is healthy again.
+        let result = crate::verify::verify_instance_inner(&root, id)
+            .await
+            .unwrap();
+        let broken = result
+            .checks
+            .iter()
+            .filter(|c| c.status == "fail")
+            .all(|c| {
+                c.repair_action
+                    .as_deref()
+                    .is_some_and(|a| a.starts_with("install-"))
+            });
+        assert!(
+            broken,
+            "only install actions may still fail: {:?}",
+            result.checks
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
