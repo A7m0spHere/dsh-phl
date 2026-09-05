@@ -130,13 +130,12 @@ export function useInstanceActions(instance: Instance | undefined) {
 
   const exportBundle = useCallback(async () => {
     if (!instance) return
-    const root = useSettingsStore.getState().root
     const dest = await chooseSaveFile('导出 PHL Bundle', `${instance.name}.phl-bundle.json`, [
       { name: 'PHL Bundle', extensions: ['json'] },
     ])
     if (!dest) return
     try {
-      await exportInstanceBundle(root, instance.id, dest)
+      await exportInstanceBundle(instance.id, dest)
       ui.toast({ kind: 'success', title: '已导出 Bundle', message: dest })
     } catch (err) {
       ui.toast({

@@ -10,6 +10,7 @@ import {
   useUIStore,
   initDesktopRoot,
   maybeOfferRootChoice,
+  syncPhlRootWithBackend,
   bindHistorySync,
 } from '@/stores'
 import { DialogHost, Toaster } from '@/components/ui'
@@ -35,7 +36,11 @@ export default function App() {
     // filesystem for installed versions. Both loaders can now genuinely fail
     // (they reach the disk), so the chain needs a handler — an unhandled
     // rejection here left the pages on their skeletons with no explanation.
-    const load = () => void initDesktopRoot()
+    // The backend handshake runs first: its answer (the pointer file, or the
+    // root this install already had) is what every instance command is
+    // resolved against once the stores start reading the disk.
+    const load = () => void syncPhlRootWithBackend()
+      .then(() => initDesktopRoot())
       .then(() => Promise.all([loadCatalog(), loadInstances(), loadApiConfig()]))
       .catch((err) => {
         console.error('[phl] startup load failed:', err)

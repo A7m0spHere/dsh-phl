@@ -20,7 +20,6 @@ import {
   readInstanceBundle,
   type RemoteInstanceManifest,
 } from '@/lib/desktop'
-import { useSettingsStore } from '@/stores/settingsStore'
 import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
 import {
   useCatalogStore,
@@ -208,8 +207,7 @@ export function InstancesPage() {
       api: { inheritance: 'default', providerIds: [] },
     }
     try {
-      const root = useSettingsStore.getState().root
-      const record = await importInstanceBundle(root, path, manifest)
+      const record = await importInstanceBundle(path, manifest)
       admitInstance(instanceFromRecord(record))
       ui.toast({
         kind: 'success',
