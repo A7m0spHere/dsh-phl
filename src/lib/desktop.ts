@@ -206,6 +206,38 @@ export async function moveRootData(
   return invoke<MoveSummary>('move_root_data', { from, to, transferId, onProgress: channel })
 }
 
+/* --------------------------- migration journal --------------------------- */
+
+export interface MigrationJournalEntry {
+  kind: string
+  /** pending = untouched, moving = interrupted mid-copy, moved = arrived. */
+  state: 'pending' | 'moving' | 'moved'
+  bytes: number
+}
+
+export interface MigrationJournal {
+  from: string
+  to: string
+  entries: MigrationJournalEntry[]
+  committed: boolean
+  startedAt: string
+}
+
+/**
+ * The journal of an interrupted or cancelled data-root migration, or `null`.
+ * An open journal is the restart-recovery entry: 继续 resumes from the
+ * record, 撤销 walks the moved directories back.
+ */
+export async function migrationStatus(): Promise<MigrationJournal | null> {
+  if (!isDesktop) return null
+  return invoke<MigrationJournal | null>('storage_migration_status')
+}
+
+/** Undo a non-committed migration: everything that arrived moves back. */
+export async function migrationUndo(): Promise<MoveSummary> {
+  return invoke<MoveSummary>('storage_migration_undo')
+}
+
 /* ------------------------------- versions ------------------------------- */
 
 /** `DshVersion` minus the runtime `state`, which the repository derives. */

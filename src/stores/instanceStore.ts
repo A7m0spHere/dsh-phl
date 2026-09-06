@@ -4,6 +4,7 @@ import { adoptProcesses, isDesktop, onInstanceExited, openExternal } from '@/lib
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
 import { useCatalogStore } from './catalogStore'
+import { useSettingsStore } from './settingsStore'
 import { useUIStore } from './uiStore'
 
 interface InstanceState {
@@ -638,7 +639,9 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
 
   suggestPort: () => {
     const taken = new Set(get().instances.map((i) => i.port))
-    let port = 3080
+    // The user's configured start, not a constant: the advanced setting had
+    // no consumer at all, so changing it was a silent lie (O-03).
+    let port = useSettingsStore.getState().portStart || 3080
     while (taken.has(port)) port += 1
     return port
   },

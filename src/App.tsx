@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { MotionConfig } from 'motion/react'
-import { desktop } from '@/lib/desktop'
+import { desktop, migrationStatus } from '@/lib/desktop'
 import { shortcutById, useGlobalShortcut } from '@/lib/shortcuts'
 import {
   useApiConfigStore,
@@ -8,6 +8,7 @@ import {
   useInstanceStore,
   useSettingsStore,
   useUIStore,
+  useViewStore,
   initDesktopRoot,
   maybeOfferRootChoice,
   syncPhlRootWithBackend,
@@ -43,6 +44,27 @@ export default function App() {
       .then(() => initDesktopRoot())
       .then(() => Promise.all([loadCatalog(), loadInstances(), loadApiConfig()]))
       .then(() => useInstanceStore.getState().adoptPreviousSession())
+      .then(async () => {
+        // An interrupted root migration is the one state a restart must not
+        // silently ignore: half the data lives in a different directory
+        // until the user chooses 继续 or 撤销 (O-06).
+        const journal = await migrationStatus()
+        if (!journal) return
+        const ui = useUIStore.getState()
+        ui.toast({
+          kind: 'warn',
+          title: '检测到未完成的数据目录迁移',
+          message: '部分数据仍在新目录中。前往「设置 → 存储」可从中断处继续，或将已复制的数据原路退回。',
+          duration: 10_000,
+          action: {
+            label: '去处理',
+            run: () => {
+              useViewStore.getState().setSettingsSection('storage')
+              useUIStore.getState().navigate({ name: 'settings' })
+            },
+          },
+        })
+      })
       .catch((err) => {
         console.error('[phl] startup load failed:', err)
         useUIStore.getState().toast({

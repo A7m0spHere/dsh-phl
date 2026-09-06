@@ -11,7 +11,10 @@ import {
   cancelTransfer,
   desktop,
   freeSpace,
+  migrationStatus,
+  migrationUndo,
   moveRootData,
+  type MigrationJournal,
   rootDataSummary,
   runDiagnostics,
   clearDownloadCache,
@@ -227,6 +230,48 @@ export function SettingsPage() {
   const [migration, setMigration] = useState<null | { from: string; to: string; transferId: string }>(null)
   const [moveProgress, setMoveProgress] = useState<MoveProgress | null>(null)
 
+  /**
+   * A migration cancelled or interrupted by a crash leaves its journal
+   * behind; entering the storage view surfaces it as 继续 / 撤销 (O-06),
+   * so the half-moved directories are never a silent dead end.
+   */
+  const [openJournal, setOpenJournal] = useState<MigrationJournal | null>(null)
+  const [journalBusy, setJournalBusy] = useState<'resume' | 'undo' | null>(null)
+  useEffect(() => {
+    if (section !== 'storage') return
+    void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
+  }, [section])
+
+  const clearJournal = () => void setOpenJournal(null)
+
+  const undoOpenMigration = async () => {
+    if (!openJournal) return
+    const ok = await ui.confirm({
+      title: '撤销未完成的迁移',
+      message: '已复制到新目录的数据将全部搬回旧目录，新目录恢复迁移前的状态。期间不要移动这两个目录。',
+      detail: `${openJournal.from}\n  ↑\n${openJournal.to}`,
+      tone: 'danger',
+      confirmLabel: '撤销迁移',
+    })
+    if (!ok) return
+    setJournalBusy('undo')
+    try {
+      await migrationUndo()
+      ui.toast({ kind: 'success', title: '迁移已撤销', message: '数据已回到旧目录。' })
+      clearJournal()
+      await useInstanceStore.getState().reload().catch(() => undefined)
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '撤销失败',
+        message: err instanceof Error && err.message ? err.message : String(err),
+        duration: 8000,
+      })
+    } finally {
+      setJournalBusy(null)
+    }
+  }
+
   const beginMigration = async (from: string, to: string) => {
     const transferId = `move-${Date.now()}`
     setMigration({ from, to, transferId })
@@ -237,9 +282,10 @@ export function SettingsPage() {
         ui.toast({
           kind: 'info',
           title: '迁移已取消',
-          message: `已完成 ${formatBytes(summary.bytes)}，数据目录未更改。已搬走的部分保留在新目录，重新迁移会自动续传剩余部分。`,
+          message: `已完成 ${formatBytes(summary.bytes)}，数据目录未更改。进度已记录，可在「存储」页继续或撤销。`,
           duration: 6000,
         })
+        void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
         return
       }
       await switchRootTo(to)
@@ -262,6 +308,9 @@ export function SettingsPage() {
     } finally {
       setMigration(null)
       setMoveProgress(null)
+      // The journal is the truth: a cancelled run leaves a resume entry, a
+      // committed one deletes itself. Reflect whichever outcome happened.
+      void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
     }
   }
 
@@ -359,9 +408,10 @@ export function SettingsPage() {
             <div className="rounded-lg bg-surface px-4 ring-1 ring-inset ring-line">
               <SettingRow
                 title="启动 PHL 时"
-                description="打开应用后自动执行的操作"
+                description="计划中的能力，尚未接入启动流程 —— 当前设置不会生效"
                 control={
                   <Select
+                    disabled
                     value={settings.startup}
                     onChange={(e) => settings.set('startup', e.target.value as never)}
                     className="w-[168px]"
@@ -374,9 +424,10 @@ export function SettingsPage() {
               />
               <SettingRow
                 title="关闭窗口时最小化到托盘"
-                description="保持实例继续运行"
+                description="托盘驻留尚未实现；关闭窗口即退出（实例可继续运行，见下）"
                 control={
                   <Switch
+                    disabled
                     checked={settings.minimizeToTray}
                     onChange={(v) => settings.set('minimizeToTray', v)}
                   />
@@ -394,9 +445,10 @@ export function SettingsPage() {
               />
               <SettingRow
                 title="自动检查 DSH 新版本"
-                description="仅提示，不会自动安装或替换已有版本"
+                description="独立的应用更新检查尚未接入；版本列表的定时刷新在「下载」分区配置"
                 control={
                   <Switch
+                    disabled
                     checked={settings.checkUpdates}
                     onChange={(v) => settings.set('checkUpdates', v)}
                   />
@@ -449,9 +501,11 @@ export function SettingsPage() {
               )}
               <SettingRow
                 title="同时下载数"
+                description="下载并发上限尚未接入传输管线；当前每个操作各自串行下载"
                 control={
                   <Segmented
                     size="sm"
+                    disabled
                     value={String(settings.concurrency)}
                     onChange={(v) => settings.set('concurrency', Number(v))}
                     options={[
@@ -613,6 +667,34 @@ export function SettingsPage() {
 
         {section === 'storage' && (
           <>
+            {openJournal && !migration && (
+              <PageSection title="未完成的迁移">
+                <Notice tone="warn" title={`旧目录 → 新目录的数据搬运尚未结束`}>
+                  <div className="mt-1 break-all text-sm">
+                    {openJournal.from} → {openJournal.to}（{openJournal.entries.filter((e) => e.state === 'moved').length}/{openJournal.entries.length} 个目录已到达，
+                    {formatBytes(openJournal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
+                    可从中断处继续，或将已复制的数据原路退回。
+                  </div>
+                  <div className="mt-2.5 flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => void beginMigration(openJournal.from, openJournal.to)}
+                    >
+                      继续迁移
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={journalBusy !== null}
+                      onClick={() => void undoOpenMigration()}
+                    >
+                      {journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
+                    </Button>
+                  </div>
+                </Notice>
+              </PageSection>
+            )}
             <PageSection
               title="数据目录"
               description="版本、Runtime 与所有实例都存放在这里。这不是 PHL 程序本身的安装位置。"
@@ -865,19 +947,11 @@ export function SettingsPage() {
                   }
                 />
                 <SettingRow
-                  title="隔离 node_modules"
-                  description="每个实例使用独立的插件依赖树，避免跨版本污染"
-                  control={
-                    <Switch
-                      checked={settings.isolateNodeModules}
-                      onChange={(v) => settings.set('isolateNodeModules', v)}
-                    />
-                  }
-                />
-                <SettingRow
                   title="日志级别"
+                  description="日志分级尚未接入后端；诊断与实例日志始终完整记录"
                   control={
                     <Select
+                      disabled
                       value={settings.logLevel}
                       onChange={(e) => settings.set('logLevel', e.target.value as never)}
                       className="w-[130px]"
@@ -888,16 +962,6 @@ export function SettingsPage() {
                         </option>
                       ))}
                     </Select>
-                  }
-                />
-                <SettingRow
-                  title="开发者模式"
-                  description="显示实例进程的原始输出与内部状态"
-                  control={
-                    <Switch
-                      checked={settings.developerMode}
-                      onChange={(v) => settings.set('developerMode', v)}
-                    />
                   }
                 />
               </div>

@@ -22,6 +22,7 @@ export function Segmented<T extends string>({
   size = 'md',
   className,
   block,
+  disabled,
 }: {
   value: T
   options: SegmentedOption<T>[]
@@ -29,6 +30,7 @@ export function Segmented<T extends string>({
   size?: 'sm' | 'md'
   className?: string
   block?: boolean
+  disabled?: boolean
 }) {
   const layoutId = useId()
   const { spring } = useMotion()
@@ -39,6 +41,7 @@ export function Segmented<T extends string>({
       className={cn(
         'inline-flex items-center gap-0.5 rounded bg-surface-sunken p-[3px] ring-1 ring-inset ring-line',
         block && 'w-full',
+        disabled && 'pointer-events-none opacity-45',
         className,
       )}
     >
@@ -49,6 +52,7 @@ export function Segmented<T extends string>({
             key={opt.value}
             role="tab"
             aria-selected={active}
+            disabled={disabled}
             title={opt.title}
             onClick={() => onChange(opt.value)}
             className={cn(

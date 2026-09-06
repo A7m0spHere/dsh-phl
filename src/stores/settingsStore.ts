@@ -57,9 +57,12 @@ interface SettingsState {
   pendingReleaseAlerts: boolean
 
   portStart: number
+  /**
+   * Not yet consumed by any logging pipeline — the settings UI shows it as a
+   * disabled placeholder. Wiring it is part of "下载并发和日志等级在对应后端
+   * 能力完成后开放" (roadmap O-03); until then it must not look live.
+   */
   logLevel: LogLevel
-  developerMode: boolean
-  isolateNodeModules: boolean
 
   /** First-run guide has been completed or skipped. */
   guideSeen: boolean
@@ -92,9 +95,13 @@ const defaults = {
   pendingReleaseAlerts: true,
   portStart: 3080,
   logLevel: 'info' as LogLevel,
-  developerMode: false,
-  isolateNodeModules: true,
 }
+/*
+ * Removed fake settings (roadmap O-03): `isolateNodeModules` (instance
+ * isolation is a core product constraint, never a user-facing toggle) and
+ * `developerMode` (no consumer existed). Older persisted stores may still
+ * carry these keys; they are ignored — the merge reads only typed fields.
+ */
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
