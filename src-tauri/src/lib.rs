@@ -177,6 +177,8 @@ pub fn run() {
             storage::free_space,
             storage::root_data_summary,
             storage::move_root_data,
+            storage::storage_migration_status,
+            storage::storage_migration_undo,
             repair::repair_instance,
             repair::scan_residue,
             verify::verify_instance,
