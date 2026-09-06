@@ -167,7 +167,6 @@ pub(crate) async fn save_api_config_at(
 mod tests {
     use super::*;
     use crate::api_config::Provider;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// Records every store operation so ordering assertions do not need the
@@ -182,7 +181,7 @@ mod tests {
         fn get(&self, _id: &str) -> Result<Option<String>, String> {
             Ok(None) // the save path never reads
         }
-        fn set(&self, id: &str, secret: &str) -> Result<(), String> {
+        fn set(&self, id: &str, _secret: &str) -> Result<(), String> {
             self.ops.lock().unwrap().push(format!("set {id}"));
             if self.fail_set.lock().unwrap().iter().any(|f| f == id) {
                 return Err("fake store refusal".into());

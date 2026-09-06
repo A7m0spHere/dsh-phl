@@ -40,6 +40,8 @@ pub async fn install_plugin(
     // The profile directory is resolved backend-side from the instance id —
     // the manifest's profile is the authority, not a path from the WebView.
     let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    // A committed install changes the tree the disk-usage cache measured.
+    let profile_for_cache = profile.clone();
     let flag = transfers.take(&transfer_id);
     let result = guarded(
         transfer_id.clone(),
@@ -72,6 +74,9 @@ pub async fn install_plugin(
     )
     .await;
     transfers.release(&transfer_id);
+    if result.is_ok() {
+        crate::instances::invalidate_disk_usage(&profile_for_cache);
+    }
     result
 }
 

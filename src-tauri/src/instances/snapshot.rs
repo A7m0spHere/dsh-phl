@@ -221,7 +221,13 @@ pub async fn restore_instance_snapshot(
         &locks,
         &tasks,
         move |_| async move {
-            restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+            let r = restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await;
+            if r.is_ok() {
+                if let Ok(dir) = instance_dir(&state.root(), &id) {
+                    crate::instances::invalidate_disk_usage(&dir);
+                }
+            }
+            r
         },
     )
     .await

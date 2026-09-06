@@ -278,7 +278,7 @@ pub async fn adopt_processes(
             // The instance is gone; a stray child from a deleted instance is
             // outside PHL's reach by design — report, never terminate.
             let alive = probe_process(rec.pid).alive;
-            registry.forget_pid(&rec.instance_id, rec.pid);
+            registry.forget(&rec.instance_id);
             report.dropped.push(DroppedProcess {
                 instance_id: rec.instance_id,
                 pid: rec.pid,
@@ -470,6 +470,9 @@ async fn run_launch(
     tokio::fs::create_dir_all(&logs_dir)
         .await
         .map_err(|e| e.to_string())?;
+    // Rotation/retention: the newest 10 launch logs survive; older ones are
+    // swept so a long-lived instance's `logs/` cannot grow without bound.
+    process::prune_launch_logs(&logs_dir, 10).await;
     let log_path = logs_dir.join(format!("launch-{}.log", now_iso().replace(':', "-")));
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -858,6 +861,36 @@ mod tests {
             .unwrap()
             .block_on(log_tail(&path, 2));
         assert_eq!(tail, "l2\nl3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn log_tail_of_a_huge_file_reads_only_the_window() {
+        // O-12: asking for 3 lines out of a log that has megabytes of
+        // noise must not materialise the whole file. Write well past the
+        // tail window and check only the last three lines come back.
+        let dir = temp_dir("tail-big");
+        let path = dir.join("launch.log");
+        let mut raw = vec![b'x'; process::LOG_TAIL_WINDOW as usize + 4096];
+        raw.extend_from_slice(b"\nline-a\nline-b\nline-c\n");
+        std::fs::write(&path, &raw).unwrap();
+        let tail = log_tail(&path, 3).await;
+        assert_eq!(tail, "line-a\nline-b\nline-c");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_the_newest_logs_and_drops_the_rest() {
+        let dir = temp_dir("prune");
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("launch-2026-09-06T0{i}-00-00.log")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("other.log"), b"x").unwrap();
+        process::prune_launch_logs(&dir, 2).await;
+        assert!(dir.join("launch-2026-09-06T04-00-00.log").exists());
+        assert!(dir.join("launch-2026-09-06T03-00-00.log").exists());
+        assert!(!dir.join("launch-2026-09-06T00-00-00.log").exists());
+        assert!(dir.join("other.log").exists(), "only launch-*.log is swept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

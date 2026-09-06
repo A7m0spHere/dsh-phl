@@ -182,6 +182,7 @@ pub async fn create_instance(
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
     let label_id = manifest.id.clone();
+    let instance_dir_path = instance_dir(&state.root(), &label_id)?;
     crate::resources::guarded(
         crate::resources::next_task_id("instance-create"),
         "instance-create",
@@ -190,7 +191,13 @@ pub async fn create_instance(
         None,
         &locks,
         &tasks,
-        move |_| async move { create_instance_inner(&state.root(), manifest).await },
+        move |_| async move {
+            let r = create_instance_inner(&state.root(), manifest).await;
+            if r.is_ok() {
+                invalidate_disk_usage(&instance_dir_path);
+            }
+            r
+        },
     )
     .await
 }
@@ -270,7 +277,15 @@ pub async fn delete_instance(
         None,
         &locks,
         &tasks,
-        move |_| async move { delete_instance_inner(&state.root(), &id, &processes).await },
+        move |_| async move {
+            let r = delete_instance_inner(&state.root(), &id, &processes).await;
+            if r.is_ok() {
+                if let Ok(dir) = instance_dir(&state.root(), &id) {
+                    invalidate_disk_usage(&dir);
+                }
+            }
+            r
+        },
     )
     .await
 }
@@ -331,12 +346,52 @@ pub async fn clone_instance(
     result
 }
 
+/// TTL for the disk-usage memo (O-12). `measureDiskUsage` fans out over every
+/// instance on the storage page and on each `instances` change; walking full
+/// `node_modules` trees per call is the exact cost the roadmap says to bound.
+/// A short memo collapses the fan-out and repeated visits into one real scan
+/// per instance per window, and instance writes invalidate their own entry so
+/// the answer never disagrees with a change the user just made.
+const DISK_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// (instance dir) → (bytes, when it was measured). Global because the store
+/// has no natural owner for it and the cache must survive across commands.
+static DISK_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn disk_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, std::time::Instant)>> {
+    DISK_CACHE.get_or_init(Default::default)
+}
+
+/// Drop any cached measurement for `dir` — called after anything that writes
+/// into an instance tree (create, save, plugin ops, snapshot restore).
+pub(crate) fn invalidate_disk_usage(dir: &Path) {
+    if let Ok(mut map) = disk_cache().lock() {
+        map.remove(dir);
+    }
+}
+
 #[tauri::command]
 pub async fn instance_disk_usage(state: State<'_, PhlState>, id: String) -> Result<u64, String> {
     let dir = instance_dir(&state.root(), &id)?;
-    tokio::task::spawn_blocking(move || dir_size(&dir))
+    // Fresh memo wins outright; a stale one is still returned while the
+    // refresh runs, so concurrent callers share one scan.
+    let cached = disk_cache().lock().ok().and_then(|m| m.get(&dir).copied());
+    if let Some((bytes, at)) = cached {
+        if at.elapsed() < DISK_TTL {
+            return Ok(bytes);
+        }
+    }
+    let scan_dir = dir.clone();
+    let bytes = tokio::task::spawn_blocking(move || dir_size(&scan_dir))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut m) = disk_cache().lock() {
+        m.insert(dir, (bytes, std::time::Instant::now()));
+    }
+    Ok(bytes)
 }
 
 /// Directories under `<root>/instances` that carry no manifest — interrupted
