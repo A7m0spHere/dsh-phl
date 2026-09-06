@@ -45,7 +45,7 @@ pub(crate) use catalog::parse_semver;
 pub(crate) use dependencies::{
     install_version_deps, package_requires_deps, pick_npm_capable_node, version_deps_missing,
 };
-pub(crate) use download::{download, verify_integrity, Downloaded};
+pub(crate) use download::{download, sidecar_path_of, verify_integrity, Downloaded};
 pub(crate) use extract::{extract, safe_join, strip_first};
 #[cfg(test)]
 pub(crate) use install::remove_version_dir_inner;

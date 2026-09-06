@@ -123,7 +123,14 @@ async fn run_plugin_install(
     let downloaded = match downloaded {
         Ok(d) => d,
         Err(e) => {
-            let _ = tokio::fs::remove_file(&part_path).await;
+            // A cancellation keeps the partial `.part` *and* its `.resume`
+            // sidecar (download's contract): the next attempt resumes with a
+            // range request, bound to the same entity. Anything else is
+            // fatal or exhausted: both halves go together.
+            if e != "cancelled" {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                let _ = tokio::fs::remove_file(crate::versions::sidecar_path_of(&part_path)).await;
+            }
             return Err(e);
         }
     };
