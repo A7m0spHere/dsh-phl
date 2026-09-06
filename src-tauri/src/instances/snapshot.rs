@@ -1,7 +1,6 @@
 //! Point-in-time copies of an instance's `dsh-home`: create under a staging
 //! name, restore by copy-swap with the previous tree as backup, delete.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,35 +20,6 @@ use crate::paths::{ensure_under_root, PhlState};
 use crate::versions::{now_iso, Transfers};
 
 /* ------------------------------ snapshots ----------------------------- */
-
-/// Environment variables that let their value execute code, or redirect the
-/// process to a different runtime, and so must never survive an import.
-///
-/// A bundle is the format PHL tells users to share, so its contents are
-/// attacker-supplied by design. `run_launch` applies instance env verbatim
-/// (minus `DSH_HOME`), which means an imported `NODE_OPTIONS=--require
-/// C:\evil.js` would run on the first 启动. Filtering belongs here, at the
-/// trust boundary, rather than in the launcher's own allow-list.
-const UNSAFE_IMPORT_ENV: &[&str] = &[
-    "NODE_OPTIONS",
-    "NODE_REPL_EXTERNAL_MODULE",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "PATH",
-    "NODE_PATH",
-];
-
-pub(crate) fn sanitize_imported_env(env: HashMap<String, String>) -> HashMap<String, String> {
-    env.into_iter()
-        .filter(|(key, _)| {
-            let upper = key.to_ascii_uppercase();
-            // `DSH_HOME` is the isolation boundary and is recomputed per
-            // instance anyway; the rest are code-injection vectors.
-            upper != "DSH_HOME" && !UNSAFE_IMPORT_ENV.contains(&upper.as_str())
-        })
-        .collect()
-}
 
 /// A recorded point-in-time copy of the instance's `dsh-home`. The workspace
 /// and logs are deliberately not part of it: a snapshot exists to make the

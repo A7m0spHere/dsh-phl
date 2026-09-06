@@ -175,10 +175,19 @@ export function InstancesPage() {
       })
       return
     }
+    // 凭据值从不随 Bundle 携带:预览里列出导入后需要重新配置的变量,
+    // 机器本地变量的值同样会在导入时丢弃。
+    const notes: string[] = ['Bundle 携带配置与插件记录；插件文件请在导入后通过插件页重新安装。']
+    if (preview.credentials.length > 0) {
+      notes.push(`导入后需重新配置凭据：${preview.credentials.join('、')}。`)
+    }
+    if (preview.machineOnly.length > 0) {
+      notes.push(`机器本地变量（${preview.machineOnly.join('、')}）的值不随 Bundle 携带。`)
+    }
     const ok = await confirm({
       title: `导入「${preview.name}」`,
       message: `版本 ${preview.versionId} · Runtime ${preview.runtimeId} · 端口 ${preview.port} · ${preview.pluginCount} 条插件记录。`,
-      detail: 'Bundle 携带配置与插件记录；插件文件请在导入后通过插件页重新安装。',
+      detail: notes.join(' '),
       confirmLabel: '导入',
     })
     if (!ok) return
@@ -207,15 +216,19 @@ export function InstancesPage() {
       api: { inheritance: 'default', providerIds: [] },
     }
     try {
-      const record = await importInstanceBundle(path, manifest)
-      admitInstance(instanceFromRecord(record))
+      const outcome = await importInstanceBundle(path, manifest)
+      admitInstance(instanceFromRecord(outcome.record))
+      const notes: string[] = []
+      if (preview.pluginCount > 0) {
+        notes.push(`包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`)
+      }
+      if (outcome.credentials.length > 0) {
+        notes.push(`需重新配置凭据：${outcome.credentials.join('、')}。`)
+      }
       ui.toast({
         kind: 'success',
-        title: `已导入「${record.name}」`,
-        message:
-          preview.pluginCount > 0
-            ? `包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`
-            : undefined,
+        title: `已导入「${outcome.record.name}」`,
+        message: notes.length > 0 ? notes.join(' ') : undefined,
       })
     } catch (err) {
       ui.toast({

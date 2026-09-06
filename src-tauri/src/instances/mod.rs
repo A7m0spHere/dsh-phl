@@ -33,6 +33,7 @@ use crate::versions::{now_iso, Transfers};
 
 pub(crate) mod bundle;
 pub(crate) mod copy;
+pub(crate) mod env_policy;
 pub(crate) mod manifest;
 pub(crate) mod snapshot;
 
@@ -40,9 +41,7 @@ pub(crate) use copy::{copy_tree_with_progress, dir_size, SkipRule};
 use manifest::{classify_manifest, write_manifest, ManifestRead};
 pub(crate) use manifest::{load_manifest, read_manifest, InstanceManifest};
 #[cfg(test)]
-use snapshot::{
-    delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create, sanitize_imported_env,
-};
+use snapshot::{delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create};
 use snapshot::{scan_snapshots, SnapshotFile};
 
 /* ----------------------------- wire types ----------------------------- */
@@ -566,7 +565,7 @@ mod tests {
     use super::copy::dir_size_skipping;
     use super::manifest::MANIFEST_SCHEMA_VERSION;
     use super::*;
-    use bundle::{export_instance_bundle_inner, read_instance_bundle};
+    use bundle::{export_instance_bundle_inner, read_bundle_inner};
     use copy::{copy_tree, skipped};
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
@@ -677,17 +676,27 @@ mod tests {
     }
 
     #[test]
-    fn imported_env_drops_code_injection_vectors() {
+    fn imported_env_drops_injection_vectors_and_credential_values() {
+        use super::env_policy::partition_imported_env;
         let mut env = HashMap::new();
         env.insert("NODE_OPTIONS".into(), "--require C:\\evil.js".into());
         env.insert("node_options".into(), "--require C:\\evil.js".into());
         env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
         env.insert("DSH_HOME".into(), "C:\\elsewhere".into());
         env.insert("MY_API_KEY".into(), "keep-me".into());
+        env.insert("HTTP_PROXY".into(), "http://proxy:8080".into());
 
-        let safe = sanitize_imported_env(env);
-        assert_eq!(safe.len(), 1, "only the harmless variable survives");
-        assert_eq!(safe.get("MY_API_KEY").map(String::as_str), Some("keep-me"));
+        let (safe, credentials) = partition_imported_env(env, &HashSet::new());
+        assert_eq!(credentials, vec!["MY_API_KEY".to_string()]);
+        assert_eq!(
+            safe.len(),
+            1,
+            "the harmless variable survives with its value"
+        );
+        assert_eq!(
+            safe.get("HTTP_PROXY").map(String::as_str),
+            Some("http://proxy:8080")
+        );
     }
 
     #[tokio::test]
@@ -1065,11 +1074,13 @@ mod tests {
 
         let dest = root.join("out/source.phl-bundle.json");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        export_instance_bundle_inner(root.as_path(), "src-a1b2", &dest.to_string_lossy())
-            .await
-            .unwrap();
+        let report =
+            export_instance_bundle_inner(root.as_path(), "src-a1b2", &dest.to_string_lossy())
+                .await
+                .unwrap();
+        assert!(report.credentials.is_empty() && report.machine_only.is_empty());
 
-        let preview = read_instance_bundle(dest.to_string_lossy().into_owned())
+        let preview = read_bundle_inner(root.as_path(), &dest.to_string_lossy())
             .await
             .unwrap();
         assert_eq!(preview.name, "Source");
@@ -1080,11 +1091,13 @@ mod tests {
         let mut importer = manifest("dst-c3d4", "Restored");
         importer.version_id = "placeholder".into();
         importer.port = 9999;
-        let imported =
+        let outcome =
             import_instance_bundle_inner(root.as_path(), &dest.to_string_lossy(), importer)
                 .await
                 .unwrap();
+        let imported = outcome.record;
 
+        assert!(outcome.credentials.is_empty());
         assert_eq!(imported.manifest.id, "dst-c3d4");
         assert_eq!(
             imported.manifest.version_id, source.manifest.version_id,
@@ -1123,10 +1136,139 @@ mod tests {
             r#"{"phlBundle":99,"exportedAt":"","instance":{},"plugins":[]}"#,
         )
         .unwrap();
-        let err = read_instance_bundle(path.to_string_lossy().into_owned())
+        let err = read_bundle_inner(root.as_path(), &path.to_string_lossy())
             .await
             .unwrap_err();
         assert!(err.contains("不支持的 Bundle 版本"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shareability promise, end to end: an instance whose env carries a
+    /// fictional credential under an explicit (library-declared) name and a
+    /// heuristic one exports neither value; both names come back as "needs
+    /// re-configuration", while an ordinary variable keeps its value.
+    #[tokio::test]
+    async fn bundle_export_omits_credential_values_and_names_them() {
+        let root = temp_root("bundlesecret");
+        create_instance_inner(root.as_path(), manifest("sec-a1b2", "Secret"))
+            .await
+            .unwrap();
+
+        // The library declares MY_GATE_SLOT a credential carrier — a name the
+        // heuristic alone would not catch.
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/api.json"),
+            r#"{"version":1,"providers":[{"id":"gate","name":"Gate","apiKeyEnv":"MY_GATE_SLOT"}]}"#,
+        )
+        .unwrap();
+
+        let dir = root.join("instances/sec-a1b2");
+        let raw = std::fs::read_to_string(manifest_path(&dir)).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value["env"] = serde_json::json!({
+            "MY_GATE_SLOT": "phrase-fictional",
+            "MY_API_KEY": "key-fictional",
+            "HTTP_PROXY": "http://proxy:8080",
+            "PATH": "C:\\bin"
+        });
+        std::fs::write(
+            manifest_path(&dir),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let dest = root.join("out/secret.phl-bundle.json");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let report =
+            export_instance_bundle_inner(root.as_path(), "sec-a1b2", &dest.to_string_lossy())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            report.credentials,
+            vec!["MY_API_KEY".to_string(), "MY_GATE_SLOT".to_string()]
+        );
+        assert_eq!(report.machine_only, vec!["PATH".to_string()]);
+
+        let body = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            !body.contains("phrase-fictional"),
+            "explicit credential leaked"
+        );
+        assert!(
+            !body.contains("key-fictional"),
+            "heuristic credential leaked"
+        );
+        assert!(
+            body.contains("http://proxy:8080"),
+            "the ordinary variable keeps its value"
+        );
+        // The names travel, the values do not — the importer needs to know
+        // what to re-enter, not what was there.
+        assert!(body.contains("MY_GATE_SLOT"));
+
+        // A fresh PHL reading the file back reports the same two names.
+        let preview = read_bundle_inner(root.as_path(), &dest.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.credentials,
+            vec!["MY_API_KEY".to_string(), "MY_GATE_SLOT".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Old format-1 bundles can carry credential *values*; the import filter
+    /// is the last line, so importing one strips those values, reports the
+    /// names, and keeps ordinary variables intact — the written manifest
+    /// never sees the secret.
+    #[tokio::test]
+    async fn bundle_import_strips_format1_credential_values_and_reports_them() {
+        let root = temp_root("bundleold");
+        let path = root.join("legacy.phl-bundle.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "phlBundle": 1,
+                "exportedAt": "2025-01-01T00:00:00Z",
+                "instance": {
+                    "id": "legacy", "name": "Legacy", "kind": "sandbox", "hue": 0,
+                    "versionId": "dsh-0.1.0", "runtimeId": "node-22", "port": 8080,
+                    "autoPort": true, "profile": "default", "createdAt": "2025-01-01T00:00:00Z",
+                    "env": {"MY_API_KEY": "legacy-secret", "HTTP_PROXY": "http://proxy:8080"},
+                    "args": []
+                },
+                "plugins": []
+            }"#,
+        )
+        .unwrap();
+
+        let outcome = import_instance_bundle_inner(
+            root.as_path(),
+            &path.to_string_lossy(),
+            manifest("old-c9d8", "Legacy"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.credentials, vec!["MY_API_KEY".to_string()]);
+        assert_eq!(
+            outcome
+                .record
+                .manifest
+                .env
+                .get("HTTP_PROXY")
+                .map(String::as_str),
+            Some("http://proxy:8080"),
+            "the ordinary variable survives the import"
+        );
+
+        let written =
+            std::fs::read_to_string(manifest_path(&root.join("instances/old-c9d8"))).unwrap();
+        assert!(
+            !written.contains("legacy-secret"),
+            "the secret never reaches the imported instance's manifest"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

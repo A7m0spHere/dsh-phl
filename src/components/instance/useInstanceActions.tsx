@@ -12,7 +12,13 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import type { MenuItem } from '@/components/ui'
-import { chooseSaveFile, exportInstanceBundle, openExternal, revealPath } from '@/lib/desktop'
+import {
+  chooseSaveFile,
+  exportInstanceBundle,
+  openExternal,
+  previewInstanceExport,
+  revealPath,
+} from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useInstanceStore, useUIStore } from '@/stores'
 import type { Instance } from '@/types'
@@ -130,13 +136,40 @@ export function useInstanceActions(instance: Instance | undefined) {
 
   const exportBundle = useCallback(async () => {
     if (!instance) return
-    const dest = await chooseSaveFile('导出 PHL Bundle', `${instance.name}.phl-bundle.json`, [
-      { name: 'PHL Bundle', extensions: ['json'] },
-    ])
-    if (!dest) return
     try {
-      await exportInstanceBundle(instance.id, dest)
-      ui.toast({ kind: 'success', title: '已导出 Bundle', message: dest })
+      // The preview is the promise: exactly these fields stay out of the
+      // file, so sharing it is a decision the user makes with full knowledge.
+      const report = await previewInstanceExport(instance.id)
+      const omitted: string[] = []
+      if (report.credentials.length > 0) {
+        omitted.push(`凭据值，导入后需重新配置：${report.credentials.join('、')}`)
+      }
+      if (report.machineOnly.length > 0) {
+        omitted.push(`机器本地变量：${report.machineOnly.join('、')}`)
+      }
+      const ok = await ui.confirm({
+        title: `导出「${instance.name}」`,
+        message: 'Bundle 携带实例配置与插件记录；插件文件不打包，导入后重新安装。',
+        detail:
+          omitted.length > 0
+            ? `以下内容不会写入 Bundle：${omitted.join('；')}。`
+            : undefined,
+        confirmLabel: '导出',
+      })
+      if (!ok) return
+      const dest = await chooseSaveFile('导出 PHL Bundle', `${instance.name}.phl-bundle.json`, [
+        { name: 'PHL Bundle', extensions: ['json'] },
+      ])
+      if (!dest) return
+      const written = await exportInstanceBundle(instance.id, dest)
+      ui.toast({
+        kind: 'success',
+        title: '已导出 Bundle',
+        message:
+          written.credentials.length > 0
+            ? `${dest}（凭据值已省略：${written.credentials.join('、')}）`
+            : dest,
+      })
     } catch (err) {
       ui.toast({
         kind: 'error',

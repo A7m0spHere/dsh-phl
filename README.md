@@ -144,7 +144,7 @@ UI  →  Repository  →  Mock Data        （浏览器模式；桌面端的静�
 - Runtime 管理（真实）：nodejs.org dist 目录（支持 npmmirror 镜像）、SHASUMS256 校验、Windows zip / Unix tar.gz 解包、系统 Node 探测
 - 插件管理（真实）：社区注册表、npm / GitHub / 直链来源、安装进实例 profile 并注册 `cordis.patch.yml`
 - 存储视图（真实）：实例与 Runtime 占用按磁盘实测，孤立目录扫描与一键回收
-- Bundle 导出 / 导入（真实）：实例配置与插件记录打包为 JSON 清单；导入走与创建同款的暂存 + 重命名管线，插件文件不进 Bundle、通过插件页重新安装
+- Bundle 导出 / 导入（真实）：实例配置与插件记录打包为 JSON 清单；导出前预览并列出被省略的字段——凭据值（库声明的 `apiKeyEnv` 与凭据字样的变量）与 `PATH`、`DSH_HOME` 等机器本地变量不进 Bundle，只保留变量名供导入方重新配置；导入走与创建同款的暂存 + 重命名管线，导入结果明示需重新配置的凭据；插件文件不进 Bundle、通过插件页重新安装
 - 快照（真实）：创建 / 回滚 / 删除 —— 复制实例的 dsh-home（插件与配置），回滚后快照保留、可反复还原；运行中的实例拒绝快照操作
 - 诊断（真实）：数据目录可写、DSH 版本与 Runtime 完整性、实例引用有效性、孤立目录与下载缓存一览；缓存一键清理
 - 真实启动：解析版本与 Runtime → 端口探测 / 自动分配 → 以实例自己的 `DSH_HOME` 启动 `dsh web` → 端口就绪探测 → 打开 WebUI；停止即终止进程树，崩溃自动反馈到 UI，启动日志落在实例 `logs/` 下

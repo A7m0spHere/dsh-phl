@@ -661,11 +661,30 @@ export interface RemoteBundlePreview {
   port: number
   pluginCount: number
   exportedAt: string
+  /** 凭据名:导入后需要用户重新配置的变量(值从不随 Bundle 携带)。 */
+  credentials: string[]
+  /** 机器本地变量(PATH、DSH_HOME……):导入时会丢弃其值。 */
+  machineOnly: string[]
 }
 
-export async function exportInstanceBundle(id: string, dest: string): Promise<void> {
+/** Mirrors the Rust `BundleExportReport` — what an export kept back. */
+export interface RemoteBundleExportReport {
+  credentials: string[]
+  machineOnly: string[]
+}
+
+/** 导出预览:列出将不写入 Bundle 的字段,不产生任何文件。 */
+export async function previewInstanceExport(id: string): Promise<RemoteBundleExportReport> {
   if (!isDesktop) throw new Error('导出 Bundle 仅在桌面端可用')
-  await invoke('export_instance_bundle', { id, dest })
+  return invoke('preview_instance_export', { id })
+}
+
+export async function exportInstanceBundle(
+  id: string,
+  dest: string,
+): Promise<RemoteBundleExportReport> {
+  if (!isDesktop) throw new Error('导出 Bundle 仅在桌面端可用')
+  return invoke('export_instance_bundle', { id, dest })
 }
 
 export async function readInstanceBundle(path: string): Promise<RemoteBundlePreview> {
@@ -676,7 +695,7 @@ export async function readInstanceBundle(path: string): Promise<RemoteBundlePrev
 export async function importInstanceBundle(
   path: string,
   manifest: RemoteInstanceManifest,
-): Promise<RemoteInstanceRecord> {
+): Promise<RemoteBundleImportOutcome> {
   if (!isDesktop) throw new Error('导入 Bundle 仅在桌面端可用')
   return invoke('import_instance_bundle', { path, manifest })
 }
@@ -799,6 +818,12 @@ export interface RemoteInstanceRecord {
     trust?: string
   }[]
   snapshots: RemoteSnapshotInfo[]
+}
+
+/** Mirrors the Rust `ImportOutcome` — the created record plus the credential names to re-enter. */
+export interface RemoteBundleImportOutcome {
+  record: RemoteInstanceRecord
+  credentials: string[]
 }
 
 /** Mirrors the Rust `SnapshotFile` — the frontend `Snapshot` shape. */

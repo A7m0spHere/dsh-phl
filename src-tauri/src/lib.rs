@@ -149,6 +149,7 @@ pub fn run() {
             instances::scan_orphan_instances,
             instances::delete_orphan_instance,
             instances::bundle::export_instance_bundle,
+            instances::bundle::preview_instance_export,
             instances::bundle::read_instance_bundle,
             instances::bundle::import_instance_bundle,
             instances::snapshot::create_instance_snapshot,

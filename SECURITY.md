@@ -25,9 +25,22 @@ PHL 是一个管理本地文件系统、下载并执行第三方代码（插件�
 
 ### 凭据与 Secret
 
-- PHL **不存储 API Key 明文**：全局供应商库只保存「环境变量名」（`apiKeyEnv`），
-  启动时由后端解析并注入子进程环境；日志不输出 Key、Authorization 头或完整 secret。
-- Bundle 导出/导入不含任何凭据；实例清单（`instance.json`）不含 secret 字段。
+- Key 本体存放在两处：全局供应商库 `config/api.json` 可以保存用户粘贴的
+  **Key 明文**（本地文件，不进实例目录、不进任何 Bundle），实例目录只持有
+  「环境变量名」（`apiKeyEnv`）——`settings.yaml` 写的是名字，启动时由后端
+  把 Key 注入子进程环境。
+- PHL 自身日志不输出 Key、Authorization 头或完整 secret；子进程（dsh）的
+  stdout/stderr 会写入实例 `logs/`，其内容由 DSH 决定，超出 PHL 的承诺范围。
+- **Bundle（格式 2）导出不含凭据值**：变量名命中全局库声明的 `apiKeyEnv`，
+  或名称含凭据字样（KEY / TOKEN / SECRET / PASS / CREDENTIAL / AUTH …）时，
+  只导出变量名并提示导入方重新配置；`PATH`、`DSH_HOME` 等机器本地变量同样
+  不导出。导入端对格式 1 旧包执行同一过滤，被剥离的凭据名在导入预览与
+  导入结果中明示。
+- 分类基于**变量名**：若把 Key 存进一个既非 `apiKeyEnv`、名称也不含凭据
+  字样的普通变量，导出不会识别它——请把 Key 交给全局供应商库，或避免把
+  secret 写入实例环境变量。
+- 实例清单（`instance.json`）没有 secret 字段；快照是 `dsh-home` 的完整
+  副本，同样只含变量名（Key 由启动时注入，不落盘到实例目录）。
 - 如果发现 secret 被写入磁盘文件、日志或 Bundle，请立即报告。
 
 ### 插件供应链

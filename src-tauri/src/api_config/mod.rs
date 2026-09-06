@@ -28,7 +28,7 @@
 //! `settings.yaml` is a machine-owned file that DSH rewrites itself, so that
 //! is the accepted trade-off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -380,6 +380,22 @@ pub(crate) async fn load_config_file(root: &Path) -> Option<ApiConfig> {
         .await
         .ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// The env-var names PHL itself knows carry credentials: every provider's
+/// `apiKeyEnv`, the exact name launch-injection puts a real key under. This
+/// is the *explicit* half of the bundle env classification — no name
+/// guessing involved — and it wins over the heuristic in `env_policy`.
+pub(crate) async fn credential_env_names(root: &Path) -> HashSet<String> {
+    match load_config_file(root).await {
+        Some(config) => config
+            .providers
+            .iter()
+            .map(|p| p.api_key_env.trim().to_ascii_uppercase())
+            .filter(|n| !n.is_empty())
+            .collect(),
+        None => HashSet::new(),
+    }
 }
 
 /// Materialize a first-version binding at instance-create time (shared by the
