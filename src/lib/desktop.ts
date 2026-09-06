@@ -18,8 +18,11 @@ import type {
  * without booting Rust.
  */
 
-export const isDesktop =
-  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as object)
+import { isDesktop } from './desktopCore'
+
+// Re-exported so existing `from '@/lib/desktop'` imports keep working while
+// the domain split (roadmap O-13) lands one interaction at a time.
+export { isDesktop }
 
 type Unlisten = () => void
 
@@ -655,30 +658,10 @@ export async function onInstanceExited(
 
 /* ------------------------------ task centre ------------------------------ */
 
-export interface TaskInfo {
-  id: string
-  kind: string
-  label: string
-  resources: string[]
-  phase: string
-  state: 'running' | 'done' | 'failed' | 'cancelled'
-  cancelRequested: boolean
-  error: string | null
-  startedAt: number
-  finishedAt: number | null
-}
-
-export interface TaskList {
-  tasks: TaskInfo[]
-  /** Resource keys currently locked — a conflict can be explained with these. */
-  held: string[]
-}
-
-/** Live and recent long tasks from the backend registry (single source). */
-export async function listTasks(): Promise<TaskList> {
-  if (!isDesktop) return { tasks: [], held: [] }
-  return invoke<TaskList>('list_tasks')
-}
+// Moved to `desktopTasks.ts` (roadmap O-13, first domain unit out of this
+// bridge): task types + listTasks re-exported unchanged.
+export { listTasks } from './desktopTasks'
+export type { TaskInfo, TaskList } from './desktopTasks'
 
 /* ---------------------------- diagnostics ----------------------------- */
 
