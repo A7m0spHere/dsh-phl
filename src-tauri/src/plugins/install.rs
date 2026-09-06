@@ -10,7 +10,7 @@ use base64::Engine;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use super::cordis::{register_cordis_patch, set_plugin_disabled};
+use super::cordis::{patch_path, register_cordis_patch, set_plugin_disabled};
 use super::resolve::{registry_id_of, resolve_source, sanitize_pkg_path};
 use super::{
     cancelled, compute_trust, sanitize_cache_name, source_kind, PluginInstallOutcome,
@@ -119,6 +119,10 @@ async fn run_plugin_install(
     let _ = tokio::fs::remove_dir_all(&staging).await;
     let _ = tokio::fs::remove_dir_all(&backup).await;
 
+    // Whether the swap put a previous copy into `backup`. Read from disk
+    // before the swap; kept in scope so the commit phase below can undo it.
+    let had_previous = dest.exists();
+
     let install_result = async {
         extract(
             &part_path,
@@ -141,11 +145,11 @@ async fn run_plugin_install(
         // existing plugin is an *update*, and a failed or cancelled extract
         // must leave the previous copy alone — the instance record still
         // points at it, and cordis.patch.yml still references it.
-        let had_previous = dest.exists() && tokio::fs::rename(&dest, &backup).await.is_ok();
+        let swapped_away = had_previous && tokio::fs::rename(&dest, &backup).await.is_ok();
         match tokio::fs::rename(&staging, &dest).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                if had_previous {
+                if swapped_away {
                     let _ = tokio::fs::rename(&backup, &dest).await;
                 }
                 Err(format!("无法放置插件目录: {e}"))
@@ -153,10 +157,7 @@ async fn run_plugin_install(
         }
     }
     .await;
-
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-    let _ = tokio::fs::remove_file(&part_path).await;
     install_result?;
 
     let trust = compute_trust(source, &resolved);
@@ -190,11 +191,60 @@ async fn run_plugin_install(
         "trust": trust,
         "bytes": downloaded.bytes,
     });
+
+    // ---- commit -------------------------------------------------------
+    // The swap above already moved the new package into place. From here
+    // cancellation is deliberately *not* a valid outcome any more: the only
+    // acceptable endings are "new install fully committed" or "old install
+    // fully restored", so the cancel flag is never consulted again. The
+    // backup and the pre-commit patch file are kept until every step below
+    // has succeeded; a failure rolls both back.
+    let patch_before = tokio::fs::read(patch_path(instance_root)).await.ok();
+    if let Err(e) = commit_install(dest.as_path(), &marker, instance_root, &registry_id).await {
+        let recovery = rollback_install(
+            instance_root,
+            &node_modules,
+            &dest,
+            &backup,
+            patch_before.as_deref(),
+            had_previous,
+        )
+        .await
+        .map(|()| "已恢复原来的插件".to_string())
+        .unwrap_or_else(|_| {
+            format!(
+                "恢复未完成，旧版本保留在 {}，请重试或手动处理",
+                backup.display()
+            )
+        });
+        let _ = tokio::fs::remove_file(&part_path).await;
+        return Err(format!("安装提交失败，{recovery}：{e}"));
+    }
+    let _ = tokio::fs::remove_dir_all(&backup).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+
+    Ok(PluginInstallOutcome {
+        version: resolved.version,
+        registry_id,
+        trust: trust.to_string(),
+    })
+}
+
+/// Everything that turns the swapped-in directory into a fully installed
+/// plugin: the on-disk record, the cordis registration, and the enabled
+/// flag. Any step failing aborts the commit — the caller rolls back to the
+/// backup so the instance never sees a half-installed plugin.
+async fn commit_install(
+    dest: &Path,
+    marker: &serde_json::Value,
+    instance_root: &Path,
+    registry_id: &str,
+) -> Result<(), String> {
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
         .await
         .map_err(|e| format!("无法写入安装记录: {e}"))?;
 
-    register_cordis_patch(instance_root, &registry_id, None)
+    register_cordis_patch(instance_root, registry_id, None)
         .await
         .map_err(|e| format!("注册 cordis.patch.yml 失败: {e}"))?;
 
@@ -202,13 +252,203 @@ async fn run_plugin_install(
     // `register_cordis_patch` leaves an existing block untouched, so without
     // this the frontend would record the plugin as enabled while DSH kept
     // refusing to load it — and the next disk scan would flip the switch back.
-    set_plugin_disabled(instance_root, &registry_id, false)
+    set_plugin_disabled(instance_root, registry_id, false)
         .await
         .map_err(|e| format!("更新 cordis.patch.yml 失败: {e}"))?;
 
-    Ok(PluginInstallOutcome {
-        version: resolved.version,
-        registry_id,
-        trust: trust.to_string(),
-    })
+    Ok(())
+}
+
+/// Undo the swap and the patch file after a failed commit, so the previous
+/// plugin (or a clean pre-install state) is what remains on disk. Each step
+/// is attempted even when the previous one failed; if the backup could not
+/// be restored, it is left in place rather than deleted — a recoverable
+/// `.phl-old-*` directory beats a silently lost previous version.
+async fn rollback_install(
+    instance_root: &Path,
+    node_modules: &Path,
+    dest: &Path,
+    backup: &Path,
+    patch_before: Option<&[u8]>,
+    had_previous: bool,
+) -> Result<(), String> {
+    let outcome = if had_previous {
+        let aside = node_modules.join(".phl-reject");
+        let _ = tokio::fs::remove_dir_all(&aside).await;
+        if tokio::fs::rename(dest, &aside).await.is_ok() {
+            if tokio::fs::rename(backup, dest).await.is_ok() {
+                let _ = tokio::fs::remove_dir_all(&aside).await;
+                Ok(())
+            } else {
+                // Could not restore the backup — put the new copy back so at
+                // least *something* loads, and leave the backup untouched.
+                let _ = tokio::fs::rename(&aside, dest).await;
+                Err("无法放回旧版本目录".to_string())
+            }
+        } else {
+            Err("无法移开新版本目录".to_string())
+        }
+    } else {
+        match tokio::fs::remove_dir_all(dest).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("无法移除未提交的新版本目录: {e}")),
+        }
+    };
+    match patch_before {
+        Some(bytes) => {
+            let _ = tokio::fs::write(patch_path(instance_root), bytes).await;
+        }
+        // No patch file existed before; a partial commit may have created one.
+        None => {
+            let _ = tokio::fs::remove_file(patch_path(instance_root)).await;
+        }
+    }
+    outcome
+}
+
+/* ------------------------------ tests ------------------------------ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("phl-plugin-install-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fixture(tag: &str, with_previous: bool) -> HashMap<&'static str, std::path::PathBuf> {
+        let instance = temp_root(tag);
+        let node_modules = instance.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        let dest = node_modules.join("dsh-foo");
+        let backup = node_modules.join(".phl-old-dsh-foo");
+        if with_previous {
+            std::fs::create_dir_all(&backup).unwrap();
+            std::fs::write(backup.join("old.js"), "old code").unwrap();
+        }
+        // The swap already happened: `dest` holds the new package.
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("new.js"), "new code").unwrap();
+        HashMap::from([
+            ("instance", instance),
+            ("node_modules", node_modules),
+            ("dest", dest),
+            ("backup", backup),
+        ])
+    }
+
+    #[tokio::test]
+    async fn commit_writes_record_registration_and_enabled_state() {
+        let f = fixture("commit", false);
+        let marker = serde_json::json!({"version": "1.2.3"});
+        commit_install(&f["dest"], &marker, &f["instance"], "dsh-foo")
+            .await
+            .unwrap();
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(f["dest"].join("phl-plugin.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["version"], "1.2.3");
+        let patch = std::fs::read_to_string(patch_path(&f["instance"])).unwrap();
+        assert!(patch.contains("- id: dsh-foo"));
+        assert!(!patch.contains("disabled: true"));
+    }
+
+    #[tokio::test]
+    async fn marker_write_failure_aborts_before_touching_cordis() {
+        let f = fixture("marker-fail", false);
+        // Deterministic failure on every platform: `phl-plugin.json` is a
+        // directory, so writing it as a file must fail.
+        std::fs::create_dir(f["dest"].join("phl-plugin.json")).unwrap();
+        let err = commit_install(
+            &f["dest"],
+            &serde_json::json!({}),
+            &f["instance"],
+            "dsh-foo",
+        )
+        .await
+        .expect_err("commit must fail");
+        assert!(err.contains("安装记录"), "unexpected error: {err}");
+        // The commit aborts at the first step: the patch file is never created.
+        assert!(!patch_path(&f["instance"]).exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_previous_package_and_old_state() {
+        let f = fixture("rollback", true);
+        let patch_before = b"- id: dsh-foo\n  name: dsh-foo\n  disabled: true\n";
+        std::fs::write(patch_path(&f["instance"]), patch_before).unwrap();
+        rollback_install(
+            &f["instance"],
+            &f["node_modules"],
+            &f["dest"],
+            &f["backup"],
+            Some(patch_before),
+            true,
+        )
+        .await
+        .expect("rollback should fully restore the previous package");
+        // The old package is back in place, byte-for-byte; the failed new
+        // copy is gone; the backup no longer litters node_modules.
+        assert_eq!(
+            std::fs::read(f["dest"].join("old.js")).unwrap(),
+            b"old code"
+        );
+        assert!(!f["dest"].join("new.js").exists());
+        assert!(!f["backup"].exists());
+        assert!(!f["node_modules"].join(".phl-reject").exists());
+        // The pre-commit disabled state survives the failed install.
+        let patch = std::fs::read_to_string(patch_path(&f["instance"])).unwrap();
+        assert!(patch.contains("disabled: true"));
+    }
+
+    #[tokio::test]
+    async fn rollback_of_fresh_install_removes_new_package_and_patch() {
+        let f = fixture("rollback-fresh", false);
+        // A partial commit created the patch file after there was none before.
+        std::fs::write(
+            patch_path(&f["instance"]),
+            "- id: dsh-foo\n  name: dsh-foo\n",
+        )
+        .unwrap();
+        rollback_install(
+            &f["instance"],
+            &f["node_modules"],
+            &f["dest"],
+            &f["backup"],
+            None,
+            false,
+        )
+        .await
+        .expect("fresh-install rollback should fully clean up");
+        assert!(!f["dest"].exists());
+        assert!(!patch_path(&f["instance"]).exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_keeps_backup_when_restore_fails() {
+        // Simulate the backup directory being unrecoverable: it was already
+        // deleted by an outside hand. The old package must NOT be destroyed
+        // and the backup path must not be reported as consumed.
+        let f = fixture("rollback-keep", true);
+        std::fs::remove_dir_all(&f["backup"]).unwrap();
+        rollback_install(
+            &f["instance"],
+            &f["node_modules"],
+            &f["dest"],
+            &f["backup"],
+            None,
+            true,
+        )
+        .await
+        .expect_err("a lost backup must be reported, not papered over");
+        // dest holds the new copy again (rename aside -> rename backup fails
+        // -> rename aside back), nothing is silently deleted.
+        assert!(f["dest"].join("new.js").exists());
+    }
 }

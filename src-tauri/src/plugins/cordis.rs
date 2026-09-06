@@ -16,7 +16,7 @@ use crate::paths::PhlState;
 // — comments and unrelated entries (including DSH's own) survive untouched,
 // which a serde_yaml round-trip would not guarantee.
 
-fn patch_path(instance_root: &Path) -> PathBuf {
+pub(crate) fn patch_path(instance_root: &Path) -> PathBuf {
     instance_root.join("cordis.patch.yml")
 }
 
