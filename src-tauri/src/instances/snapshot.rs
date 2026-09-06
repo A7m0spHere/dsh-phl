@@ -79,8 +79,11 @@ pub(crate) fn ensure_not_running(processes: &Processes, id: &str) -> Result<(), 
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_instance_snapshot(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     transfer_id: String,
@@ -88,9 +91,26 @@ pub async fn create_instance_snapshot(
     on_progress: Channel<CloneProgress>,
 ) -> Result<SnapshotFile, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
-        let _ = on_progress.send(p);
-    })
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "snapshot-create",
+        format!("创建快照 {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |task| async move {
+            task.set_phase("copying");
+            let r = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
+                let _ = on_progress.send(p);
+            })
+            .await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
+    )
     .await;
     transfers.release(&transfer_id);
     result
@@ -185,12 +205,26 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 /// and rolling back to the same point twice must not be a trap.
 #[tauri::command]
 pub async fn restore_instance_snapshot(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<InstanceRecord, String> {
-    restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("snapshot-restore"),
+        "snapshot-restore",
+        format!("恢复快照 {snapshot_id} → {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+        },
+    )
+    .await
 }
 
 pub(crate) async fn restore_snapshot_inner(
@@ -248,12 +282,26 @@ pub(crate) async fn restore_snapshot_inner(
 
 #[tauri::command]
 pub async fn delete_instance_snapshot(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
-    delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("snapshot-delete"),
+        "snapshot-delete",
+        format!("删除快照 {snapshot_id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+        },
+    )
+    .await
 }
 
 pub(crate) async fn delete_snapshot_inner(

@@ -109,15 +109,33 @@ pub struct MoveSummary {
 #[tauri::command]
 pub async fn move_root_data(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     transfer_id: String,
     from: String,
     to: String,
     on_progress: Channel<MoveProgress>,
 ) -> Result<MoveSummary, String> {
     let flag = transfers.take(&transfer_id);
-    let result = move_root_inner(&flag, Path::new(&from), Path::new(&to), &|p| {
-        let _ = on_progress.send(p);
-    })
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "root-migration",
+        format!("迁移数据目录 → {to}"),
+        vec![crate::resources::Resource::DataRoot],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |_task| async move {
+            let r = move_root_inner(&flag, Path::new(&from), Path::new(&to), &|p| {
+                let _ = on_progress.send(p);
+            })
+            .await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
+    )
     .await;
     transfers.release(&transfer_id);
     result

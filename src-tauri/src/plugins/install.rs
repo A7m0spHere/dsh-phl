@@ -17,6 +17,7 @@ use super::{
     PluginProgressEvent, PluginSourceWire,
 };
 use crate::paths::PhlState;
+use crate::resources::{guarded, Resource, ResourceLocks, Tasks};
 use crate::versions::{download, extract, now_iso, verify_integrity, Transfers};
 
 /* ------------------------------ install ------------------------------ */
@@ -25,6 +26,8 @@ use crate::versions::{download, extract, now_iso, verify_integrity, Transfers};
 #[allow(clippy::too_many_arguments)]
 pub async fn install_plugin(
     transfers: State<'_, Transfers>,
+    locks: State<'_, ResourceLocks>,
+    tasks: State<'_, Tasks>,
     phl: State<'_, PhlState>,
     transfer_id: String,
     plugin_id: String,
@@ -38,22 +41,44 @@ pub async fn install_plugin(
     // the manifest's profile is the authority, not a path from the WebView.
     let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
     let flag = transfers.take(&transfer_id);
-    let result = run_plugin_install(
-        &flag,
-        &plugin_id,
-        &source,
-        version.as_deref(),
-        &registry_base,
-        &profile,
-        &on_progress,
+    let result = guarded(
+        transfer_id.clone(),
+        "plugin-install",
+        format!("安装插件 {plugin_id}"),
+        vec![Resource::Instance(instance_id.clone())],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |task| async move {
+            let r = run_plugin_install(
+                &flag,
+                &task,
+                &plugin_id,
+                &source,
+                version.as_deref(),
+                &registry_base,
+                &profile,
+                &on_progress,
+            )
+            .await;
+            // A user abort must surface as `cancelled` regardless of which
+            // step noticed the flag first — the task registry maps that exact
+            // string to a cancellation, and anything else to a failure.
+            if cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
     )
     .await;
     transfers.release(&transfer_id);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_plugin_install(
     flag: &Arc<AtomicBool>,
+    task: &crate::resources::Task,
     plugin_id: &str,
     source: &PluginSourceWire,
     requested_version: Option<&str>,
@@ -67,6 +92,7 @@ async fn run_plugin_install(
     let registry_id = registry_id_of(source);
     let registry_id = sanitize_pkg_path(&registry_id)?;
 
+    task.set_phase("resolving");
     let resolved = resolve_source(source, requested_version, registry_base, on_progress).await?;
     if cancelled(flag) {
         return Err("cancelled".into());
@@ -78,6 +104,7 @@ async fn run_plugin_install(
         .await
         .map_err(|e| format!("无法创建缓存目录: {e}"))?;
     let part_path = cache_dir.join(format!("{}.part", sanitize_cache_name(&registry_id)));
+    task.set_phase("downloading");
     let downloaded = download(
         flag,
         &resolved.url,
@@ -101,6 +128,7 @@ async fn run_plugin_install(
         }
     };
 
+    task.set_phase("verifying");
     let _ = on_progress.send(PluginProgressEvent::Verifying);
     if let Err(e) = verify_integrity(&downloaded.sha512, resolved.integrity.as_deref()) {
         let _ = tokio::fs::remove_file(&part_path).await;
@@ -123,6 +151,7 @@ async fn run_plugin_install(
     // before the swap; kept in scope so the commit phase below can undo it.
     let had_previous = dest.exists();
 
+    task.set_phase("extracting");
     let install_result = async {
         extract(
             &part_path,
@@ -199,6 +228,7 @@ async fn run_plugin_install(
     // fully restored", so the cancel flag is never consulted again. The
     // backup and the pre-commit patch file are kept until every step below
     // has succeeded; a failure rolls both back.
+    task.set_phase("committing");
     let patch_before = tokio::fs::read(patch_path(instance_root)).await.ok();
     if let Err(e) = commit_install(dest.as_path(), &marker, instance_root, &registry_id).await {
         let recovery = rollback_install(

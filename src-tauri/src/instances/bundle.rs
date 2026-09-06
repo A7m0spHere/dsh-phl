@@ -208,11 +208,24 @@ pub(crate) async fn read_bundle_inner(root: &Path, path: &str) -> Result<BundleP
 
 #[tauri::command]
 pub async fn import_instance_bundle(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     path: String,
     manifest: InstanceManifest,
 ) -> Result<ImportOutcome, String> {
-    import_instance_bundle_inner(&state.root(), &path, manifest).await
+    let label_id = manifest.id.clone();
+    crate::resources::guarded(
+        crate::resources::next_task_id("bundle-import"),
+        "bundle-import",
+        format!("导入 Bundle 为实例 {label_id}"),
+        vec![crate::resources::Resource::Instance(label_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { import_instance_bundle_inner(&state.root(), &path, manifest).await },
+    )
+    .await
 }
 
 /// What an import produced plus the credential names the user must

@@ -176,10 +176,23 @@ pub(crate) async fn list_instances_inner(root: &Path) -> Result<Vec<InstanceReco
 
 #[tauri::command]
 pub async fn create_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
-    create_instance_inner(&state.root(), manifest).await
+    let label_id = manifest.id.clone();
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-create"),
+        "instance-create",
+        format!("创建实例 {label_id}"),
+        vec![crate::resources::Resource::Instance(label_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { create_instance_inner(&state.root(), manifest).await },
+    )
+    .await
 }
 
 pub(crate) async fn create_instance_inner(
@@ -213,10 +226,23 @@ pub(crate) async fn apply_api_at_create(
 
 #[tauri::command]
 pub async fn save_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     manifest: InstanceManifest,
 ) -> Result<(), String> {
-    save_instance_inner(&state.root(), manifest).await
+    let label_id = manifest.id.clone();
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-save"),
+        "instance-save",
+        format!("保存实例 {label_id}"),
+        vec![crate::resources::Resource::Instance(label_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { save_instance_inner(&state.root(), manifest).await },
+    )
+    .await
 }
 
 async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<(), String> {
@@ -230,11 +256,23 @@ async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<
 
 #[tauri::command]
 pub async fn delete_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
 ) -> Result<(), String> {
-    delete_instance_inner(&state.root(), &id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-delete"),
+        "instance-delete",
+        format!("删除实例 {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { delete_instance_inner(&state.root(), &id, &processes).await },
+    )
+    .await
 }
 
 async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> Result<(), String> {
@@ -256,8 +294,11 @@ async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> 
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn clone_instance(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     transfer_id: String,
     source_id: String,
@@ -265,7 +306,27 @@ pub async fn clone_instance(
     on_progress: Channel<CloneProgress>,
 ) -> Result<InstanceRecord, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_clone(&flag, &state.root(), &source_id, manifest, &on_progress).await;
+    let new_id = manifest.id.clone();
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "instance-clone",
+        format!("克隆实例 {source_id} → {new_id}"),
+        vec![
+            crate::resources::Resource::Instance(source_id.clone()),
+            crate::resources::Resource::Instance(new_id),
+        ],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        move |_| async move {
+            let r = run_clone(&flag, &state.root(), &source_id, manifest, &on_progress).await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
+    )
+    .await;
     transfers.release(&transfer_id);
     result
 }

@@ -10,6 +10,7 @@ mod launch;
 mod paths;
 mod plugins;
 mod repair;
+mod resources;
 mod runtimes;
 mod storage;
 mod verify;
@@ -118,12 +119,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(versions::Transfers::default())
+        .manage(resources::ResourceLocks::default())
+        .manage(resources::Tasks::default())
         .manage(launch::Launches::default())
         .manage(launch::Processes::default())
         .manage(paths::PhlState::load())
         .manage(credentials::Creds::platform_default())
         .invoke_handler(tauri::generate_handler![
             app_ready,
+            resources::list_tasks,
             exit_app,
             open_external,
             reveal_path,

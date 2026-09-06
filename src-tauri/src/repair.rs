@@ -60,11 +60,23 @@ pub async fn scan_residue(phl: State<'_, PhlState>) -> Result<Vec<ResidueItem>, 
 
 #[tauri::command]
 pub async fn repair_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     instance_id: String,
     actions: Vec<String>,
 ) -> Result<RepairOutcome, String> {
-    repair_instance_inner(&phl.root(), &instance_id, &actions).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-repair"),
+        "instance-repair",
+        format!("修复实例 {instance_id}"),
+        vec![crate::resources::Resource::Instance(instance_id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { repair_instance_inner(&phl.root(), &instance_id, &actions).await },
+    )
+    .await
 }
 
 pub(crate) async fn scan_residue_inner(root: &Path) -> Result<Vec<ResidueItem>, String> {
