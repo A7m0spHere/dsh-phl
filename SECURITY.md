@@ -41,14 +41,19 @@ PHL 是一个管理本地文件系统、下载并执行第三方代码（插件�
   secret 写入实例环境变量。
 - 实例清单（`instance.json`）没有 secret 字段；快照是 `dsh-home` 的完整
   副本，同样只含变量名（Key 由启动时注入，不落盘到实例目录）。
+- 应用状态文件（数据根指针 `root.json`、迁移日志 `migration.json`、进程登记
+  `processes.json`，均位于用户配置目录的 `PHL/` 下、数据根之外）只保存路径、目录名、
+  字节数与 PID 等元数据，不含任何凭据值。
 - 如果发现 secret 被写入磁盘文件、日志或 Bundle，请立即报告。
 
 ### 插件供应链
 
 - 插件是任意第三方 npm 包 / GitHub 归档，**安装即执行其声明的一切**——PHL 目前
   的信任边界是「实例内隔离」，不存在沙箱。安装前请审查来源。
-- npm 安装校验 registry `dist.integrity`（sha512）；GitHub HEAD 归档目前**没有**
-  完整性保障，这是已知且在改进中的缺口（pin/commit SHA 固定尚未实现）。
+- npm 安装校验 registry `dist.integrity`（sha512）；GitHub 来源在固定到 tag/commit 时
+  解析出确切 commit 并对下载内容计算 sha512（`actualIntegrity` 写入安装标记，来源与
+  信任状态一并记录）。HEAD（未固定）归档没有可校验的内容承诺，安装标记会记为
+  `unverified`——需要完整性保障时，请把插件固定到 tag 或 commit 再安装。
 - 插件注册表数据（`plugins.json`、截图链接）来自社区，打开外部链接前请自行确认。
 
 ### 更新与发布完整性（Updater / Release integrity）
