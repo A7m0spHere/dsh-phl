@@ -189,7 +189,10 @@ pub(crate) fn allocate_port(
             .iter()
             .find(|(id, e)| e.port == wanted && id.as_str() != instance_id)
         {
-            return Err(format!("端口 {wanted} 已被实例 {other} 占用"));
+            return Err(crate::errors::coded(
+                crate::errors::ErrCode::PortConflict,
+                format!("端口 {wanted} 已被实例 {other} 占用"),
+            ));
         }
         // The bind test is not optional here either. Checking only PHL's own
         // map meant a port held by an unrelated program passed: DSH then failed

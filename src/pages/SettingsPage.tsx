@@ -132,6 +132,33 @@ export function SettingsPage() {
       .finally(() => setDiagLoading(false))
   }
 
+  /**
+   * Copy the diagnostic report as plain text (roadmap O-09: an export that
+   * can be pasted into a bug report). The report is built entirely from
+   * existence/size checks — it carries no credential values and no instance
+   * env — which is the desensitisation boundary SECURITY.md states.
+   */
+  const copyDiagnostics = async () => {
+    if (!report) return
+    const lines = [
+      `PHL 诊断报告 · ${formatDateTime(report.generatedAt)}`,
+      `数据目录: ${report.root}`,
+      ...report.items.map(
+        (item) => `[${item.level.toUpperCase()}] ${item.label}${item.detail ? ` — ${item.detail}` : ''}`,
+      ),
+    ]
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      ui.toast({ kind: 'success', title: '诊断报告已复制', message: '内容不含任何密钥或环境变量值。' })
+    } catch {
+      ui.toast({
+        kind: 'error',
+        title: '复制失败',
+        message: '系统剪贴板不可用；请截图或逐项转述检查结果。',
+      })
+    }
+  }
+
   const clearCache = async () => {
     if (!report) return
     const ok = await ui.confirm({
@@ -867,14 +894,21 @@ export function SettingsPage() {
                       : '检查数据目录、版本与 Runtime 完整性、实例引用与下载缓存。'}
                   </div>
                 </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={diagLoading}
-                  onClick={rerunDiagnostics}
-                >
-                  {diagLoading ? '检查中…' : '重新检查'}
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {report && (
+                    <Button variant="ghost" size="sm" onClick={() => void copyDiagnostics()}>
+                      复制报告
+                    </Button>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={diagLoading}
+                    onClick={rerunDiagnostics}
+                  >
+                    {diagLoading ? '检查中…' : '重新检查'}
+                  </Button>
+                </div>
               </div>
             </PageSection>
 

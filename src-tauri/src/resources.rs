@@ -278,6 +278,11 @@ impl Task {
             .unwrap_or(false)
     }
 
+    /// Id only for log lines — the row itself lives in the registry.
+    pub fn id_for_log(&self) -> &str {
+        &self.id
+    }
+
     pub fn set_phase(&self, phase: &str) {
         if let Some(info) = self.inner.lock().expect("tasks").get_mut(&self.id) {
             info.phase = phase.to_string();
@@ -359,11 +364,20 @@ pub async fn guarded<T, Fut>(
 where
     Fut: Future<Output = Result<T, String>>,
 {
-    let _held = locks.acquire(&resources).map_err(|c| c.to_string())?;
+    let _held = locks
+        .acquire(&resources)
+        .map_err(|c| crate::errors::coded(crate::errors::ErrCode::Busy, c))?;
     let info = TaskInfo::new(id, kind, label.into(), &resources);
     let task = tasks.begin(info, flag)?;
+    // Correlation line: every later diagnostic that mentions the instance or
+    // transfer id can be tied back to this task by grepping the id (O-09).
+    eprintln!("[phl][task {}] {kind} 开始", task.id_for_log());
     let outcome = f(task.clone()).await;
     task.finish(outcome.as_ref().map(|_| ()).map_err(|e| e.clone()));
+    match &outcome {
+        Ok(_) => eprintln!("[phl][task {}] {kind} 完成", task.id_for_log()),
+        Err(e) => eprintln!("[phl][task {}] {kind} 失败: {e}", task.id_for_log()),
+    }
     // `_held` releases here, after the outcome is recorded: a waiter seeing
     // the task finish never races a still-locked resource.
     drop(_held);

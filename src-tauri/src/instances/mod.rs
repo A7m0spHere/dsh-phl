@@ -301,9 +301,9 @@ async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> 
     // delete would leave a half-deleted tree behind a live process.
     snapshot::ensure_not_running(processes, id)?;
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| format!("无法删除实例目录: {e}"))?;
+        tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
+            crate::errors::coded(crate::errors::io_code(&e), format!("无法删除实例目录: {e}"))
+        })?;
     }
     Ok(())
 }
@@ -625,7 +625,10 @@ async fn run_clone(
 ) -> Result<InstanceRecord, String> {
     let source = instance_dir(root, source_id)?;
     if !manifest_path(&source).exists() {
-        return Err(format!("源实例不存在: {source_id}"));
+        return Err(crate::errors::coded(
+            crate::errors::ErrCode::NotFound,
+            format!("源实例不存在: {source_id}"),
+        ));
     }
     let id = sanitize_segment(&manifest.id, "实例 id")?;
     let dest = instance_dir(root, &id)?;

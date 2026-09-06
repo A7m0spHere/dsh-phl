@@ -5,6 +5,7 @@ use tauri::{Emitter, Manager, WindowEvent};
 mod api_config;
 mod credentials;
 mod diagnostics;
+mod errors;
 mod instances;
 mod launch;
 mod paths;

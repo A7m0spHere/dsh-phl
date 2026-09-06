@@ -5,6 +5,7 @@ import { useUIStore } from './uiStore'
 import { useInstanceStore } from './instanceStore'
 import { useSettingsStore } from './settingsStore'
 import { detectPendingChanges, loadPendingSet, savePendingSet } from '@/lib/pendingReleases'
+import { parseThrownError } from '@/lib/errorCodes'
 
 /**
  * Every settled version-catalog fetch runs through here: GitHub-only rows
@@ -349,7 +350,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         patch({ kind: 'available' })
         useUIStore.getState().toast({ kind: 'info', title: `已取消下载 ${version.name}` })
       } else {
-        const reason = err instanceof Error && err.message ? err.message : '下载中断，未能校验完整性'
+        const parsed = parseThrownError(err)
+        const reason =
+          (parsed.code ? `${parsed.message}（${parsed.hint}）` : parsed.message) ||
+          '下载中断，未能校验完整性'
         patch({ kind: 'failed', reason })
         useUIStore.getState().toast({
           kind: 'error',
@@ -373,13 +377,12 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     } catch (err) {
       console.warn('[phl] removeVersion failed:', err)
       // Tauri rejections arrive as plain strings — `instanceof Error` would
-      // drop the backend's actual reason and show the generic fallback.
-      const message =
-        typeof err === 'string' && err.trim()
-          ? err
-          : err instanceof Error && err.message
-            ? err.message
-            : '版本目录无法移除，可能被其他程序占用。'
+      // drop the backend's actual reason and show the generic fallback. The
+      // backend codes common failures; surface the hint next to the message.
+      const parsed = parseThrownError(err)
+      const message = parsed.code
+        ? `${parsed.message}（${parsed.hint}）`
+        : parsed.message || '版本目录无法移除，可能被其他程序占用。'
       useUIStore.getState().toast({
         kind: 'error',
         title: '删除版本失败',

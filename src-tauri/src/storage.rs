@@ -406,9 +406,12 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         }
         Some(j) if j.from == from.to_string_lossy() && j.to == to.to_string_lossy() => j,
         Some(j) => {
-            return Err(format!(
-                "存在未完成的迁移 {} → {}，请先在设置中继续或撤销它",
-                j.from, j.to
+            return Err(crate::errors::coded(
+                crate::errors::ErrCode::State,
+                format!(
+                    "存在未完成的迁移 {} → {}，请先在设置中继续或撤销它",
+                    j.from, j.to
+                ),
             ))
         }
         None => {

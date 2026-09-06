@@ -202,9 +202,12 @@ async fn download_attempt<F: Fn(f64, u64, u64) + Send + Sync>(
         // the prefix overran the entity. Either way continue without Range.
         return finish_from_existing(flag, url, part_path, sidecar, total_hint, on_tick).await;
     }
-    let response = response
-        .error_for_status()
-        .map_err(|e| Failure::Fatal(format!("下载源返回错误: {e}")))?;
+    let response = response.error_for_status().map_err(|e| {
+        Failure::Fatal(crate::errors::coded(
+            crate::errors::ErrCode::NetFatal,
+            format!("下载源返回错误: {e}"),
+        ))
+    })?;
 
     let etag = response
         .headers()
@@ -242,9 +245,12 @@ async fn download_attempt<F: Fn(f64, u64, u64) + Send + Sync>(
             have,
         )
     } else {
-        let f = tokio::fs::File::create(part_path)
-            .await
-            .map_err(|e| Failure::Fatal(format!("无法创建缓存文件: {e}")))?;
+        let f = tokio::fs::File::create(part_path).await.map_err(|e| {
+            Failure::Fatal(crate::errors::coded(
+                crate::errors::io_code(&e),
+                format!("无法创建缓存文件: {e}"),
+            ))
+        })?;
         save_sidecar(
             sidecar,
             &ResumeMeta {
@@ -283,9 +289,12 @@ async fn download_attempt<F: Fn(f64, u64, u64) + Send + Sync>(
                         }
                         if last_chunk_at.elapsed() >= IDLE_LIMIT {
                             let _ = file.shutdown().await;
-                            return Err(Failure::Retryable(format!(
-                                "下载停滞超过 {} 秒，已断开（可续传重试）",
-                                IDLE_LIMIT.as_secs()
+                            return Err(Failure::Retryable(crate::errors::coded(
+                                crate::errors::ErrCode::NetRetryable,
+                                format!(
+                                    "下载停滞超过 {} 秒，已断开（可续传重试）",
+                                    IDLE_LIMIT.as_secs()
+                                ),
                             )));
                         }
                     }
@@ -301,16 +310,25 @@ async fn download_attempt<F: Fn(f64, u64, u64) + Send + Sync>(
                 // the last clean flush; retry from scratch. Everything else
                 // network-shaped keeps the prefix.
                 return Err(if e.is_decode() {
-                    Failure::RetryFresh(format!("下载内容解码失败: {e}"))
+                    Failure::RetryFresh(crate::errors::coded(
+                        crate::errors::ErrCode::NetRetryable,
+                        format!("下载内容解码失败: {e}"),
+                    ))
                 } else {
-                    Failure::Retryable(format!("下载中断: {e}"))
+                    Failure::Retryable(crate::errors::coded(
+                        crate::errors::ErrCode::NetRetryable,
+                        format!("下载中断: {e}"),
+                    ))
                 });
             }
         };
         last_chunk_at = Instant::now();
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| Failure::Fatal(format!("写入缓存失败: {e}")))?;
+        file.write_all(&chunk).await.map_err(|e| {
+            Failure::Fatal(crate::errors::coded(
+                crate::errors::io_code(&e),
+                format!("写入缓存失败: {e}"),
+            ))
+        })?;
         bytes_done += chunk.len() as u64;
 
         let elapsed = last_report.elapsed();
@@ -371,12 +389,18 @@ async fn send_cancellable(
         match tokio::time::timeout(POLL, &mut send).await {
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(e)) => {
-                return Err(if e.is_connect() || e.is_request() || e.is_timeout() {
-                    Failure::Retryable(format!("下载失败: {e}"))
-                } else if e.is_status() {
-                    Failure::Fatal(format!("下载源返回错误: {e}"))
+                return Err(if e.is_status() {
+                    Failure::Fatal(crate::errors::coded(
+                        crate::errors::ErrCode::NetFatal,
+                        format!("下载源返回错误: {e}"),
+                    ))
                 } else {
-                    Failure::Retryable(format!("下载失败: {e}"))
+                    // connect / request / timeout / unknown are all transient
+                    // from the caller's point of view.
+                    Failure::Retryable(crate::errors::coded(
+                        crate::errors::ErrCode::NetRetryable,
+                        format!("下载失败: {e}"),
+                    ))
                 });
             }
             Err(_elapsed) => {
