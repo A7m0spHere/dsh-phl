@@ -92,7 +92,7 @@ export function RuntimesPage() {
           {runtimes.map((r) => {
             const state = r.state
             const installed = state.kind === 'installed'
-            const busy = ['downloading', 'extracting'].includes(state.kind)
+            const busy = ['queued', 'downloading', 'extracting'].includes(state.kind)
             const users = usedBy.get(r.id) ?? []
             return (
               <motion.li key={r.id} variants={riseItem}>
@@ -185,7 +185,9 @@ export function RuntimesPage() {
                                   state.progress > 0
                                   ? `${formatBytes(state.bytesDone)} / ${formatBytes(state.bytesDone / state.progress)}`
                                   : `${formatBytes(state.bytesDone)}（总大小未知）`
-                                : '正在解压…'}
+                                : state.kind === 'queued'
+                                  ? '排队中，等待传输槽位…'
+                                  : '正在解压…'}
                             </span>
                             <span className="num">
                               {state.kind === 'downloading' ? formatSpeed(state.bytesPerSec) : ''}

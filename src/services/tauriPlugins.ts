@@ -56,7 +56,15 @@ function fallbackRegistryId(installed: InstalledPlugin): string {
 async function listPlugins(): Promise<PluginCatalog> {
   try {
     const remote = await desktop.listDshPlugins(catalogBase())
-    return { plugins: remote.map((meta) => ({ ...meta, category: meta.category as Plugin['category'] })) }
+    return {
+      plugins: remote.plugins.map((meta) => ({ ...meta, category: meta.category as Plugin['category'] })),
+      origin: {
+        servedFrom: remote.servedFrom,
+        usedFallback: remote.usedFallback,
+        fromCache: remote.fromCache,
+        updated: remote.updated,
+      },
+    }
   } catch (err) {
     // The Rust side already tried every mirror plus its on-disk cache. The
     // bundled seed is *demo* data — packages like `@dsh-core/routing-suite`

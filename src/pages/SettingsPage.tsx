@@ -11,14 +11,14 @@ import {
   cancelTransfer,
   desktop,
   freeSpace,
+  migrationStatus,
+  migrationUndo,
   moveRootData,
+  type MigrationJournal,
   rootDataSummary,
-  runDiagnostics,
-  clearDownloadCache,
-  type DiagnosticReport,
   type MoveProgress,
 } from '@/lib/desktop'
-import { formatBytes, formatDateTime } from '@/lib/format'
+import { formatBytes } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
 import { repository } from '@/services'
 import {
@@ -50,6 +50,7 @@ import { Logo } from '@/components/layout/Logo'
 
 import { AccentPicker, InstanceColourLegend } from '@/features/settings/appearance'
 import { MigrationOverlay } from '@/features/settings/MigrationOverlay'
+import { DiagnosticsSection } from '@/features/settings/DiagnosticsSection'
 import { ROOT_PRESETS, SECTIONS } from '@/features/settings/consts'
 
 export function SettingsPanel() {
@@ -97,63 +98,6 @@ export function SettingsPage() {
     void measureDiskUsage()
     void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
   }, [section, measureDiskUsage])
-
-  /**
-   * 诊断报告只在进入本分区时（或用户点了重新检查）生成：全部是廉价的存在性
-   * 探测，但没必要在打开设置页时就跑。
-   */
-  const [report, setReport] = useState<DiagnosticReport | null>(null)
-  const [diagLoading, setDiagLoading] = useState(false)
-  const [cacheBusy, setCacheBusy] = useState(false)
-
-  useEffect(() => {
-    if (section !== 'diagnostics' || !desktop.isDesktop) return
-    setDiagLoading(true)
-    void runDiagnostics()
-      .then(setReport, () => setReport(null))
-      .finally(() => setDiagLoading(false))
-  }, [section, settings.root])
-
-  const rerunDiagnostics = () => {
-    if (!desktop.isDesktop || diagLoading) return
-    setDiagLoading(true)
-    void runDiagnostics()
-      .then(setReport, (err) => {
-        setReport(null)
-        ui.toast({
-          kind: 'error',
-          title: '诊断失败',
-          message: err instanceof Error ? err.message : String(err),
-        })
-      })
-      .finally(() => setDiagLoading(false))
-  }
-
-  const clearCache = async () => {
-    if (!report) return
-    const ok = await ui.confirm({
-      title: '清理下载缓存',
-      message: '删除下载残留（.part）与保留的压缩包。它们只用于加速重装，不影响任何已安装的版本、Runtime 与实例。',
-      detail: `将释放 ${formatBytes(report.cacheBytes)}`,
-      tone: 'danger',
-      confirmLabel: '清理',
-    })
-    if (!ok) return
-    setCacheBusy(true)
-    try {
-      const freed = await clearDownloadCache()
-      ui.toast({ kind: 'success', title: '缓存已清理', message: `释放 ${formatBytes(freed)}` })
-      rerunDiagnostics()
-    } catch (err) {
-      ui.toast({
-        kind: 'error',
-        title: '清理缓存失败',
-        message: err instanceof Error ? err.message : String(err),
-      })
-    } finally {
-      setCacheBusy(false)
-    }
-  }
 
   const dropOrphan = async (name: string, size: number) => {
     const ok = await ui.confirm({
@@ -227,6 +171,48 @@ export function SettingsPage() {
   const [migration, setMigration] = useState<null | { from: string; to: string; transferId: string }>(null)
   const [moveProgress, setMoveProgress] = useState<MoveProgress | null>(null)
 
+  /**
+   * A migration cancelled or interrupted by a crash leaves its journal
+   * behind; entering the storage view surfaces it as 继续 / 撤销 (O-06),
+   * so the half-moved directories are never a silent dead end.
+   */
+  const [openJournal, setOpenJournal] = useState<MigrationJournal | null>(null)
+  const [journalBusy, setJournalBusy] = useState<'resume' | 'undo' | null>(null)
+  useEffect(() => {
+    if (section !== 'storage') return
+    void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
+  }, [section])
+
+  const clearJournal = () => void setOpenJournal(null)
+
+  const undoOpenMigration = async () => {
+    if (!openJournal) return
+    const ok = await ui.confirm({
+      title: '撤销未完成的迁移',
+      message: '已复制到新目录的数据将全部搬回旧目录，新目录恢复迁移前的状态。期间不要移动这两个目录。',
+      detail: `${openJournal.from}\n  ↑\n${openJournal.to}`,
+      tone: 'danger',
+      confirmLabel: '撤销迁移',
+    })
+    if (!ok) return
+    setJournalBusy('undo')
+    try {
+      await migrationUndo()
+      ui.toast({ kind: 'success', title: '迁移已撤销', message: '数据已回到旧目录。' })
+      clearJournal()
+      await useInstanceStore.getState().reload().catch(() => undefined)
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '撤销失败',
+        message: err instanceof Error && err.message ? err.message : String(err),
+        duration: 8000,
+      })
+    } finally {
+      setJournalBusy(null)
+    }
+  }
+
   const beginMigration = async (from: string, to: string) => {
     const transferId = `move-${Date.now()}`
     setMigration({ from, to, transferId })
@@ -237,9 +223,10 @@ export function SettingsPage() {
         ui.toast({
           kind: 'info',
           title: '迁移已取消',
-          message: `已完成 ${formatBytes(summary.bytes)}，数据目录未更改。已搬走的部分保留在新目录，重新迁移会自动续传剩余部分。`,
+          message: `已完成 ${formatBytes(summary.bytes)}，数据目录未更改。进度已记录，可在「存储」页继续或撤销。`,
           duration: 6000,
         })
+        void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
         return
       }
       await switchRootTo(to)
@@ -262,6 +249,9 @@ export function SettingsPage() {
     } finally {
       setMigration(null)
       setMoveProgress(null)
+      // The journal is the truth: a cancelled run leaves a resume entry, a
+      // committed one deletes itself. Reflect whichever outcome happened.
+      void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
     }
   }
 
@@ -359,9 +349,10 @@ export function SettingsPage() {
             <div className="rounded-lg bg-surface px-4 ring-1 ring-inset ring-line">
               <SettingRow
                 title="启动 PHL 时"
-                description="打开应用后自动执行的操作"
+                description="计划中的能力，尚未接入启动流程 —— 当前设置不会生效"
                 control={
                   <Select
+                    disabled
                     value={settings.startup}
                     onChange={(e) => settings.set('startup', e.target.value as never)}
                     className="w-[168px]"
@@ -374,9 +365,10 @@ export function SettingsPage() {
               />
               <SettingRow
                 title="关闭窗口时最小化到托盘"
-                description="保持实例继续运行"
+                description="托盘驻留尚未实现；关闭窗口即退出（实例可继续运行，见下）"
                 control={
                   <Switch
+                    disabled
                     checked={settings.minimizeToTray}
                     onChange={(v) => settings.set('minimizeToTray', v)}
                   />
@@ -394,9 +386,10 @@ export function SettingsPage() {
               />
               <SettingRow
                 title="自动检查 DSH 新版本"
-                description="仅提示，不会自动安装或替换已有版本"
+                description="独立的应用更新检查尚未接入；版本列表的定时刷新在「下载」分区配置"
                 control={
                   <Switch
+                    disabled
                     checked={settings.checkUpdates}
                     onChange={(v) => settings.set('checkUpdates', v)}
                   />
@@ -449,6 +442,7 @@ export function SettingsPage() {
               )}
               <SettingRow
                 title="同时下载数"
+                description="版本、Runtime 与插件安装共享的传输槽位上限；超出的任务排队为「排队中」，前一个完成或取消后自动开始"
                 control={
                   <Segmented
                     size="sm"
@@ -613,6 +607,34 @@ export function SettingsPage() {
 
         {section === 'storage' && (
           <>
+            {openJournal && !migration && (
+              <PageSection title="未完成的迁移">
+                <Notice tone="warn" title={`旧目录 → 新目录的数据搬运尚未结束`}>
+                  <div className="mt-1 break-all text-sm">
+                    {openJournal.from} → {openJournal.to}（{openJournal.entries.filter((e) => e.state === 'moved').length}/{openJournal.entries.length} 个目录已到达，
+                    {formatBytes(openJournal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
+                    可从中断处继续，或将已复制的数据原路退回。
+                  </div>
+                  <div className="mt-2.5 flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => void beginMigration(openJournal.from, openJournal.to)}
+                    >
+                      继续迁移
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={journalBusy !== null}
+                      onClick={() => void undoOpenMigration()}
+                    >
+                      {journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
+                    </Button>
+                  </div>
+                </Notice>
+              </PageSection>
+            )}
             <PageSection
               title="数据目录"
               description="版本、Runtime 与所有实例都存放在这里。这不是 PHL 程序本身的安装位置。"
@@ -773,80 +795,7 @@ export function SettingsPage() {
           </>
         )}
 
-        {section === 'diagnostics' && (
-          <>
-            <PageSection>
-              <div className="flex items-center justify-between gap-3 rounded-lg bg-surface p-4 ring-1 ring-inset ring-line">
-                <div className="min-w-0">
-                  <div className="text-md font-medium text-ink">环境检查</div>
-                  <div className="mt-0.5 truncate text-sm text-ink-faint">
-                    {report
-                      ? `生成于 ${formatDateTime(report.generatedAt)} · ${report.root}`
-                      : '检查数据目录、版本与 Runtime 完整性、实例引用与下载缓存。'}
-                  </div>
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={diagLoading}
-                  onClick={rerunDiagnostics}
-                >
-                  {diagLoading ? '检查中…' : '重新检查'}
-                </Button>
-              </div>
-            </PageSection>
-
-            <PageSection>
-              {!desktop.isDesktop ? (
-                <Notice tone="info">诊断仅在桌面端可用；浏览器预览没有真实的文件系统可检查。</Notice>
-              ) : !report ? (
-                <div className="rounded-lg bg-surface p-4 text-sm text-ink-faint ring-1 ring-inset ring-line">
-                  {diagLoading ? '正在检查…' : '尚无检查结果，点上方「重新检查」生成。'}
-                </div>
-              ) : (
-                <div className="overflow-hidden rounded-lg bg-surface ring-1 ring-inset ring-line">
-                  {report.items.map((item, idx) => (
-                    <div
-                      key={item.id}
-                      className={cn(
-                        'flex items-start gap-3 px-4 py-3',
-                        idx > 0 && 'border-t border-line',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'mt-1.5 h-2 w-2 shrink-0 rounded-full',
-                          item.level === 'ok' && 'bg-ok',
-                          item.level === 'warn' && 'bg-warn',
-                          item.level === 'fail' && 'bg-danger',
-                        )}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-base text-ink">{item.label}</div>
-                        {item.detail && (
-                          <div className="mt-0.5 break-all text-sm text-ink-faint">
-                            {item.detail}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </PageSection>
-
-            {report && report.cacheBytes > 0 && (
-              <PageSection title="清理">
-                <Notice tone="info" className="mb-3">
-                  下载缓存只用于加速重装；删除它不影响任何已安装的版本、Runtime 与实例。
-                </Notice>
-                <Button variant="secondary" disabled={cacheBusy} onClick={() => void clearCache()}>
-                  {cacheBusy ? '清理中…' : `清理下载缓存（${formatBytes(report.cacheBytes)}）`}
-                </Button>
-              </PageSection>
-            )}
-          </>
-        )}
+        {section === 'diagnostics' && <DiagnosticsSection />}
 
         {section === 'advanced' && (
           <>
@@ -865,19 +814,11 @@ export function SettingsPage() {
                   }
                 />
                 <SettingRow
-                  title="隔离 node_modules"
-                  description="每个实例使用独立的插件依赖树，避免跨版本污染"
-                  control={
-                    <Switch
-                      checked={settings.isolateNodeModules}
-                      onChange={(v) => settings.set('isolateNodeModules', v)}
-                    />
-                  }
-                />
-                <SettingRow
                   title="日志级别"
+                  description="日志分级尚未接入后端；诊断与实例日志始终完整记录"
                   control={
                     <Select
+                      disabled
                       value={settings.logLevel}
                       onChange={(e) => settings.set('logLevel', e.target.value as never)}
                       className="w-[130px]"
@@ -888,16 +829,6 @@ export function SettingsPage() {
                         </option>
                       ))}
                     </Select>
-                  }
-                />
-                <SettingRow
-                  title="开发者模式"
-                  description="显示实例进程的原始输出与内部状态"
-                  control={
-                    <Switch
-                      checked={settings.developerMode}
-                      onChange={(v) => settings.set('developerMode', v)}
-                    />
                   }
                 />
               </div>

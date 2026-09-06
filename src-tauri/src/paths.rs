@@ -38,7 +38,7 @@ pub(crate) fn sanitize_segment(value: &str, label: &str) -> Result<String, Strin
 /// (`\\?\C:\...`, `\\?\UNC\server\share\...`). Without this, a canonicalized
 /// child never lexically starts with a plain-form root and every containment
 /// check would false-positive on Windows.
-fn strip_verbatim(path: &Path) -> PathBuf {
+pub(crate) fn strip_verbatim(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     let stripped = text
         .strip_prefix(r"\\?\UNC\")
@@ -137,6 +137,14 @@ impl PhlState {
 
     pub fn root(&self) -> PathBuf {
         self.root.read().expect("phl root lock").clone()
+    }
+
+    /// A file that must survive a data-root relocation lives next to the
+    /// pointer (which itself lives outside the root). `None` when the pointer
+    /// is unavailable (no config dir) — callers degrade to non-persistent
+    /// behaviour rather than parking state inside the tree being moved.
+    pub(crate) fn sibling_file(&self, name: &str) -> Option<PathBuf> {
+        self.pointer.as_ref().map(|p| p.with_file_name(name))
     }
 
     fn is_provisional(&self) -> bool {

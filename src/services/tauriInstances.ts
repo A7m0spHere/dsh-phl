@@ -49,6 +49,14 @@ function toManifest(instance: Instance): desktop.RemoteInstanceManifest {
     env: instance.env,
     args: instance.args,
     api: instance.api ?? null,
+    // Round-tripped so `save_instance` never resets them via serde defaults.
+    // On a fresh create `instance.managementMode` is undefined and the field
+    // is simply absent → Rust defaults it; on an adopt/save it carries the
+    // real value back so an external instance keeps pointing at its home.
+    managementMode: instance.managementMode,
+    source: instance.source,
+    externalHome: instance.externalHome ?? null,
+    adoptedFrom: instance.adoptedFrom ?? null,
   }
 }
 
@@ -96,6 +104,10 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     // trees stayed on disk — unrestorable and undeletable.
     snapshots: record.snapshots,
     api: record.api ?? null,
+    managementMode: record.managementMode ?? 'managed-copy',
+    source: record.source ?? 'created',
+    externalHome: record.externalHome ?? null,
+    adoptedFrom: record.adoptedFrom ?? null,
   }
 }
 

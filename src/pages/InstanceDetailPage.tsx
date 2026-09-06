@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Camera,
   Copy,
   ExternalLink,
   FolderOpen,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Play,
@@ -16,6 +17,8 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
+import { instanceSessionCount } from '@/lib/desktop'
 import { formatBytes, formatDateTime, formatDuration, formatRelative } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
@@ -42,6 +45,7 @@ import {
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceTile, LaunchTimeline, StatusPill, useInstanceActions } from '@/components/instance'
+import { SessionCopyPanel } from '@/components/instance/SessionCopyPanel'
 import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
 import { EnvironmentHealthCard } from '@/components/instance/EnvironmentHealthCard'
 
@@ -123,6 +127,30 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const { t, stagger, riseItem } = useMotion()
   const actions = useInstanceActions(instance)
   const uptime = useUptime(state.status === 'running' ? state.startedAt : undefined)
+
+  // History-conversation count is read from disk, not stored on the record —
+  // it changes as the user talks to DSH. `null` = measuring, and a failure
+  // reads as "不可用" rather than lying with 0.
+  const [sessionCount, setSessionCount] = useState<number | null>(null)
+  // Copying conversations in/out moves the on-disk count without touching the
+  // record; bumping this tick re-runs the measurement so the badge is never
+  // a stale lie right under the user's eyes.
+  const [sessionCountTick, setSessionCountTick] = useState(0)
+  useEffect(() => {
+    let alive = true
+    setSessionCount(null)
+    // Browser mode has no filesystem to count; the bridge would answer 0 and
+    // the UI would report a confidently wrong number. Stay in "不可查" state.
+    if (instance && isDesktopFlag) {
+      instanceSessionCount(instance.id)
+        .then((n) => alive && setSessionCount(n))
+        .catch(() => alive && setSessionCount(null))
+    }
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance?.id, instance?.plugins.length, sessionCountTick])
 
   // Editing the pinned environment is a deliberate, explicit act — the whole
   // point of an instance is that its version does not drift on its own.
@@ -243,6 +271,14 @@ export function InstanceDetailPage({ id }: { id: string }) {
             <div className="flex items-center gap-2.5">
               <span className="truncate">{instance.name}</span>
               <StatusPill status={status} startedAt={state.startedAt} />
+              {instance?.managementMode === 'external' && (
+                <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。">
+                  <Badge tone="warn">原地接入</Badge>
+                </Tooltip>
+              )}
+              {instance?.source === 'adopted' && instance?.managementMode === 'managed-copy' && (
+                <Badge tone="neutral">接入的副本</Badge>
+              )}
             </div>
             <div className="mt-1 truncate text-base font-normal text-ink-muted">
               {instance.note ?? '没有备注'}
@@ -612,6 +648,51 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   <span className="text-ink-faint">继承默认值</span>
                 )
               }
+            />
+          </SectionCard>
+        </motion.div>
+
+        {/* ---- 数据：会话真源在 DSH，这里只提供迁移视角 ---- */}
+        <motion.div variants={riseItem}>
+          <SectionCard
+            title="数据"
+            icon={<MessageSquare size={14} />}
+            description="历史对话以 DSH 自身存储为真源；浏览与继续对话在 DSH 里完成。"
+          >
+            <DataRow
+              label="历史对话"
+              value={
+                sessionCount === null ? (
+                  <span className="text-ink-faint">{isDesktopFlag ? '统计中…' : '桌面端可查'}</span>
+                ) : (
+                  `${sessionCount} 条`
+                )
+              }
+            />
+            {instance.adoptedFrom && (
+              <DataRow
+                label="来源"
+                value={
+                  <span className="text-sm">
+                    {instance.adoptedFrom.mode === 'external' ? '原地接入' : '接入副本'}：
+                    {instance.adoptedFrom.dshHome}
+                    {instance.adoptedFrom.detectedVersion
+                      ? `（DSH ${instance.adoptedFrom.detectedVersion}）`
+                      : ''}
+                  </span>
+                }
+              />
+            )}
+            {instance.managementMode === 'external' && (
+              <p className="mt-1 text-xs text-ink-faint">
+                原地接入的会话数据始终保存在你自己的 DSH_HOME；「删除实例」只会把登记从 PHL 移除。
+              </p>
+            )}
+            {/* Mounted through a re-measure (copy just landed) on purpose: the
+                panel's own selection must survive the count refresh. */}
+            <SessionCopyPanel
+              instanceId={instance.id}
+              onCopied={() => setSessionCountTick((t) => t + 1)}
             />
           </SectionCard>
         </motion.div>

@@ -31,18 +31,21 @@ use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
+pub(crate) mod adoption;
 pub(crate) mod bundle;
 pub(crate) mod copy;
+pub(crate) mod env_policy;
 pub(crate) mod manifest;
 pub(crate) mod snapshot;
 
 pub(crate) use copy::{copy_tree_with_progress, dir_size, SkipRule};
 use manifest::{classify_manifest, write_manifest, ManifestRead};
-pub(crate) use manifest::{load_manifest, read_manifest, InstanceManifest};
-#[cfg(test)]
-use snapshot::{
-    delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create, sanitize_imported_env,
+pub(crate) use manifest::{
+    home_of, load_manifest, profile_root_of, read_manifest, AdoptedFrom, InstanceManifest,
+    InstanceSource, ManagementMode,
 };
+#[cfg(test)]
+use snapshot::{delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create};
 use snapshot::{scan_snapshots, SnapshotFile};
 
 /* ----------------------------- wire types ----------------------------- */
@@ -177,10 +180,30 @@ pub(crate) async fn list_instances_inner(root: &Path) -> Result<Vec<InstanceReco
 
 #[tauri::command]
 pub async fn create_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
-    create_instance_inner(&state.root(), manifest).await
+    let label_id = manifest.id.clone();
+    let instance_dir_path = instance_dir(&state.root(), &label_id)?;
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-create"),
+        "instance-create",
+        format!("创建实例 {label_id}"),
+        vec![crate::resources::Resource::Instance(label_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            let r = create_instance_inner(&state.root(), manifest).await;
+            if r.is_ok() {
+                invalidate_disk_usage(&instance_dir_path);
+            }
+            r
+        },
+    )
+    .await
 }
 
 pub(crate) async fn create_instance_inner(
@@ -214,10 +237,23 @@ pub(crate) async fn apply_api_at_create(
 
 #[tauri::command]
 pub async fn save_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     manifest: InstanceManifest,
 ) -> Result<(), String> {
-    save_instance_inner(&state.root(), manifest).await
+    let label_id = manifest.id.clone();
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-save"),
+        "instance-save",
+        format!("保存实例 {label_id}"),
+        vec![crate::resources::Resource::Instance(label_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { save_instance_inner(&state.root(), manifest).await },
+    )
+    .await
 }
 
 async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<(), String> {
@@ -231,11 +267,31 @@ async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<
 
 #[tauri::command]
 pub async fn delete_instance(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
 ) -> Result<(), String> {
-    delete_instance_inner(&state.root(), &id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("instance-delete"),
+        "instance-delete",
+        format!("删除实例 {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            let r = delete_instance_inner(&state.root(), &id, &processes).await;
+            if r.is_ok() {
+                if let Ok(dir) = instance_dir(&state.root(), &id) {
+                    invalidate_disk_usage(&dir);
+                }
+            }
+            r
+        },
+    )
+    .await
 }
 
 async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> Result<(), String> {
@@ -249,16 +305,19 @@ async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> 
     // delete would leave a half-deleted tree behind a live process.
     snapshot::ensure_not_running(processes, id)?;
     if dir.exists() {
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| format!("无法删除实例目录: {e}"))?;
+        tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
+            crate::errors::coded(crate::errors::io_code(&e), format!("无法删除实例目录: {e}"))
+        })?;
     }
     Ok(())
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn clone_instance(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     transfer_id: String,
     source_id: String,
@@ -266,15 +325,92 @@ pub async fn clone_instance(
     on_progress: Channel<CloneProgress>,
 ) -> Result<InstanceRecord, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_clone(&flag, &state.root(), &source_id, manifest, &on_progress).await;
+    let new_id = manifest.id.clone();
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "instance-clone",
+        format!("克隆实例 {source_id} → {new_id}"),
+        vec![
+            crate::resources::Resource::Instance(source_id.clone()),
+            crate::resources::Resource::Instance(new_id),
+        ],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        move |_| async move {
+            let r = run_clone(&flag, &state.root(), &source_id, manifest, &on_progress).await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
+    )
+    .await;
     transfers.release(&transfer_id);
     result
+}
+
+/// TTL for the disk-usage memo (O-12). `measureDiskUsage` fans out over every
+/// instance on the storage page and on each `instances` change; walking full
+/// `node_modules` trees per call is the exact cost the roadmap says to bound.
+/// A short memo collapses the fan-out and repeated visits into one real scan
+/// per instance per window, and instance writes invalidate their own entry so
+/// the answer never disagrees with a change the user just made.
+const DISK_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// (instance dir) → (bytes, when it was measured). Global because the store
+/// has no natural owner for it and the cache must survive across commands.
+static DISK_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn disk_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, std::time::Instant)>> {
+    DISK_CACHE.get_or_init(Default::default)
+}
+
+/// Drop any cached measurement for `dir` — called after anything that writes
+/// into an instance tree (create, save, plugin ops, snapshot restore).
+pub(crate) fn invalidate_disk_usage(dir: &Path) {
+    if let Ok(mut map) = disk_cache().lock() {
+        map.remove(dir);
+    }
 }
 
 #[tauri::command]
 pub async fn instance_disk_usage(state: State<'_, PhlState>, id: String) -> Result<u64, String> {
     let dir = instance_dir(&state.root(), &id)?;
-    tokio::task::spawn_blocking(move || dir_size(&dir))
+    // Fresh memo wins outright; a stale one is still returned while the
+    // refresh runs, so concurrent callers share one scan.
+    let cached = disk_cache().lock().ok().and_then(|m| m.get(&dir).copied());
+    if let Some((bytes, at)) = cached {
+        if at.elapsed() < DISK_TTL {
+            return Ok(bytes);
+        }
+    }
+    let scan_dir = dir.clone();
+    let bytes = tokio::task::spawn_blocking(move || dir_size(&scan_dir))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut m) = disk_cache().lock() {
+        m.insert(dir, (bytes, std::time::Instant::now()));
+    }
+    Ok(bytes)
+}
+
+/// Count the DSH sessions this instance's home holds. The "数据" section of
+/// the instance detail uses it; it is a filename walk under
+/// `<home>/sessions/*/*/session.jsonl*` (the spike's P0 rule: count, never
+/// parse). Works for both management modes because `home_of` resolves them.
+#[tauri::command]
+pub async fn instance_session_count(
+    state: State<'_, PhlState>,
+    id: String,
+) -> Result<usize, String> {
+    let dir = instance_dir(&state.root(), &id)?;
+    let manifest = load_manifest(&dir, &id).await?;
+    let home = home_of(&dir, &manifest);
+    tokio::task::spawn_blocking(move || crate::discovery::inspect::count_sessions(&home))
         .await
         .map_err(|e| e.to_string())
 }
@@ -403,7 +539,43 @@ pub(crate) async fn build_instance_tree(
 pub(crate) async fn profile_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
     let dir = instance_dir(root, id)?;
     let manifest = load_manifest(&dir, id).await?;
-    Ok(profile_root(&dir, &manifest.profile))
+    Ok(profile_root_of(&dir, &manifest))
+}
+
+/// Whether an instance points at an in-place (external) DSH_HOME.
+pub(crate) fn is_external(manifest: &InstanceManifest) -> bool {
+    manifest.management_mode == ManagementMode::External
+}
+
+/// `profile_dir` for callers about to *write* into the profile: resolves the
+/// path through the ungated read helper and clears the external-instance
+/// gate in one step, so no mutation command can forget to check it.
+pub(crate) async fn writable_profile_dir(
+    root: &Path,
+    id: &str,
+    action: &str,
+) -> Result<PathBuf, String> {
+    let dir = instance_dir(root, id)?;
+    let manifest = load_manifest(&dir, id).await?;
+    reject_external_write(&manifest, id, action)?;
+    profile_dir(root, id).await
+}
+
+/// Refuse a write into an external instance's DSH_HOME. In-place adoption
+/// deliberately keeps PHL out of the user's own directory (spec §3.1), so
+/// plugin install/uninstall/enable, snapshot restore and repair must all
+/// clear this gate before mutating. Reads are never gated.
+pub(crate) fn reject_external_write(
+    manifest: &InstanceManifest,
+    id: &str,
+    action: &str,
+) -> Result<(), String> {
+    if manifest.management_mode == ManagementMode::External {
+        return Err(format!(
+            "原地接入的实例「{id}」的 DSH_HOME 由你自己管理，PHL 不会{action}它。需要该能力请改用「复制到 PHL」方式接入"
+        ));
+    }
+    Ok(())
 }
 
 /// Persist just the API binding on an existing manifest — the sync path must
@@ -421,9 +593,9 @@ pub(crate) async fn set_instance_api(
 }
 
 pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord {
-    let profile = profile_root(dir, &manifest.profile);
+    let profile = profile_root_of(dir, &manifest);
     InstanceRecord {
-        dsh_home: dir.join("dsh-home").to_string_lossy().into_owned(),
+        dsh_home: home_of(dir, &manifest).to_string_lossy().into_owned(),
         workspace: dir.join("workspace").to_string_lossy().into_owned(),
         plugins: scan_plugins(&profile).await,
         snapshots: scan_snapshots(dir).await,
@@ -510,7 +682,20 @@ async fn run_clone(
 ) -> Result<InstanceRecord, String> {
     let source = instance_dir(root, source_id)?;
     if !manifest_path(&source).exists() {
-        return Err(format!("源实例不存在: {source_id}"));
+        return Err(crate::errors::coded(
+            crate::errors::ErrCode::NotFound,
+            format!("源实例不存在: {source_id}"),
+        ));
+    }
+    // Cloning is a whole-directory copy. An external instance has no home to
+    // copy, and its round-tripped `externalHome` would make the clone a second
+    // instance pointing at the SAME DSH_HOME — a §1.1 violation. P0 has no
+    // clone-semantics for external homes, so refuse rather than fork the tree.
+    let source_manifest = load_manifest(&source, source_id).await?;
+    if is_external(&source_manifest) {
+        return Err(
+            "原地接入的实例暂不支持克隆：请改用「接入本机 DSH → 复制到 PHL」再克隆副本".to_string(),
+        );
     }
     let id = sanitize_segment(&manifest.id, "实例 id")?;
     let dest = instance_dir(root, &id)?;
@@ -566,7 +751,7 @@ mod tests {
     use super::copy::dir_size_skipping;
     use super::manifest::MANIFEST_SCHEMA_VERSION;
     use super::*;
-    use bundle::{export_instance_bundle_inner, read_instance_bundle};
+    use bundle::{export_instance_bundle_inner, read_bundle_inner};
     use copy::{copy_tree, skipped};
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
@@ -613,6 +798,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn cloning_an_external_instance_is_refused() {
+        // A whole-tree clone of an external instance would either copy an
+        // empty directory or re-point the round-tripped external home at the
+        // source — both are wrong. The backend refuses; the menu disables it.
+        let root = temp_root("clone-external");
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        let src = root.join("instances").join("ext-src");
+        std::fs::create_dir_all(&src).unwrap();
+        let external_home = root.join("user-dsh");
+        std::fs::create_dir_all(&external_home).unwrap();
+        let mut src_manifest = manifest("ext-src", "External Source");
+        src_manifest.management_mode = ManagementMode::External;
+        src_manifest.external_home = Some(external_home.to_string_lossy().into_owned());
+        manifest::write_manifest(&src, &src_manifest).await.unwrap();
+
+        let err = run_clone(
+            &Arc::new(AtomicBool::new(false)),
+            &root,
+            "ext-src",
+            manifest("clone-target", "Clone"),
+            &Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("原地接入"), "got: {err}");
+        assert!(
+            !root.join("instances").join("clone-target").exists(),
+            "no half clone left behind"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("phl-inst-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -640,6 +858,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         }
     }
 
@@ -677,17 +899,27 @@ mod tests {
     }
 
     #[test]
-    fn imported_env_drops_code_injection_vectors() {
+    fn imported_env_drops_injection_vectors_and_credential_values() {
+        use super::env_policy::partition_imported_env;
         let mut env = HashMap::new();
         env.insert("NODE_OPTIONS".into(), "--require C:\\evil.js".into());
         env.insert("node_options".into(), "--require C:\\evil.js".into());
         env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
         env.insert("DSH_HOME".into(), "C:\\elsewhere".into());
         env.insert("MY_API_KEY".into(), "keep-me".into());
+        env.insert("HTTP_PROXY".into(), "http://proxy:8080".into());
 
-        let safe = sanitize_imported_env(env);
-        assert_eq!(safe.len(), 1, "only the harmless variable survives");
-        assert_eq!(safe.get("MY_API_KEY").map(String::as_str), Some("keep-me"));
+        let (safe, credentials) = partition_imported_env(env, &HashSet::new());
+        assert_eq!(credentials, vec!["MY_API_KEY".to_string()]);
+        assert_eq!(
+            safe.len(),
+            1,
+            "the harmless variable survives with its value"
+        );
+        assert_eq!(
+            safe.get("HTTP_PROXY").map(String::as_str),
+            Some("http://proxy:8080")
+        );
     }
 
     #[tokio::test]
@@ -1065,11 +1297,13 @@ mod tests {
 
         let dest = root.join("out/source.phl-bundle.json");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        export_instance_bundle_inner(root.as_path(), "src-a1b2", &dest.to_string_lossy())
-            .await
-            .unwrap();
+        let report =
+            export_instance_bundle_inner(root.as_path(), "src-a1b2", &dest.to_string_lossy())
+                .await
+                .unwrap();
+        assert!(report.credentials.is_empty() && report.machine_only.is_empty());
 
-        let preview = read_instance_bundle(dest.to_string_lossy().into_owned())
+        let preview = read_bundle_inner(root.as_path(), &dest.to_string_lossy())
             .await
             .unwrap();
         assert_eq!(preview.name, "Source");
@@ -1080,11 +1314,13 @@ mod tests {
         let mut importer = manifest("dst-c3d4", "Restored");
         importer.version_id = "placeholder".into();
         importer.port = 9999;
-        let imported =
+        let outcome =
             import_instance_bundle_inner(root.as_path(), &dest.to_string_lossy(), importer)
                 .await
                 .unwrap();
+        let imported = outcome.record;
 
+        assert!(outcome.credentials.is_empty());
         assert_eq!(imported.manifest.id, "dst-c3d4");
         assert_eq!(
             imported.manifest.version_id, source.manifest.version_id,
@@ -1123,10 +1359,139 @@ mod tests {
             r#"{"phlBundle":99,"exportedAt":"","instance":{},"plugins":[]}"#,
         )
         .unwrap();
-        let err = read_instance_bundle(path.to_string_lossy().into_owned())
+        let err = read_bundle_inner(root.as_path(), &path.to_string_lossy())
             .await
             .unwrap_err();
         assert!(err.contains("不支持的 Bundle 版本"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shareability promise, end to end: an instance whose env carries a
+    /// fictional credential under an explicit (library-declared) name and a
+    /// heuristic one exports neither value; both names come back as "needs
+    /// re-configuration", while an ordinary variable keeps its value.
+    #[tokio::test]
+    async fn bundle_export_omits_credential_values_and_names_them() {
+        let root = temp_root("bundlesecret");
+        create_instance_inner(root.as_path(), manifest("sec-a1b2", "Secret"))
+            .await
+            .unwrap();
+
+        // The library declares MY_GATE_SLOT a credential carrier — a name the
+        // heuristic alone would not catch.
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/api.json"),
+            r#"{"version":1,"providers":[{"id":"gate","name":"Gate","apiKeyEnv":"MY_GATE_SLOT"}]}"#,
+        )
+        .unwrap();
+
+        let dir = root.join("instances/sec-a1b2");
+        let raw = std::fs::read_to_string(manifest_path(&dir)).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value["env"] = serde_json::json!({
+            "MY_GATE_SLOT": "phrase-fictional",
+            "MY_API_KEY": "key-fictional",
+            "HTTP_PROXY": "http://proxy:8080",
+            "PATH": "C:\\bin"
+        });
+        std::fs::write(
+            manifest_path(&dir),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let dest = root.join("out/secret.phl-bundle.json");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let report =
+            export_instance_bundle_inner(root.as_path(), "sec-a1b2", &dest.to_string_lossy())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            report.credentials,
+            vec!["MY_API_KEY".to_string(), "MY_GATE_SLOT".to_string()]
+        );
+        assert_eq!(report.machine_only, vec!["PATH".to_string()]);
+
+        let body = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            !body.contains("phrase-fictional"),
+            "explicit credential leaked"
+        );
+        assert!(
+            !body.contains("key-fictional"),
+            "heuristic credential leaked"
+        );
+        assert!(
+            body.contains("http://proxy:8080"),
+            "the ordinary variable keeps its value"
+        );
+        // The names travel, the values do not — the importer needs to know
+        // what to re-enter, not what was there.
+        assert!(body.contains("MY_GATE_SLOT"));
+
+        // A fresh PHL reading the file back reports the same two names.
+        let preview = read_bundle_inner(root.as_path(), &dest.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.credentials,
+            vec!["MY_API_KEY".to_string(), "MY_GATE_SLOT".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Old format-1 bundles can carry credential *values*; the import filter
+    /// is the last line, so importing one strips those values, reports the
+    /// names, and keeps ordinary variables intact — the written manifest
+    /// never sees the secret.
+    #[tokio::test]
+    async fn bundle_import_strips_format1_credential_values_and_reports_them() {
+        let root = temp_root("bundleold");
+        let path = root.join("legacy.phl-bundle.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "phlBundle": 1,
+                "exportedAt": "2025-01-01T00:00:00Z",
+                "instance": {
+                    "id": "legacy", "name": "Legacy", "kind": "sandbox", "hue": 0,
+                    "versionId": "dsh-0.1.0", "runtimeId": "node-22", "port": 8080,
+                    "autoPort": true, "profile": "default", "createdAt": "2025-01-01T00:00:00Z",
+                    "env": {"MY_API_KEY": "legacy-secret", "HTTP_PROXY": "http://proxy:8080"},
+                    "args": []
+                },
+                "plugins": []
+            }"#,
+        )
+        .unwrap();
+
+        let outcome = import_instance_bundle_inner(
+            root.as_path(),
+            &path.to_string_lossy(),
+            manifest("old-c9d8", "Legacy"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.credentials, vec!["MY_API_KEY".to_string()]);
+        assert_eq!(
+            outcome
+                .record
+                .manifest
+                .env
+                .get("HTTP_PROXY")
+                .map(String::as_str),
+            Some("http://proxy:8080"),
+            "the ordinary variable survives the import"
+        );
+
+        let written =
+            std::fs::read_to_string(manifest_path(&root.join("instances/old-c9d8"))).unwrap();
+        assert!(
+            !written.contains("legacy-secret"),
+            "the secret never reaches the imported instance's manifest"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1202,6 +1567,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         };
         create_instance_inner(&root, manifest).await.unwrap();
         let dir = root.join("instances").join("broken-1");

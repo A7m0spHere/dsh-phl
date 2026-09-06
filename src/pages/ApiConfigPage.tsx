@@ -5,6 +5,7 @@ import {
   KeyRound,
   Plus,
   RefreshCw,
+  WandSparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useMotion } from '@/lib/motion'
@@ -85,6 +86,8 @@ export function ApiConfigPage() {
   const config = useApiConfigStore((s) => s.config)
   const loaded = useApiConfigStore((s) => s.loaded)
   const saving = useApiConfigStore((s) => s.saving)
+  const enriching = useApiConfigStore((s) => s.enriching)
+  const enrichMissingModels = useApiConfigStore((s) => s.enrichMissingModels)
   const updateProvider = useApiConfigStore((s) => s.updateProvider)
   const removeProvider = useApiConfigStore((s) => s.removeProvider)
   const setDefaults = useApiConfigStore((s) => s.setDefaults)
@@ -264,10 +267,15 @@ export function ApiConfigPage() {
       subtitle="在这里配置一次，新建实例开箱即用；存量实例可随时同步或接管。密钥可直接填入（存本机、启动时注入），也可引用已有环境变量。"
       actions={
         providerCount > 0 && !adding ? (
+          <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" disabled={saving || enriching} onClick={() => void enrichMissingModels()}>
+            <WandSparkles size={12} />{enriching ? '补全中…' : '补全缺失模型信息'}
+          </Button>
           <Button size="sm" variant="primary" disabled={saving} onClick={() => setAdding(true)}>
             <Plus size={12} />
             新增供应商
           </Button>
+          </div>
         ) : undefined
       }
     >

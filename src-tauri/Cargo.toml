@@ -6,6 +6,15 @@ authors = ["dsh-phl"]
 edition = "2021"
 rust-version = "1.77.2"
 
+# This manifest is the Cargo workspace root (P2-1): the desktop crate plus the
+# extracted Pack Core and its CLI share one lockfile and one `target/` dir.
+# The root deliberately sits here, not at the repository root, so the existing
+# packaging paths (`src-tauri/target/release/bundle`, build-app.cmd) are
+# untouched by the extraction.
+[workspace]
+resolver = "2"
+members = ["crates/phl-pack-core", "crates/phl-pack-cli"]
+
 # The desktop binary is a thin shell around `lib.rs`; keeping the logic in a
 # library keeps the door open for the mobile entry point and for unit tests.
 [lib]
@@ -35,6 +44,18 @@ base64 = "0.22"
 semver = "1"
 dirs = "5"
 fs2 = "0.4"
+# Session migration (P1-1): DSH persists session logs as `<session>.jsonl.zstd`
+# — one checksummed Zstandard frame per append batch. Reading needs a decoder
+# and writing the re-identified header needs an encoder, so PHL handles the
+# frames natively. `ruzstd` (pure Rust) decodes DSH's frames; `zstd` encodes,
+# and its output was verified to decompress under Node's `zlib.zstdDecompressSync`
+# — the exact decoder the running DSH uses — so a copied session still boots.
+ruzstd = "0.8.2"
+zstd = "0.14.0"
+# `.phlpack` format (P2-1): schema, validator, integrity, builder and unpack
+# live in a host-free crate shared with the `phl-pack` CLI — the desktop app
+# and the DSH Skill can never drift into two implementations of the format.
+phl-pack-core = { path = "crates/phl-pack-core" }
 
 [profile.release]
 codegen-units = 1

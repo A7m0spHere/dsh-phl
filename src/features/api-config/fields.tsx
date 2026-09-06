@@ -175,12 +175,14 @@ export function providerToForm(p: ApiProvider): ProviderForm {
 export function ProviderFields({
   form,
   patch,
+  onModelsEnrichingChange,
   withEnabled,
   /** The edited provider's id — keys the OS credential manager lookup. */
   providerId,
 }: {
   form: ProviderForm
   patch: (p: Partial<ProviderForm>) => void
+  onModelsEnrichingChange: (pending: boolean) => void
   withEnabled?: boolean
   providerId?: string
 }) {
@@ -234,9 +236,11 @@ export function ProviderFields({
       </div>
       <div className="col-span-2">
         <ModelEditor
+          onEnrichingChange={onModelsEnrichingChange}
           models={form.models}
           onChange={(models) => patch({ models })}
           fetchCtx={{
+            providerName: form.name,
             api: form.api || undefined,
             baseURL: form.baseURL,
             apiKeyEnv:
@@ -285,6 +289,7 @@ export function NewProviderCard({
   const config = useApiConfigStore((s) => s.config)
   const addProvider = useApiConfigStore((s) => s.addProvider)
   const saving = useApiConfigStore((s) => s.saving)
+  const [modelsEnriching, setModelsEnriching] = useState(false)
   const toast = useUIStore((s) => s.toast)
   const { t, riseItem } = useMotion()
   const [form, setForm] = useState<ProviderForm>(() => {
@@ -314,6 +319,7 @@ export function NewProviderCard({
   }
 
   const save = async () => {
+    if (saving || modelsEnriching) return
     const displayName = form.displayName.trim()
     const name = (form.name.trim() || suggestProviderName(displayName)).toLowerCase()
     if (!displayName) {
@@ -357,9 +363,9 @@ export function NewProviderCard({
               <X size={12} />
               取消
             </Button>
-            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+            <Button size="sm" variant="primary" disabled={saving || modelsEnriching} onClick={() => void save()}>
               <Check size={12} />
-              {saving ? '保存中…' : '保存到全局库'}
+              {modelsEnriching ? '模型补全中…' : saving ? '保存中…' : '保存到全局库'}
             </Button>
           </div>
         </div>
@@ -400,7 +406,7 @@ export function NewProviderCard({
           })()}
         </div>
         <div className="border-t border-line px-3.5 py-3">
-          <ProviderFields form={form} patch={patch} />
+          <ProviderFields form={form} patch={patch} onModelsEnrichingChange={setModelsEnriching} />
         </div>
       </div>
     </motion.div>

@@ -30,25 +30,60 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       # The tag must name the version the app reports; a mismatched tag would
       # publish an installer whose about-dialog disagrees with its filename.
-      - name: Verify tag matches app version
+      # The three version sources must also agree with each other, so a
+      # manually dispatched build cannot mix versions either.
+      - name: Verify versions (package.json · Cargo.toml · tauri.conf.json · tag)
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $crate = (cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq "dsh-phl" } |
+            Select-Object -ExpandProperty version
+          if ($pkg -ne $conf -or $crate -ne $conf) {
+            Write-Error "version mismatch: package.json=$pkg Cargo.toml=$crate tauri.conf.json=$conf"
+            exit 1
+          }
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            $expected = "v" + $conf
+            $actual = "${{ github.ref_name }}"
+            if ($actual -ne $expected) {
+              Write-Error "tag $actual does not match app version $expected"
+              exit 1
+            }
+          }
+
+      - run: npm test
+        shell: bash
+
+      # Build the frontend before the Rust checks: a broken frontend then
+      # fails in seconds instead of after minutes of Rust compilation, and
+      # the bundle step later finds dist already in place.
+      - run: npm run build
+        shell: bash
+
+      - run: cargo test
+        shell: bash
+        working-directory: src-tauri
+
+      # A fresh checkout must carry every bundle input; fail here, naming the
+      # missing file, instead of deep inside NSIS packaging.
+      - name: Check bundle inputs (icons)
         shell: pwsh
         run: |
           $conf = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
-          $expected = "v" + $conf.version
-          $actual = "${{ github.ref_name }}"
-          if ($env:GITHUB_EVENT_NAME -eq "push" -and $actual -ne $expected) {
-            Write-Error "tag $actual does not match tauri.conf.json version $expected"
-            exit 1
+          foreach ($icon in $conf.bundle.icon) {
+            $path = Join-Path "src-tauri" $icon
+            if (-not (Test-Path $path)) {
+              Write-Error "missing bundle input: $path"
+              exit 1
+            }
           }
-
-      - name: Run test suites
-        shell: bash
-        run: |
-          npm test
-          cargo test --manifest-path src-tauri/Cargo.toml
 
       - run: npm run app:build
         shell: bash

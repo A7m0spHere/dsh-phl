@@ -45,7 +45,7 @@ pub(crate) use catalog::parse_semver;
 pub(crate) use dependencies::{
     install_version_deps, package_requires_deps, pick_npm_capable_node, version_deps_missing,
 };
-pub(crate) use download::{download, verify_integrity, Downloaded};
+pub(crate) use download::{download, sidecar_path_of, verify_integrity, Downloaded};
 pub(crate) use extract::{extract, safe_join, strip_first};
 #[cfg(test)]
 pub(crate) use install::remove_version_dir_inner;
@@ -209,6 +209,8 @@ pub fn default_root() -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn download_dsh_version(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     transfer_id: String,
     tarball_url: String,
@@ -220,16 +222,32 @@ pub async fn download_dsh_version(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<(), String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_install(
-        &flag,
-        &tarball_url,
-        integrity.as_deref(),
-        &version_name,
-        &phl.root(),
-        &registry_base,
-        keep_archive,
-        total_bytes,
-        &on_progress,
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "version-install",
+        format!("安装版本 {version_name}"),
+        vec![crate::resources::Resource::Version(version_name.clone())],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |_task| async move {
+            let r = run_install(
+                &flag,
+                &tarball_url,
+                integrity.as_deref(),
+                &version_name,
+                &phl.root(),
+                &registry_base,
+                keep_archive,
+                total_bytes,
+                &on_progress,
+            )
+            .await;
+            if cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
     )
     .await;
     transfers.release(&transfer_id);
@@ -237,8 +255,16 @@ pub async fn download_dsh_version(
 }
 
 #[tauri::command]
-pub fn cancel_transfer(transfers: State<'_, Transfers>, transfer_id: String) {
+pub fn cancel_transfer(
+    transfers: State<'_, Transfers>,
+    tasks: State<'_, crate::resources::Tasks>,
+    transfer_id: String,
+) {
     transfers.cancel(&transfer_id);
+    // The registry row (if the transfer ever registered one) learns about the
+    // request too, so the task centre can show "cancelling" while the flag
+    // takes effect at the next checkpoint.
+    tasks.request_cancel(&transfer_id);
 }
 
 pub(crate) fn now_iso() -> String {
@@ -389,7 +415,12 @@ mod tests {
 
     /// Build a minimal npm-style tarball (`package/…` prefix) in memory.
     fn make_test_tarball() -> Vec<u8> {
-        let dir = std::env::temp_dir().join(format!("phl-test-{}", std::process::id()));
+        // Per-call directory: tests run concurrently and this helper writes
+        // its tarball through a file, so a shared name lets one call truncate
+        // the mid-read bytes of another (the flaky "invalid gzip header").
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("phl-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(dir.join("package/lib")).unwrap();
         std::fs::write(dir.join("package/package.json"), "{\"name\":\"dsh\"}").unwrap();
         std::fs::write(dir.join("package/lib/bin.js"), "// bin").unwrap();
@@ -698,6 +729,10 @@ mod net_tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         };
         create_instance_inner(&root, manifest).await.unwrap();
 

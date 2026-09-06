@@ -17,6 +17,15 @@ pub trait CredentialStore: Send + Sync {
 }
 
 /// The credential entry for one provider id.
+///
+/// The namespace is deliberately **global** — one entry per provider id,
+/// shared by every data root. Two roots that both configure a provider named
+/// `deepseek` therefore read and write the same key. That is a product
+/// decision, not an accident: the id is the user-visible API endpoint
+/// identity, and per-root copies would leak the same secret into extra
+/// entries the user can neither see nor clean. A root migration moves the
+/// configuration files but never re-keys credentials; the ids survive, so
+/// entries stay reachable across relocations by construction.
 pub fn provider_credential_id(provider_id: &str) -> String {
     // `PHL:` namespaces our entries inside the user's credential manager;
     // provider ids are already validated (`valid_provider_name`).

@@ -145,6 +145,7 @@ const mock = bindRepositoryMethods(mockRepository)
 
 export const tauriRepository: PhlRepository = {
   ...mock,
+  enrichModelMetadata: desktopVersions.enrichModelMetadata,
   // The plugin module is real on desktop too (community registry + Rust
   // download pipeline); see tauriPlugins for what it overrides.
   ...tauriPluginOverrides,

@@ -111,21 +111,44 @@ export interface CreateProgress {
   detail?: string
 }
 
+/**
+ * Where a plugin catalog actually came from. The Rust side walks from the
+ * configured source down the fallback list; the market surfaces this so a
+ * stale mirror — or an offline cache replay — can never masquerade as the
+ * live catalog.
+ */
+export interface PluginCatalogOrigin {
+  /** The base URL that served the catalog, or `'cache'` for an offline replay. */
+  servedFrom: string
+  /** The configured source failed and a fallback served this list. */
+  usedFallback: boolean
+  /** Every online source failed; the list is the last cached fetch. */
+  fromCache: boolean
+  /** The registry's own `updated` stamp (YYYY-MM-DD), when present. */
+  updated: string | null
+}
+
 export interface PluginCatalog {
   plugins: Plugin[]
   /** The live registry was unreachable; `plugins` comes from cache/bundle. */
   offline?: boolean
   error?: string
+  /** Provenance of this fetch — desktop catalogs only, absent in the mock. */
+  origin?: PluginCatalogOrigin
 }
 
 export interface PhlRepository {
+  enrichModelMetadata: (args: import('@/types').ModelMetadataRequest) => Promise<import('@/types').ModelMetadataBatch>
   listInstances(): Promise<Instance[]>
   listVersions(): Promise<DshVersion[]>
   listRuntimes(): Promise<Runtime[]>
   /**
    * The plugin catalog degrades gracefully instead of failing hard: when the
-   * live registry is unreachable the repository serves a cached or bundled
-   * copy and says so via `offline`, so the market is never a dead page.
+   * configured registry source fails the walk continues down the fallback
+   * list, and when every online source fails the repository serves the last
+   * cached fetch. `origin` says which of these happened (mirror / cache /
+   * freshness stamp); `offline` marks the dead-page case where even the
+   * cache was missing.
    */
   listPlugins(): Promise<PluginCatalog>
   listTemplates(): Promise<InstanceTemplate[]>

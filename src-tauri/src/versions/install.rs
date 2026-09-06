@@ -319,10 +319,24 @@ pub(crate) async fn run_install(
 #[tauri::command]
 pub async fn remove_version_dir(
     processes: State<'_, Processes>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     version_name: String,
 ) -> Result<(), String> {
-    remove_version_dir_inner(&phl.root(), &processes, &version_name).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("version-remove"),
+        "version-remove",
+        format!("删除版本 {version_name}"),
+        vec![crate::resources::Resource::Version(version_name.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            remove_version_dir_inner(&phl.root(), &processes, &version_name).await
+        },
+    )
+    .await
 }
 
 pub(crate) async fn remove_version_dir_inner(

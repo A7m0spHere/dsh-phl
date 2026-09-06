@@ -126,7 +126,7 @@ pub(crate) async fn verify_instance_inner(root: &Path, id: &str) -> Result<Verif
 
     checks.extend(check_dsh(root, &manifest).await);
     checks.extend(check_runtime(root, &manifest).await);
-    checks.extend(check_config(&dir).await);
+    checks.extend(check_config(&dir, &manifest).await);
     checks.extend(check_api(root, &manifest).await);
     checks.extend(check_launch(&dir, &manifest).await);
     checks.push(check_writable(&dir).await);
@@ -316,9 +316,12 @@ async fn check_runtime(
     out
 }
 
-async fn check_config(dir: &Path) -> Vec<VerifyCheck> {
+async fn check_config(
+    dir: &Path,
+    manifest: &crate::instances::InstanceManifest,
+) -> Vec<VerifyCheck> {
     let mut out = Vec::new();
-    let dsh_home = dir.join("dsh-home");
+    let dsh_home = crate::instances::home_of(dir, manifest);
     let settings = dsh_home.join("settings.yaml");
     if settings.exists() {
         match tokio::fs::read_to_string(&settings).await {
@@ -524,6 +527,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         }
     }
 

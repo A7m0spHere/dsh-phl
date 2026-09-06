@@ -29,6 +29,7 @@ export function ProviderCard({
   onEdit: (patch: Partial<ApiProvider>) => void
 }) {
   const [editing, setEditing] = useState(false)
+  const [modelsEnriching, setModelsEnriching] = useState(false)
   const [form, setForm] = useState<ProviderForm>(() => providerToForm(provider))
   const { t, riseItem } = useMotion()
 
@@ -41,6 +42,7 @@ export function ProviderCard({
   }
 
   const save = () => {
+    if (modelsEnriching) return
     const name = (form.name.trim() || suggestProviderName(form.displayName)).toLowerCase()
     onEdit({
       name,
@@ -133,9 +135,9 @@ export function ProviderCard({
                   <X size={12} />
                   取消
                 </Button>
-                <Button size="sm" variant="primary" onClick={save}>
+                <Button size="sm" variant="primary" disabled={modelsEnriching} onClick={save}>
                   <Check size={12} />
-                  保存
+                  {modelsEnriching ? '模型补全中…' : '保存'}
                 </Button>
               </>
             )}
@@ -153,6 +155,7 @@ export function ProviderCard({
             >
               <div className="mt-3 border-t border-line pt-3">
                 <ProviderFields
+                  onModelsEnrichingChange={setModelsEnriching}
                   providerId={provider.id}
                   form={form}
                   patch={(p) => setForm((f) => ({ ...f, ...p }))}

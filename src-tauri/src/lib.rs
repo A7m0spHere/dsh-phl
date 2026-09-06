@@ -5,12 +5,17 @@ use tauri::{Emitter, Manager, WindowEvent};
 mod api_config;
 mod credentials;
 mod diagnostics;
+mod discovery;
+mod errors;
 mod instances;
 mod launch;
+mod pack;
 mod paths;
 mod plugins;
 mod repair;
+mod resources;
 mod runtimes;
+mod sessions;
 mod storage;
 mod verify;
 mod versions;
@@ -116,14 +121,25 @@ fn reveal_path(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<_, ()>::new("model-metadata")
+                .invoke_handler(tauri::generate_handler![
+                    api_config::catalog::enrich_model_metadata
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .manage(versions::Transfers::default())
+        .manage(resources::ResourceLocks::default())
+        .manage(resources::Tasks::default())
         .manage(launch::Launches::default())
         .manage(launch::Processes::default())
+        .manage(launch::registry::Registry::default())
         .manage(paths::PhlState::load())
         .manage(credentials::Creds::platform_default())
         .invoke_handler(tauri::generate_handler![
             app_ready,
+            resources::list_tasks,
             exit_app,
             open_external,
             reveal_path,
@@ -146,14 +162,30 @@ pub fn run() {
             instances::delete_instance,
             instances::clone_instance,
             instances::instance_disk_usage,
+            instances::instance_session_count,
             instances::scan_orphan_instances,
             instances::delete_orphan_instance,
+            instances::adoption::preview_adoption,
+            instances::adoption::adopt_instance,
+            instances::adoption::list_adoption_sessions,
             instances::bundle::export_instance_bundle,
+            instances::bundle::preview_instance_export,
             instances::bundle::read_instance_bundle,
             instances::bundle::import_instance_bundle,
             instances::snapshot::create_instance_snapshot,
             instances::snapshot::restore_instance_snapshot,
             instances::snapshot::delete_instance_snapshot,
+            discovery::discover_dsh,
+            discovery::inspect_dsh_home,
+            discovery::inspect_dsh_executable,
+            sessions::list_sessions,
+            sessions::inspect_session,
+            sessions::copy_session,
+            sessions::copy_sessions,
+            pack::export::preview_instance_pack_export,
+            pack::export::export_instance_pack,
+            pack::install::preview_pack,
+            pack::install::install_pack,
             runtimes::list_node_runtimes,
             runtimes::list_installed_runtimes,
             runtimes::system_node_version,
@@ -163,6 +195,7 @@ pub fn run() {
             launch::launch_instance,
             launch::stop_instance,
             launch::cancel_launch,
+            launch::adopt_processes,
             api_config::library::load_api_config,
             api_config::library::save_api_config,
             api_config::sync::sync_instance_api,
@@ -172,6 +205,8 @@ pub fn run() {
             storage::free_space,
             storage::root_data_summary,
             storage::move_root_data,
+            storage::storage_migration_status,
+            storage::storage_migration_undo,
             repair::repair_instance,
             repair::scan_residue,
             verify::verify_instance,
@@ -179,6 +214,15 @@ pub fn run() {
             diagnostics::clear_download_cache,
         ])
         .setup(|app| {
+            // Bind the process registry before any command can see it: the
+            // records a previous run wrote are the input for boot adoption.
+            {
+                let state = app.state::<paths::PhlState>();
+                let registry = app.state::<launch::registry::Registry>();
+                if let Some(path) = state.sibling_file("processes.json") {
+                    registry.bind(path);
+                }
+            }
             // Safety net: if the frontend fails to boot it can never call
             // `app_ready`, and a permanently invisible window looks like a
             // crash. Reveal it anyway so the error is at least visible.

@@ -55,6 +55,28 @@ export interface InstanceRuntimeState {
 
 export type InstanceKind = 'production' | 'development' | 'test' | 'sandbox'
 
+/**
+ * How PHL relates to an instance's DSH_HOME (development spec §25, schema v2).
+ * - `managed-copy`: PHL owns an isolated copy inside the instance directory.
+ * - `external`: adopted in place — PHL launches and reads the user's own
+ *   DSH_HOME but refuses every destructive write (snapshot restore, plugin
+ *   changes, repair, API sync).
+ * - `pack-installed`: a copy created by installing a `.phlpack` (P1).
+ */
+export type ManagementMode = 'managed-copy' | 'external' | 'pack-installed'
+
+/** How the instance came to exist. Pure provenance for display. */
+export type InstanceSourceKind = 'created' | 'adopted' | 'phlpack'
+
+/** Adoption provenance recorded at the moment of adoption (display only). */
+export interface AdoptedFrom {
+  dshHome: string
+  detectedVersion?: string | null
+  adoptedAt: string
+  /** 'copy' | 'external' — mirrors the management mode chosen at adoption. */
+  mode: string
+}
+
 export interface Instance {
   id: string
   name: string
@@ -88,6 +110,16 @@ export interface Instance {
    * the feature (treated as unmanaged until the user binds it explicitly).
    */
   api?: ApiBinding | null
+  /**
+   * Adoption metadata (schema v2). Optional so pre-adoption instances and mock
+   * data omit it; the read layer normalises absent to `managed-copy`/`created`.
+   * A UI gate keys destructive affordances off `managementMode === 'external'`.
+   */
+  managementMode?: ManagementMode
+  source?: InstanceSourceKind
+  /** Absolute external DSH_HOME, present only when `managementMode` is external. */
+  externalHome?: string | null
+  adoptedFrom?: AdoptedFrom | null
 }
 
 export interface Snapshot {

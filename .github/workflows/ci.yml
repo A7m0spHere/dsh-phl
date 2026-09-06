@@ -43,6 +43,11 @@ jobs:
     name: Rust (fmt · clippy · test · check)
     runs-on: windows-latest
     needs: frontend
+    # The manifest lives in src-tauri/, not at the repo root; only the `run`
+    # steps below are affected — `uses:` steps keep the workspace root.
+    defaults:
+      run:
+        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
 
@@ -58,26 +63,29 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo fmt --check
         shell: bash
 
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
         shell: bash
 
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo test
         shell: bash
 
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: cargo check
         shell: bash
 
   # Full NSIS bundle is the slowest step and not required per-commit; it runs
-  # for tags (release pipeline) and on demand.
+  # on demand only. Official releases go through release.yml (tag-triggered),
+  # which builds and publishes separately — CI never builds for a tag.
   tauri-build:
     name: Windows bundle
     runs-on: windows-latest
     needs: [frontend, rust]
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
@@ -91,6 +99,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - run: npm run app:build
         shell: bash

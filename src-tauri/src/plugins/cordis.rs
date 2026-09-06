@@ -16,7 +16,7 @@ use crate::paths::PhlState;
 // — comments and unrelated entries (including DSH's own) survive untouched,
 // which a serde_yaml round-trip would not guarantee.
 
-fn patch_path(instance_root: &Path) -> PathBuf {
+pub(crate) fn patch_path(instance_root: &Path) -> PathBuf {
     instance_root.join("cordis.patch.yml")
 }
 
@@ -212,33 +212,63 @@ pub(crate) async fn register_cordis_patch(
 }
 #[tauri::command]
 pub async fn set_plugin_enabled(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     instance_id: String,
     registry_id: String,
     enabled: bool,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
-    set_plugin_disabled(&profile, &registry_id, !enabled).await
+    let profile =
+        crate::instances::writable_profile_dir(&phl.root(), &instance_id, "修改插件启用状态进")
+            .await?;
+    let verb = if enabled { "启用" } else { "停用" };
+    crate::resources::guarded(
+        crate::resources::next_task_id("plugin-toggle"),
+        "plugin-toggle",
+        format!("{verb}插件 {registry_id}"),
+        vec![crate::resources::Resource::Instance(instance_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { set_plugin_disabled(&profile, &registry_id, !enabled).await },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn uninstall_plugin(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     instance_id: String,
     registry_id: String,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
-    remove_plugin_block(&profile, &registry_id).await?;
-    let dir = profile.join("node_modules").join(&registry_id);
-    crate::paths::ensure_under_root(&profile.join("node_modules"), &dir)?;
-    if dir.exists() {
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    let profile =
+        crate::instances::writable_profile_dir(&phl.root(), &instance_id, "卸载插件进").await?;
+    crate::resources::guarded(
+        crate::resources::next_task_id("plugin-uninstall"),
+        "plugin-uninstall",
+        format!("卸载插件 {registry_id}"),
+        vec![crate::resources::Resource::Instance(instance_id)],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            remove_plugin_block(&profile, &registry_id).await?;
+            let dir = profile.join("node_modules").join(&registry_id);
+            crate::paths::ensure_under_root(&profile.join("node_modules"), &dir)?;
+            if dir.exists() {
+                tokio::fs::remove_dir_all(&dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        },
+    )
+    .await
 }
 
 #[cfg(test)]

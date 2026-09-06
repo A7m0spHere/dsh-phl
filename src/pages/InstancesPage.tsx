@@ -5,7 +5,9 @@ import {
   CirclePause,
   CirclePlay,
   FileUp,
+  FolderInput,
   LayoutGrid,
+  Package,
   Plus,
   Rows3,
   Search,
@@ -29,7 +31,7 @@ import {
   type InstanceFilter,
   type InstanceSort,
 } from '@/stores'
-import { Button, EmptyState, Input, Segmented, Skeleton } from '@/components/ui'
+import { Button, EmptyState, Input, Menu, Segmented, Skeleton } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceCard } from '@/components/instance/InstanceCard'
@@ -175,10 +177,19 @@ export function InstancesPage() {
       })
       return
     }
+    // 凭据值从不随 Bundle 携带:预览里列出导入后需要重新配置的变量,
+    // 机器本地变量的值同样会在导入时丢弃。
+    const notes: string[] = ['Bundle 携带配置与插件记录；插件文件请在导入后通过插件页重新安装。']
+    if (preview.credentials.length > 0) {
+      notes.push(`导入后需重新配置凭据：${preview.credentials.join('、')}。`)
+    }
+    if (preview.machineOnly.length > 0) {
+      notes.push(`机器本地变量（${preview.machineOnly.join('、')}）的值不随 Bundle 携带。`)
+    }
     const ok = await confirm({
       title: `导入「${preview.name}」`,
       message: `版本 ${preview.versionId} · Runtime ${preview.runtimeId} · 端口 ${preview.port} · ${preview.pluginCount} 条插件记录。`,
-      detail: 'Bundle 携带配置与插件记录；插件文件请在导入后通过插件页重新安装。',
+      detail: notes.join(' '),
       confirmLabel: '导入',
     })
     if (!ok) return
@@ -207,15 +218,19 @@ export function InstancesPage() {
       api: { inheritance: 'default', providerIds: [] },
     }
     try {
-      const record = await importInstanceBundle(path, manifest)
-      admitInstance(instanceFromRecord(record))
+      const outcome = await importInstanceBundle(path, manifest)
+      admitInstance(instanceFromRecord(outcome.record))
+      const notes: string[] = []
+      if (preview.pluginCount > 0) {
+        notes.push(`包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`)
+      }
+      if (outcome.credentials.length > 0) {
+        notes.push(`需重新配置凭据：${outcome.credentials.join('、')}。`)
+      }
       ui.toast({
         kind: 'success',
-        title: `已导入「${record.name}」`,
-        message:
-          preview.pluginCount > 0
-            ? `包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`
-            : undefined,
+        title: `已导入「${outcome.record.name}」`,
+        message: notes.length > 0 ? notes.join(' ') : undefined,
       })
     } catch (err) {
       ui.toast({
@@ -272,9 +287,33 @@ export function InstancesPage() {
           subtitle="每个实例固定自己的 DSH 版本、Runtime、插件与 DSH_HOME，可以同时运行、互不污染。"
           actions={
             <>
-              <Button variant="secondary" onClick={() => void importBundle()}>
-                <FileUp size={13} />
-                导入 Bundle
+              {/* The three primary doors are 新建 / 接入 / 安装整合包; the
+                  legacy Bundle importer stays reachable but demoted (spec
+                  §26). Menu first, so a future second "other" format slots
+                  in without re-growing the header. */}
+              <Menu
+                align="start"
+                trigger={({ open, toggle }) => (
+                  <Button variant="ghost" onClick={toggle} aria-expanded={open}>
+                    更多导入方式
+                  </Button>
+                )}
+                items={[
+                  {
+                    id: 'bundle',
+                    label: '导入 Bundle',
+                    icon: <FileUp size={13} />,
+                    onSelect: () => void importBundle(),
+                  },
+                ]}
+              />
+              <Button variant="secondary" onClick={() => push({ name: 'adopt' })}>
+                <FolderInput size={13} />
+                接入本机 DSH
+              </Button>
+              <Button variant="secondary" onClick={() => push({ name: 'installPack' })}>
+                <Package size={13} />
+                安装整合包
               </Button>
               <Button variant="primary" onClick={() => push({ name: 'create' })}>
                 <Plus size={13} />

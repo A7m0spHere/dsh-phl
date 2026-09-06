@@ -166,6 +166,8 @@ pub async fn system_node_version() -> Option<String> {
 #[tauri::command]
 pub async fn download_node_runtime(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     transfer_id: String,
     dist_base: String,
@@ -175,14 +177,31 @@ pub async fn download_node_runtime(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<(), String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_runtime_install(
-        &flag,
-        &dist_base,
-        &version_name,
-        &version,
-        &phl.root(),
-        keep_archive,
-        &on_progress,
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "runtime-install",
+        format!("安装 Runtime {version_name}"),
+        vec![crate::resources::Resource::Runtime(version_name.clone())],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |task| async move {
+            task.set_phase("downloading");
+            let r = run_runtime_install(
+                &flag,
+                &dist_base,
+                &version_name,
+                &version,
+                &phl.root(),
+                keep_archive,
+                &on_progress,
+            )
+            .await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
     )
     .await;
     transfers.release(&transfer_id);
@@ -191,10 +210,26 @@ pub async fn download_node_runtime(
 
 #[tauri::command]
 pub async fn remove_runtime_dir(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     phl: State<'_, PhlState>,
     runtime_name: String,
 ) -> Result<(), String> {
-    let safe = sanitize_version(&runtime_name)?;
+    crate::resources::guarded(
+        crate::resources::next_task_id("runtime-remove"),
+        "runtime-remove",
+        format!("删除 Runtime {runtime_name}"),
+        vec![crate::resources::Resource::Runtime(runtime_name.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move { remove_runtime_dir_body(&phl, &runtime_name).await },
+    )
+    .await
+}
+
+async fn remove_runtime_dir_body(phl: &PhlState, runtime_name: &str) -> Result<(), String> {
+    let safe = sanitize_version(runtime_name)?;
     let root = phl.root();
     let dir = root.join("runtimes").join(&safe);
     ensure_under_root(&root.join("runtimes"), &dir)?;

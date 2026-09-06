@@ -8,9 +8,48 @@ use std::time::Duration;
 
 use super::Processes;
 
+/// One bounded head read: `dsh web:` prints the token line in the first
+/// kilobytes, and a wedged plugin could otherwise spam the log until reading
+/// it back costs the same memory as the log itself.
+pub(crate) const LOG_HEAD_WINDOW: u64 = 256 * 1024;
+
+/// The cap for a bounded tail read (O-12): startup diagnostics ask for the
+/// last 30 lines *after a failure* — the log can have grown to megabytes of
+/// plugin noise by then, and slurping it to slice off 30 lines is the whole
+/// problem, not the solution.
+pub(crate) const LOG_TAIL_WINDOW: u64 = 256 * 1024;
+
+/// Read up to `window` bytes from the end of `path` without loading more.
+/// The flag says whether the beginning of the file was cut away.
+pub(crate) async fn read_tail(path: &Path, window: u64) -> (Vec<u8>, bool) {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return (Vec::new(), false);
+    };
+    let Ok(len) = file.metadata().await.map(|m| m.len()) else {
+        return (Vec::new(), false);
+    };
+    let start = len.saturating_sub(window);
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return (Vec::new(), false);
+    }
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    if file.take(window).read_to_end(&mut buf).await.is_err() {
+        return (Vec::new(), false);
+    }
+    (buf, start > 0)
+}
+
+/// One read of an already-settled log — used by restart adoption, where the
+/// token line is long past any buffering.
+pub(crate) async fn read_web_url_once(log_path: &Path) -> Option<String> {
+    let raw = read_head(log_path).await?;
+    parse_web_url(&raw)
+}
+
 pub(crate) async fn read_web_url(log_path: &Path) -> Option<String> {
     for _ in 0..8 {
-        if let Ok(raw) = tokio::fs::read_to_string(log_path).await {
+        if let Some(raw) = read_head(log_path).await {
             if let Some(url) = parse_web_url(&raw) {
                 return Some(url);
             }
@@ -18,6 +57,19 @@ pub(crate) async fn read_web_url(log_path: &Path) -> Option<String> {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     None
+}
+
+/// The token line sits at the top of the log; a bounded head read gets it
+/// without materialising whatever the instance has printed since.
+async fn read_head(log_path: &Path) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(log_path).await.ok()?;
+    let mut buf = Vec::new();
+    file.take(LOG_HEAD_WINDOW)
+        .read_to_end(&mut buf)
+        .await
+        .ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 pub(crate) fn parse_web_url(log_text: &str) -> Option<String> {
@@ -137,7 +189,10 @@ pub(crate) fn allocate_port(
             .iter()
             .find(|(id, e)| e.port == wanted && id.as_str() != instance_id)
         {
-            return Err(format!("端口 {wanted} 已被实例 {other} 占用"));
+            return Err(crate::errors::coded(
+                crate::errors::ErrCode::PortConflict,
+                format!("端口 {wanted} 已被实例 {other} 占用"),
+            ));
         }
         // The bind test is not optional here either. Checking only PHL's own
         // map meant a port held by an unrelated program passed: DSH then failed
@@ -188,13 +243,46 @@ pub(crate) async fn count_plugins(profile_dir: &Path) -> usize {
     count
 }
 
-pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
-    let Ok(raw) = tokio::fs::read_to_string(path).await else {
-        return String::new();
+/// Per-instance retention for `launch-*.log` (O-12). A long-running instance
+/// writes one file per launch, so without a cap an old instance's `logs/`
+/// grows unbounded. Keep the newest `keep` files by name (the ISO timestamp
+/// in the name sorts chronologically) and delete the rest. Best-effort: a
+/// retention sweep must never fail a launch.
+pub(crate) async fn prune_launch_logs(logs_dir: &Path, keep: usize) {
+    let Ok(mut dir) = tokio::fs::read_dir(logs_dir).await else {
+        return;
     };
-    let lines: Vec<&str> = raw.lines().collect();
+    let mut names: Vec<(String, PathBuf)> = Vec::new();
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("launch-") && name.ends_with(".log") {
+            names.push((name, entry.path()));
+        }
+    }
+    if names.len() <= keep {
+        return;
+    }
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, path) in names.iter().take(names.len() - keep) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
+    // Bounded (O-12): read the last LOG_TAIL_WINDOW bytes, never the whole
+    // file. When the window cut the first line mid-way, that fragment is not
+    // a line and is dropped.
+    let (bytes, cut) = read_tail(path, LOG_TAIL_WINDOW).await;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if cut && !lines.is_empty() {
+        lines.remove(0);
+    }
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
+    lines[start..].join(
+        "
+",
+    )
 }
 
 /// The spawned node is only the tree root — DSH shells out to plugins and

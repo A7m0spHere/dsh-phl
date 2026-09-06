@@ -2,12 +2,54 @@
 //! read/migrate/refuse classification, and the crash-safe writer.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::manifest_path;
 use crate::api_config::ApiBinding;
+
+/// How PHL relates to the instance's DSH_HOME. The discriminator for every
+/// dangerous operation's safety story (development spec §25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagementMode {
+    /// PHL owns an isolated copy at `<instance>/dsh-home`; the source
+    /// environment (if any) was left untouched.
+    #[default]
+    ManagedCopy,
+    /// The DSH_HOME lives in place, outside PHL's tree (adopted "原地接入").
+    /// PHL launches and reads it but must not rewrite it: destructive
+    /// operations are gated on this mode (snapshot restore, plugin writes).
+    External,
+    /// Created by installing a `.phlpack` (P1). Structurally a managed copy
+    /// with extra provenance; defined now so the field never churns later.
+    PackInstalled,
+}
+
+impl ManagementMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ManagementMode::ManagedCopy => "managed-copy",
+            ManagementMode::External => "external",
+            ManagementMode::PackInstalled => "pack-installed",
+        }
+    }
+}
+
+/// How the instance came to exist. Pure provenance for display and the
+/// adoption record; it never gates behaviour the way `ManagementMode` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceSource {
+    /// Created from scratch through the create wizard.
+    #[default]
+    Created,
+    /// Adopted from an existing local DSH (copy or in-place).
+    Adopted,
+    /// Installed from a `.phlpack` (P1).
+    Phlpack,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,13 +87,79 @@ pub struct InstanceManifest {
     /// manifests written before the feature existed — treated as unmanaged.
     #[serde(default)]
     pub api: Option<ApiBinding>,
+    /// Whether PHL owns a copy of the DSH_HOME or manages it in place. Schema
+    /// v2; a v1 manifest has no field and defaults to `ManagedCopy` — exactly
+    /// right, because every v1 instance is a PHL-owned copy.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// How this instance came to exist. Defaults to `Created` for the same
+    /// reason: pre-adoption manifests were all created.
+    #[serde(default)]
+    pub source: InstanceSource,
+    /// The absolute DSH_HOME path, present *only* for `External` instances
+    /// (their home is outside the instance tree, so it cannot be derived).
+    /// Every other mode derives the home from the instance directory so a
+    /// data-root relocation keeps working.
+    #[serde(default)]
+    pub external_home: Option<String>,
+    /// Adoption provenance: the source environment's path and version at the
+    /// moment of adoption. Kept for display and forensics; adoption refuses
+    /// to touch the source again, so nothing here is trusted for paths.
+    #[serde(default)]
+    pub adopted_from: Option<AdoptedFrom>,
 }
 
-/// A manifest plus everything derived from the directory it lives in.
-/// The manifest format this build reads and writes. Bump only together with a
-/// migration story: older versions must keep parsing, and this build must
+/// Where an instance was adopted from, as recorded at adoption time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedFrom {
+    pub dsh_home: String,
+    #[serde(default)]
+    pub detected_version: Option<String>,
+    pub adopted_at: String,
+    /// The `ManagementMode` string the user chose (`managed-copy` / `external`),
+    /// kept as a string so the record reads plainly in `instance.json`.
+    pub mode: String,
+}
+
+/// The DSH_HOME a manifest points at: an external instance names its own
+/// absolute path; everything else keeps the isolated copy inside the
+/// instance directory. Centralised so no module re-derives the layout.
+pub(crate) fn home_of(dir: &Path, manifest: &InstanceManifest) -> PathBuf {
+    match manifest.management_mode {
+        ManagementMode::External => match manifest.external_home.as_deref() {
+            Some(home) if !home.trim().is_empty() => PathBuf::from(home),
+            // A v2 manifest that claims external but has no path is corrupt
+            // in a way we can survive: fall back to the local copy rather
+            // than launch against an empty path. The adoption writer always
+            // sets it, so this only guards hand-edited files.
+            _ => dir.join("dsh-home"),
+        },
+        ManagementMode::ManagedCopy | ManagementMode::PackInstalled => dir.join("dsh-home"),
+    }
+}
+
+/// The active profile directory (the one owning `node_modules`), resolved
+/// through `home_of` so external instances point at their real home.
+pub(crate) fn profile_root_of(dir: &Path, manifest: &InstanceManifest) -> PathBuf {
+    home_of(dir, manifest)
+        .join("profiles")
+        .join(&manifest.profile)
+}
+
+/// The manifest format this build reads and writes. Bump only together with
+/// a migration story: older versions must keep parsing, and this build must
 /// refuse (not guess at) anything written by a newer one.
-pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds the adoption fields (`managementMode`, `source`, `externalHome`,
+/// `adoptedFrom`). Every one carries a serde default whose meaning is "the
+/// v1 state of the world" — a v1 instance is by definition a PHL-owned copy
+/// that was created, not adopted — so a v1 manifest parses into v2 with no
+/// on-disk rewrite beyond the stamp `write_manifest` already performs. That
+/// is the whole migration: additive fields with backward defaults, which is
+/// why older files keep loading and this build still refuses (via
+/// `classify_manifest`) anything stamped *above* it.
+pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// What reading an `instance.json` actually found. The distinctions matter:
 /// `Missing` means "not an instance at all", `Corrupt` is reclaimable junk,

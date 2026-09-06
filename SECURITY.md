@@ -25,17 +25,35 @@ PHL 是一个管理本地文件系统、下载并执行第三方代码（插件�
 
 ### 凭据与 Secret
 
-- PHL **不存储 API Key 明文**：全局供应商库只保存「环境变量名」（`apiKeyEnv`），
-  启动时由后端解析并注入子进程环境；日志不输出 Key、Authorization 头或完整 secret。
-- Bundle 导出/导入不含任何凭据；实例清单（`instance.json`）不含 secret 字段。
+- Key 本体存放在两处：全局供应商库 `config/api.json` 可以保存用户粘贴的
+  **Key 明文**（本地文件，不进实例目录、不进任何 Bundle），实例目录只持有
+  「环境变量名」（`apiKeyEnv`）——`settings.yaml` 写的是名字，启动时由后端
+  把 Key 注入子进程环境。
+- PHL 自身日志不输出 Key、Authorization 头或完整 secret；子进程（dsh）的
+  stdout/stderr 会写入实例 `logs/`，其内容由 DSH 决定，超出 PHL 的承诺范围。
+- **Bundle（格式 2）导出不含凭据值**：变量名命中全局库声明的 `apiKeyEnv`，
+  或名称含凭据字样（KEY / TOKEN / SECRET / PASS / CREDENTIAL / AUTH …）时，
+  只导出变量名并提示导入方重新配置；`PATH`、`DSH_HOME` 等机器本地变量同样
+  不导出。导入端对格式 1 旧包执行同一过滤，被剥离的凭据名在导入预览与
+  导入结果中明示。
+- 分类基于**变量名**：若把 Key 存进一个既非 `apiKeyEnv`、名称也不含凭据
+  字样的普通变量，导出不会识别它——请把 Key 交给全局供应商库，或避免把
+  secret 写入实例环境变量。
+- 实例清单（`instance.json`）没有 secret 字段；快照是 `dsh-home` 的完整
+  副本，同样只含变量名（Key 由启动时注入，不落盘到实例目录）。
+- 应用状态文件（数据根指针 `root.json`、迁移日志 `migration.json`、进程登记
+  `processes.json`，均位于用户配置目录的 `PHL/` 下、数据根之外）只保存路径、目录名、
+  字节数与 PID 等元数据，不含任何凭据值。
 - 如果发现 secret 被写入磁盘文件、日志或 Bundle，请立即报告。
 
 ### 插件供应链
 
 - 插件是任意第三方 npm 包 / GitHub 归档，**安装即执行其声明的一切**——PHL 目前
   的信任边界是「实例内隔离」，不存在沙箱。安装前请审查来源。
-- npm 安装校验 registry `dist.integrity`（sha512）；GitHub HEAD 归档目前**没有**
-  完整性保障，这是已知且在改进中的缺口（pin/commit SHA 固定尚未实现）。
+- npm 安装校验 registry `dist.integrity`（sha512）；GitHub 来源在固定到 tag/commit 时
+  解析出确切 commit 并对下载内容计算 sha512（`actualIntegrity` 写入安装标记，来源与
+  信任状态一并记录）。HEAD（未固定）归档没有可校验的内容承诺，安装标记会记为
+  `unverified`——需要完整性保障时，请把插件固定到 tag 或 commit 再安装。
 - 插件注册表数据（`plugins.json`、截图链接）来自社区，打开外部链接前请自行确认。
 
 ### 更新与发布完整性（Updater / Release integrity）

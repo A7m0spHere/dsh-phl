@@ -1,7 +1,6 @@
 //! Point-in-time copies of an instance's `dsh-home`: create under a staging
 //! name, restore by copy-swap with the previous tree as backup, delete.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,43 +12,14 @@ use tauri::State;
 use super::copy::SkipRule;
 use super::copy::{copy_tree_sync, copy_tree_with_progress};
 use super::{
-    build_record, instance_dir, instances_root, load_manifest, profile_root, sanitize_segment,
-    scan_plugins, CloneProgress, InstanceRecord,
+    build_record, home_of, instance_dir, instances_root, load_manifest, profile_root_of,
+    reject_external_write, sanitize_segment, scan_plugins, CloneProgress, InstanceRecord,
 };
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, PhlState};
 use crate::versions::{now_iso, Transfers};
 
 /* ------------------------------ snapshots ----------------------------- */
-
-/// Environment variables that let their value execute code, or redirect the
-/// process to a different runtime, and so must never survive an import.
-///
-/// A bundle is the format PHL tells users to share, so its contents are
-/// attacker-supplied by design. `run_launch` applies instance env verbatim
-/// (minus `DSH_HOME`), which means an imported `NODE_OPTIONS=--require
-/// C:\evil.js` would run on the first 启动. Filtering belongs here, at the
-/// trust boundary, rather than in the launcher's own allow-list.
-const UNSAFE_IMPORT_ENV: &[&str] = &[
-    "NODE_OPTIONS",
-    "NODE_REPL_EXTERNAL_MODULE",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "PATH",
-    "NODE_PATH",
-];
-
-pub(crate) fn sanitize_imported_env(env: HashMap<String, String>) -> HashMap<String, String> {
-    env.into_iter()
-        .filter(|(key, _)| {
-            let upper = key.to_ascii_uppercase();
-            // `DSH_HOME` is the isolation boundary and is recomputed per
-            // instance anyway; the rest are code-injection vectors.
-            upper != "DSH_HOME" && !UNSAFE_IMPORT_ENV.contains(&upper.as_str())
-        })
-        .collect()
-}
 
 /// A recorded point-in-time copy of the instance's `dsh-home`. The workspace
 /// and logs are deliberately not part of it: a snapshot exists to make the
@@ -109,8 +79,11 @@ pub(crate) fn ensure_not_running(processes: &Processes, id: &str) -> Result<(), 
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_instance_snapshot(
     transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     transfer_id: String,
@@ -118,9 +91,26 @@ pub async fn create_instance_snapshot(
     on_progress: Channel<CloneProgress>,
 ) -> Result<SnapshotFile, String> {
     let flag = transfers.take(&transfer_id);
-    let result = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
-        let _ = on_progress.send(p);
-    })
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
+        "snapshot-create",
+        format!("创建快照 {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        Some(flag.clone()),
+        &locks,
+        &tasks,
+        |task| async move {
+            task.set_phase("copying");
+            let r = run_snapshot_create(&flag, &processes, &state.root(), &id, &|p| {
+                let _ = on_progress.send(p);
+            })
+            .await;
+            if crate::versions::cancelled(&flag) {
+                return Err("cancelled".into());
+            }
+            r
+        },
+    )
     .await;
     transfers.release(&transfer_id);
     result
@@ -138,7 +128,10 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
 
-    let dsh_home = dir.join("dsh-home");
+    // Snapshotting reads the home; for an external instance that is the
+    // user's own directory, and copying it *out* into the instance tree is
+    // safe. The danger is only ever the restore (below).
+    let dsh_home = home_of(&dir, &manifest);
     if !dsh_home.exists() {
         return Err("实例缺少 dsh-home，无法创建快照".into());
     }
@@ -187,15 +180,17 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         }
     };
 
+    // Counted before the struct: `manifest.version_id` is moved into the
+    // literal, and `profile_root_of` borrows the manifest — ordering them in
+    // one literal partial-moves before the borrow.
+    let plugin_count = scan_plugins(&profile_root_of(&dir, &manifest)).await.len();
     let snapshot = SnapshotFile {
         id: snap_id,
         label: format!("快照 {}", now_iso().replace('T', " ").trim_end_matches('Z')),
         created_at: now_iso(),
         version_id: manifest.version_id,
         runtime_id: manifest.runtime_id,
-        plugin_count: scan_plugins(&profile_root(&dir, &manifest.profile))
-            .await
-            .len(),
+        plugin_count,
         size: bytes_total,
     };
     let body = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
@@ -215,12 +210,32 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 /// and rolling back to the same point twice must not be a trap.
 #[tauri::command]
 pub async fn restore_instance_snapshot(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<InstanceRecord, String> {
-    restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("snapshot-restore"),
+        "snapshot-restore",
+        format!("恢复快照 {snapshot_id} → {id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            let r = restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await;
+            if r.is_ok() {
+                if let Ok(dir) = instance_dir(&state.root(), &id) {
+                    crate::instances::invalidate_disk_usage(&dir);
+                }
+            }
+            r
+        },
+    )
+    .await
 }
 
 pub(crate) async fn restore_snapshot_inner(
@@ -231,7 +246,12 @@ pub(crate) async fn restore_snapshot_inner(
 ) -> Result<InstanceRecord, String> {
     let id = sanitize_segment(id, "实例 id")?;
     let dir = instance_dir(root, &id)?;
+    let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
+    // Restore overwrites the live home in place. For an external instance
+    // that would stamp PHL's copy over the user's own directory — the one
+    // operation adoption explicitly forbids.
+    reject_external_write(&manifest, &id, "还原快照并覆盖")?;
 
     let snap_dir = snapshot_dir(&dir, snapshot_id)?;
     let raw = tokio::fs::read_to_string(snap_dir.join("snapshot.json"))
@@ -242,7 +262,7 @@ pub(crate) async fn restore_snapshot_inner(
     if !snap_home.exists() {
         return Err(format!("快照 {snapshot_id} 缺少 dsh-home，无法还原"));
     }
-    let current = dir.join("dsh-home");
+    let current = home_of(&dir, &manifest);
     if !current.exists() {
         return Err("实例缺少 dsh-home，无法还原".into());
     }
@@ -278,12 +298,26 @@ pub(crate) async fn restore_snapshot_inner(
 
 #[tauri::command]
 pub async fn delete_instance_snapshot(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
     id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
-    delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+    crate::resources::guarded(
+        crate::resources::next_task_id("snapshot-delete"),
+        "snapshot-delete",
+        format!("删除快照 {snapshot_id}"),
+        vec![crate::resources::Resource::Instance(id.clone())],
+        None,
+        &locks,
+        &tasks,
+        move |_| async move {
+            delete_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await
+        },
+    )
+    .await
 }
 
 pub(crate) async fn delete_snapshot_inner(

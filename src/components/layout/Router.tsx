@@ -8,6 +8,11 @@ const InstanceDetailPage = lazy(() => import('@/pages/InstanceDetailPage').then(
 const InstanceDetailPanel = lazy(() => import('@/pages/InstanceDetailPage').then((m) => ({ default: m.InstanceDetailPanel })))
 const CreateInstancePage = lazy(() => import('@/pages/CreateInstancePage').then((m) => ({ default: m.CreateInstancePage })))
 const CreateInstancePanel = lazy(() => import('@/pages/CreateInstancePage').then((m) => ({ default: m.CreateInstancePanel })))
+const AdoptDshPage = lazy(() => import('@/pages/AdoptDshPage').then((m) => ({ default: m.AdoptDshPage })))
+const AdoptDshPanel = lazy(() => import('@/pages/AdoptDshPage').then((m) => ({ default: m.AdoptDshPanel })))
+const PackInstallPage = lazy(() => import('@/pages/PackInstallPage').then((m) => ({ default: m.PackInstallPage })))
+const PackInstallPanel = lazy(() => import('@/pages/PackInstallPage').then((m) => ({ default: m.PackInstallPanel })))
+const PackExportPage = lazy(() => import('@/pages/PackExportPage').then((m) => ({ default: m.PackExportPage })))
 const VersionsPage = lazy(() => import('@/pages/VersionsPage').then((m) => ({ default: m.VersionsPage })))
 const VersionsPanel = lazy(() => import('@/pages/VersionsPage').then((m) => ({ default: m.VersionsPanel })))
 const PluginsPage = lazy(() => import('@/pages/PluginsPage').then((m) => ({ default: m.PluginsPage })))
@@ -27,6 +32,12 @@ function renderPage(route: Route) {
       return <InstanceDetailPage id={route.id} />
     case 'create':
       return <CreateInstancePage cloneFrom={route.cloneFrom} />
+    case 'adopt':
+      return <AdoptDshPage />
+    case 'installPack':
+      return <PackInstallPage />
+    case 'exportPack':
+      return <PackExportPage id={route.id} />
     case 'versions':
       return <VersionsPage />
     case 'plugins':
@@ -48,6 +59,12 @@ function renderPanel(route: Route) {
       return <InstanceDetailPanel id={route.id} />
     case 'create':
       return <CreateInstancePanel />
+    case 'adopt':
+      return <AdoptDshPanel />
+    case 'installPack':
+      return <PackInstallPanel />
+    case 'exportPack':
+      return <InstanceDetailPanel id={route.id} />
     case 'versions':
       return <VersionsPanel />
     case 'plugins':

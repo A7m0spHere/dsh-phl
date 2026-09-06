@@ -1,11 +1,15 @@
 /** The model-catalog editor: per-provider /models discovery + manual entries. */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CloudDownload, Download, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react'
+import { CloudDownload, Download, Loader2, Plus, RefreshCw, Search, WandSparkles } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { fetchProviderModels, isDesktop } from '@/lib/desktop'
 import { ApiModelRef, RemoteModel } from '@/types'
 import { Badge, Button, Input, Tooltip } from '@/components/ui'
+import { repository } from '@/services'
+import { useMotion } from '@/lib/motion'
+import { metadataSummary } from '@/lib/modelMetadata'
+import { ModelRow } from './ModelRow'
 import {
   ENV_MISSING_PREFIX,
 } from './fields'
@@ -16,16 +20,20 @@ const discoveryCache = new Map<string, RemoteModel[]>()
 export function ModelEditor({
   models,
   onChange,
+  onEnrichingChange,
   fetchCtx,
 }: {
   models: ApiModelRef[]
   onChange: (m: ApiModelRef[]) => void
+  /** The owner must not save its draft before pending models have been added. */
+  onEnrichingChange: (pending: boolean) => void
   fetchCtx?: {
     api?: string
     baseURL: string
     apiKeyEnv: string
     apiKey?: string
     providerId?: string
+    providerName?: string
   }
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -36,6 +44,26 @@ export function ModelEditor({
   const [error, setError] = useState<string | null>(null)
   const [needKey, setNeedKey] = useState(false)
   const [tempKey, setTempKey] = useState('')
+  const [enriching, setEnriching] = useState(false)
+  const [metadataMessage, setMetadataMessage] = useState('')
+  const { t } = useMotion()
+  const latest = useRef({ models, fetchCtx })
+  latest.current = { models, fetchCtx }
+  const isCurrent = (snapshot: typeof latest.current) =>
+    latest.current.models === snapshot.models &&
+    JSON.stringify(latest.current.fetchCtx) === JSON.stringify(snapshot.fetchCtx)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+      onEnrichingChange(false)
+    }
+  }, [onEnrichingChange])
+  const setEnrichmentPending = (pending: boolean) => {
+    setEnriching(pending)
+    onEnrichingChange(pending)
+  }
   // Cancel guard: a slow response must not reopen a picker the user already
   // closed (or paint a stale listing after a baseURL change).
   const fetchSeq = useRef(0)
@@ -51,12 +79,14 @@ export function ModelEditor({
   // context change instead of silently merging a stale remote view.
   const ctxKey = fetchCtx ? `${fetchCtx.baseURL.trim()}|${fetchCtx.apiKeyEnv}|${fetchCtx.api ?? ''}` : ''
   useEffect(() => {
+    fetchSeq.current += 1
+    setFetching(false)
     setPickerOpen(false)
     setListing(null)
     setError(null)
     setNeedKey(false)
     setSelected(new Set())
-  }, [ctxKey])
+  }, [ctxKey, fetchCtx?.providerName, fetchCtx?.providerId, fetchCtx?.apiKey])
 
   const doFetch = async (force = false) => {
     if (!fetchCtx || !isDesktop) return
@@ -123,6 +153,8 @@ export function ModelEditor({
     })
 
   const closePicker = () => {
+    fetchSeq.current += 1
+    setFetching(false)
     setPickerOpen(false)
     setSelected(new Set())
     setQuery('')
@@ -130,27 +162,62 @@ export function ModelEditor({
     // it is component state, dropped when the form unmounts.
   }
 
-  const confirmAdd = () => {
+  const resolve = async (candidates: ApiModelRef[]) => {
+    try {
+      const batch = await repository.enrichModelMetadata({ models: candidates, provider: fetchCtx?.providerName })
+      if (alive.current) setMetadataMessage(metadataSummary(batch))
+      return batch.results.map((r) => r.model)
+    } catch {
+      if (alive.current) setMetadataMessage('补全暂不可用，模型仍可添加和保存；稍后可重试。')
+      return candidates
+    }
+  }
+
+  const completeModels = async (index?: number) => {
+    if (enriching) return
+    const snapshot = latest.current
+    setEnrichmentPending(true)
+    try {
+      const candidates = index === undefined ? models : [models[index]]
+      const completed = await resolve(candidates)
+      if (!alive.current) return
+      if (!isCurrent(snapshot)) {
+        setMetadataMessage('配置已发生变化，本次补全未应用，请重试。')
+        return
+      }
+      onChange(index === undefined ? completed : models.map((m, i) => i === index ? completed[0] : m))
+    } finally { if (alive.current) setEnrichmentPending(false) }
+  }
+
+  const confirmAdd = async () => {
+    if (enriching) return
+    const snapshot = latest.current
     const picked = (listing ?? []).filter((m) => selected.has(m.id) && !existing.has(m.id))
     if (picked.length) {
-      onChange([
-        ...models,
-        ...picked.map((m) => ({
-          id: m.id,
-          name: m.name && m.name !== m.id ? m.name : undefined,
-        })),
-      ])
+      setEnrichmentPending(true)
+      try {
+        const completed = await resolve(picked)
+        if (!alive.current) return
+        if (!isCurrent(snapshot)) {
+          setMetadataMessage('配置已发生变化，请重新选择模型。')
+          return
+        }
+        onChange([...models, ...completed])
+      } finally { if (alive.current) setEnrichmentPending(false) }
     }
     closePicker()
   }
 
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <Tooltip allowOverflow content="上下文窗口与 max_tokens 会随模型清单写入 settings.yaml；留空使用 DSH 默认">
+    <fieldset disabled={enriching} className="min-w-0">
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1">
+        <Tooltip allowOverflow content="补全只填写缺失字段；保存后可同步到实例。来源记录仅保存在 PHL。">
           <span className="text-sm font-medium text-ink-muted">模型</span>
         </Tooltip>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          {models.some((m) => m.id.trim()) && <Button size="sm" variant="ghost" onClick={() => void completeModels()}>
+            {enriching ? <Loader2 size={12} className="animate-spin" /> : <WandSparkles size={12} />}补全模型信息
+          </Button>}
           {isDesktop &&
             (() => {
               const btn = (
@@ -179,6 +246,7 @@ export function ModelEditor({
           </Button>
         </div>
       </div>
+      {metadataMessage && <p role="status" className="mb-2 text-sm text-ink-muted">{metadataMessage}</p>}
 
       <AnimatePresence initial={false}>
         {pickerOpen && (
@@ -186,7 +254,7 @@ export function ModelEditor({
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={t()}
             className="overflow-hidden"
           >
             <div className="mb-1.5 rounded-md bg-surface-sunken ring-1 ring-inset ring-line">
@@ -310,57 +378,14 @@ export function ModelEditor({
       ) : (
         <div className="space-y-1.5">
           {models.map((m, i) => (
-            // Position-keyed rows: ids are editable (two may collide, or be
-            // empty), and the values are fully controlled by `models[i]`.
-            <div key={`form-row-${i}`} className="flex items-center gap-2">
-              <Input
-                value={m.id}
-                placeholder="模型 id（如 deepseek-v4-flash）"
-                className="flex-1 font-mono"
-                onChange={(e) =>
-                  onChange(models.map((mm, j) => (j === i ? { ...mm, id: e.target.value } : mm)))
-                }
-              />
-              <Input
-                value={m.name ?? ''}
-                placeholder="显示名"
-                className="w-36"
-                onChange={(e) =>
-                  onChange(models.map((mm, j) => (j === i ? { ...mm, name: e.target.value || undefined } : mm)))
-                }
-              />
-              <Input
-                value={m.contextWindow ? String(m.contextWindow) : ''}
-                placeholder="上下文"
-                className="w-24"
-                onChange={(e) =>
-                  onChange(
-                    models.map((mm, j) =>
-                      j === i ? { ...mm, contextWindow: Number(e.target.value) || undefined } : mm,
-                    ),
-                  )
-                }
-              />
-              <Input
-                value={m.maxTokens ? String(m.maxTokens) : ''}
-                placeholder="max"
-                className="w-20"
-                onChange={(e) =>
-                  onChange(
-                    models.map((mm, j) =>
-                      j === i ? { ...mm, maxTokens: Number(e.target.value) || undefined } : mm,
-                    ),
-                  )
-                }
-              />
-              <Button size="sm" variant="ghost" onClick={() => onChange(models.filter((_, j) => j !== i))}>
-                <X size={12} />
-              </Button>
-            </div>
+            <ModelRow key={`form-row-${i}`} model={m}
+              onChange={(value) => onChange(models.map((mm, j) => j === i ? value : mm))}
+              onRemove={() => onChange(models.filter((_, j) => j !== i))}
+              onEnrich={() => void completeModels(i)} />
           ))}
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }
 

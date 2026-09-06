@@ -537,6 +537,18 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 应用内的标识、图标与配色体系均在本仓库内定义；未使用第三方项目的 Logo 或品牌资产。
 图标由 `scripts/make-icon.mjs` 从本仓库内的源图生成。
 
+## 设计与数据源（非分发依赖）
+
+以下不是随应用分发的代码依赖，而是本仓库某功能的设计参考或外部数据源，按 #15 记录归属：
+
+- **模型能力自动补全**（`src-tauri/src/api_config/catalog.rs`）：产品思路参考
+  [`dsh-model-info-fill`](https://github.com/11zld22/dsh-model-info-fill)（**MIT**）。
+  本仓库为**独立重新实现**（TS/Rust，PHL 原生功能，非 DSH 插件）；匹配器有意与原实现
+  不同（provider 约束 + 歧义不猜，见 #5），不复制其源码。
+- **模型目录数据源**：运行时从 [`models.dev`](https://models.dev) 的
+  `https://models.dev/api.json` 拉取（仅 enrichment 用途，缓存于 `<root>/cache/models-dev.json`，
+  非硬依赖，失败即降级）。该站点数据的许可以其上游声明为准。
+
 ## 已知缺口
 
 - Rust crate 的许可证读取自本机 cargo 缓存；个别未缓存条目标注为「未找到」，

@@ -24,13 +24,13 @@ import { useMaximized } from '@/lib/useMaximized'
 import { useMotion } from '@/lib/motion'
 import {
   routeTab,
-  useCatalogStore,
   useInstanceStore,
   useUIStore,
   type Tab,
 } from '@/stores'
-import { IconButton, Kbd, ProgressRing, Tooltip } from '@/components/ui'
+import { IconButton, Kbd, Tooltip } from '@/components/ui'
 import { Logo } from './Logo'
+import { TaskCenter } from '@/features/tasks/TaskCenter'
 
 const TABS: { id: Tab; label: string; icon: typeof Boxes }[] = [
   { id: 'instances', label: '实例', icon: Boxes },
@@ -40,42 +40,6 @@ const TABS: { id: Tab; label: string; icon: typeof Boxes }[] = [
   { id: 'runtimes', label: '运行时', icon: Cpu },
   { id: 'settings', label: '设置', icon: Settings },
 ]
-
-function TransferIndicator() {
-  const versions = useCatalogStore((s) => s.versions)
-  const runtimes = useCatalogStore((s) => s.runtimes)
-  const navigate = useUIStore((s) => s.navigate)
-  const { t } = useMotion()
-
-  const active = [
-    ...versions.map((v) => ({ kind: 'version' as const, id: v.id, name: v.name, state: v.state })),
-    ...runtimes.map((r) => ({ kind: 'runtime' as const, id: r.id, name: r.name, state: r.state })),
-  ].filter((x) => ['queued', 'downloading', 'extracting', 'verifying'].includes(x.state.kind))
-
-  const progress =
-    active.reduce(
-      (sum, x) => sum + ('progress' in x.state ? (x.state.progress as number) : 0.5),
-      0,
-    ) / (active.length || 1)
-
-  return (
-    <AnimatePresence>
-      {active.length > 0 && (
-        <motion.button
-          initial={{ opacity: 0, width: 0, scale: 0.9 }}
-          animate={{ opacity: 1, width: 'auto', scale: 1 }}
-          exit={{ opacity: 0, width: 0, scale: 0.9 }}
-          transition={t(0.24)}
-          onClick={() => navigate({ name: active[0].kind === 'version' ? 'versions' : 'runtimes' })}
-          className="no-drag flex items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-full bg-accent-soft px-2 py-1 text-2xs font-medium text-accent-ink"
-        >
-          <ProgressRing value={progress} size={13} width={2} />
-          {active.length > 1 ? `${active.length} 项下载中` : `${active[0].name}`}
-        </motion.button>
-      )}
-    </AnimatePresence>
-  )
-}
 
 export function TitleBar() {
   const route = useUIStore((s) => s.route)
@@ -118,6 +82,25 @@ export function TitleBar() {
       <div data-tauri-drag-region className="flex items-center gap-1.5 pl-1 pr-1.5">
         <Logo size={16} />
         <span className="select-none text-sm font-semibold tracking-tight text-ink">PHL</span>
+        {/* Browser/mock mode looks identical to a real run (install progress,
+            link-plugins, "running"), so the only honest signal is a persistent
+            badge here — it's visible on every page, including the plugin detail
+            overlay and the launch dock, not just on the pages that disable. */}
+        {!desktop.isDesktop && (
+          <Tooltip
+            side="bottom"
+            content={
+              <span className="flex flex-col gap-1">
+                <span>浏览器模式（<Kbd>npm run dev</Kbd>）：演示数据，不写盘、不拉起真实进程。</span>
+                <span>安装/卸载插件、启动实例只会播放动画。桌面版请用 <Kbd>npm run app:dev</Kbd>。</span>
+              </span>
+            }
+          >
+            <span className="no-drag rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
+              浏览器模拟模式
+            </span>
+          </Tooltip>
+        )}
       </div>
 
       {/* Back/forward sit between identity and navigation: they belong to the
@@ -172,7 +155,7 @@ export function TitleBar() {
       </nav>
 
       <div data-tauri-drag-region className="ml-auto flex items-center gap-1 pr-1">
-        <TransferIndicator />
+        <TaskCenter />
 
         <Tooltip
           content={<span className="flex items-center gap-1">快速跳转 <Kbd>Ctrl</Kbd><Kbd>K</Kbd></span>}

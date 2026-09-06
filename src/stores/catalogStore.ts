@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import { repository, Cancelled } from '@/services'
+import type { PluginCatalogOrigin } from '@/services'
 import type { DshVersion, InstalledPlugin, InstanceTemplate, Plugin, Runtime } from '@/types'
 import { useUIStore } from './uiStore'
 import { useInstanceStore } from './instanceStore'
 import { useSettingsStore } from './settingsStore'
 import { detectPendingChanges, loadPendingSet, savePendingSet } from '@/lib/pendingReleases'
+import { parseThrownError } from '@/lib/errorCodes'
 
 /**
  * Every settled version-catalog fetch runs through here: GitHub-only rows
@@ -35,7 +37,7 @@ function observePendingReleases(versions: DshVersion[]) {
 
 /** Live transfer state for one (instance, plugin) install. */
 export interface PluginTransferState {
-  stage: 'preparing' | 'downloading' | 'verifying' | 'installing'
+  stage: 'queued' | 'preparing' | 'downloading' | 'verifying' | 'installing'
   progress: number
   bytesDone: number
   bytesPerSec: number
@@ -85,12 +87,22 @@ interface CatalogState {
   loaded: boolean
   loading: boolean
   /**
-   * True when the live plugin registry was unreachable and the catalog came
-   * from the on-disk cache or the bundled copy. The registry tab shows a
-   * notice with the real cause and a retry instead of failing silently.
+   * True when *no* source and not even the on-disk cache could produce a
+   * catalog — the registry tab shows a notice with the real cause and a
+   * retry instead of failing silently. Partial degradations (fallback
+   * mirror, cache replay) keep a populated list and are described by
+   * `pluginsOrigin` instead.
    */
   pluginsOffline: boolean
   pluginsError?: string
+  /**
+   * Provenance of the loaded catalog — which base served it, whether the
+   * user's configured source was bypassed, and the registry's `updated`
+   * stamp. `null` before the first load or in the browser mock (no remote
+   * registry to attribute). The registry tab surfaces this so a stale
+   * mirror can never masquerade as the live catalog.
+   */
+  pluginsOrigin: PluginCatalogOrigin | null
   /**
    * Versions have settled (成功或失败都算)。版本目录是最慢的远程源，
    * 页面骨架屏只等自己关心的模块，不陪别的源干等。
@@ -145,6 +157,68 @@ interface CatalogState {
 
 const controllers = new Map<string, AbortController>()
 
+/* ------------------------- transfer concurrency gate ------------------------- */
+
+/**
+ * The 「同时下载数」 setting enforced for real (roadmap O-10): a new transfer
+ * must own one of at most `concurrency` slots before it touches the network;
+ * the rest sit in `queued` state and start as predecessors finish or are
+ * cancelled. All transfers share the one budget — versions, runtimes and
+ * plugin installs compete honestly instead of each page self-limiting.
+ */
+const activeSlots = new Set<string>()
+const slotWaiters: Array<{ key: string; start: () => void }> = []
+
+function slotLimit(): number {
+  const raw = useSettingsStore.getState().concurrency
+  return Math.max(1, Math.floor(Number.isFinite(raw) ? raw : 2) || 1)
+}
+
+function pumpSlots(): void {
+  while (activeSlots.size < slotLimit() && slotWaiters.length > 0) {
+    slotWaiters.shift()!.start()
+  }
+}
+
+/**
+ * Wait for a slot. `false` means the caller must treat the operation as
+ * cancelled — the user aborted while queued (the transfer itself never
+ * started, which is exactly why cancel-before-start works).
+ */
+function acquireTransferSlot(key: string, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  if (activeSlots.size < slotLimit() && !activeSlots.has(key)) {
+    activeSlots.add(key)
+    return Promise.resolve(true)
+  }
+  return new Promise<boolean>((resolve) => {
+    const dequeue = () => {
+      const i = slotWaiters.findIndex((w) => w.key === key && w.start === waiter.start)
+      if (i >= 0) slotWaiters.splice(i, 1)
+      resolve(false)
+    }
+    const waiter = {
+      key,
+      start: () => {
+        signal.removeEventListener('abort', dequeue)
+        if (signal.aborted) {
+          resolve(false)
+          return
+        }
+        activeSlots.add(key)
+        resolve(true)
+      },
+    }
+    signal.addEventListener('abort', dequeue, { once: true })
+    slotWaiters.push(waiter)
+  })
+}
+
+function releaseTransferSlot(key: string): void {
+  activeSlots.delete(key)
+  pumpSlots()
+}
+
 /**
  * Applies a change to an instance's plugin list against the **current** store
  * state rather than a snapshot.
@@ -178,6 +252,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   versionsSyncAttemptedAt: 0,
   pluginTransfers: {},
   pluginsOffline: false,
+  pluginsOrigin: null,
   latestVersions: {},
 
   async load() {
@@ -222,6 +297,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
               plugins: catalog.plugins,
               pluginsOffline: !!catalog.offline,
               pluginsError: catalog.error,
+              pluginsOrigin: catalog.origin ?? null,
             }),
           )
           .catch(swallow('插件市场')),
@@ -311,6 +387,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
 
     patch({ kind: 'queued' })
     try {
+      if (!(await acquireTransferSlot(`v:${id}`, controller.signal))) throw new Cancelled()
       await repository.installVersion(
         version,
         (p) => {
@@ -349,7 +426,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         patch({ kind: 'available' })
         useUIStore.getState().toast({ kind: 'info', title: `已取消下载 ${version.name}` })
       } else {
-        const reason = err instanceof Error && err.message ? err.message : '下载中断，未能校验完整性'
+        const parsed = parseThrownError(err)
+        const reason =
+          (parsed.code ? `${parsed.message}（${parsed.hint}）` : parsed.message) ||
+          '下载中断，未能校验完整性'
         patch({ kind: 'failed', reason })
         useUIStore.getState().toast({
           kind: 'error',
@@ -359,6 +439,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         })
       }
     } finally {
+      releaseTransferSlot(`v:${id}`)
       controllers.delete(`v:${id}`)
     }
   },
@@ -373,13 +454,12 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     } catch (err) {
       console.warn('[phl] removeVersion failed:', err)
       // Tauri rejections arrive as plain strings — `instanceof Error` would
-      // drop the backend's actual reason and show the generic fallback.
-      const message =
-        typeof err === 'string' && err.trim()
-          ? err
-          : err instanceof Error && err.message
-            ? err.message
-            : '版本目录无法移除，可能被其他程序占用。'
+      // drop the backend's actual reason and show the generic fallback. The
+      // backend codes common failures; surface the hint next to the message.
+      const parsed = parseThrownError(err)
+      const message = parsed.code
+        ? `${parsed.message}（${parsed.hint}）`
+        : parsed.message || '版本目录无法移除，可能被其他程序占用。'
       useUIStore.getState().toast({
         kind: 'error',
         title: '删除版本失败',
@@ -405,7 +485,9 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
       set({ runtimes: get().runtimes.map((r) => (r.id === id ? { ...r, state } : r)) })
     const startedAt = Date.now()
 
+    patch({ kind: 'queued' })
     try {
+      if (!(await acquireTransferSlot(`r:${id}`, controller.signal))) throw new Cancelled()
       await repository.installRuntime(
         runtime,
         (p) => {
@@ -439,6 +521,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         useUIStore.getState().toast({ kind: 'error', title: `${runtime.name} 安装失败` })
       }
     } finally {
+      releaseTransferSlot(`r:${id}`)
       controllers.delete(`r:${id}`)
     }
   },
@@ -477,8 +560,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     const patch = (t: PluginTransferState) =>
       set({ pluginTransfers: { ...get().pluginTransfers, [key]: t } })
 
-    patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
+    patch({ stage: 'queued', progress: 0, bytesDone: 0, bytesPerSec: 0 })
     try {
+      if (!(await acquireTransferSlot(key, controller.signal))) throw new Cancelled()
+      patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
       const { version, registryId } = await repository.installPlugin(
         plugin,
         instance,
@@ -525,6 +610,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         })
       }
     } finally {
+      releaseTransferSlot(key)
       const rest = { ...get().pluginTransfers }
       delete rest[key]
       set({ pluginTransfers: rest })

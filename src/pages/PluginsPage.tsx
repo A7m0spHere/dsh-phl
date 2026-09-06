@@ -214,6 +214,20 @@ async function updateWithTrustWarning(
   await run()
 }
 
+/** 把回退链里的 base URL 翻成人话；未知源退化为 hostname。 */
+function catalogSourceLabel(servedFrom: string): string {
+  if (servedFrom === 'cache') return '本地缓存'
+  if (servedFrom === 'https://awesome-dsh-plugin.com') return '官方源'
+  if (servedFrom === 'https://dsh-ai.org') return '国内镜像（dsh-ai.org）'
+  if (servedFrom === 'https://awesome-dsh-plugin.github.io/awesome-dsh-plugin')
+    return 'GitHub Pages 镜像'
+  try {
+    return new URL(servedFrom).hostname
+  } catch {
+    return servedFrom
+  }
+}
+
 export function PluginsPage() {
   const instances = useInstanceStore((s) => s.instances)
   const plugins = useCatalogStore((s) => s.plugins)
@@ -236,6 +250,7 @@ export function PluginsPage() {
   const latestVersions = useCatalogStore((s) => s.latestVersions)
   const pluginsOffline = useCatalogStore((s) => s.pluginsOffline)
   const pluginsError = useCatalogStore((s) => s.pluginsError)
+  const pluginsOrigin = useCatalogStore((s) => s.pluginsOrigin)
   const catalogLoading = useCatalogStore((s) => s.loading)
   const install = useCatalogStore((s) => s.installPlugin)
   const setEnabled = useCatalogStore((s) => s.setPluginEnabled)
@@ -726,6 +741,45 @@ export function PluginsPage() {
               {pluginsError || '无法连接任何发布源'}。已安装的插件不受影响，恢复连接后重试即可浏览插件库。
             </Notice>
           )}
+          {pluginsOrigin?.fromCache && (
+            // Everything online failed but the last good fetch is on disk —
+            // say so loudly: a stale replay must never look like a live catalog.
+            <Notice
+              tone="warn"
+              title="在线目录全部不可用，当前展示离线缓存"
+              className="mb-4"
+              action={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void useCatalogStore.getState().load()}
+                >
+                  重试
+                </Button>
+              }
+            >
+              这份目录是上次成功获取时存下的
+              {pluginsOrigin.updated ? `（数据更新于 ${pluginsOrigin.updated}）` : ''}，可能缺少新收录或已下架的插件。安装仍会联网取包，不受影响。
+            </Notice>
+          )}
+          {pluginsOrigin && !pluginsOrigin.fromCache && pluginsOrigin.usedFallback && (
+            <Notice
+              tone="info"
+              title={`已切换到备用目录源：${catalogSourceLabel(pluginsOrigin.servedFrom)}`}
+              className="mb-4"
+              action={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void useCatalogStore.getState().load()}
+                >
+                  重试原源
+                </Button>
+              }
+            >
+              你配置的下载源暂时不可用，本次目录由备用源提供，更新时效可能稍逊。
+            </Notice>
+          )}
           {catalogLoading && plugins.length === 0 ? (
             // First catalog fetch in flight — skeleton rows keep the market's
             // shape instead of a blank page, then the real grid fades in.
@@ -801,10 +855,21 @@ export function PluginsPage() {
                   </label>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t border-line/70 pt-3">
-                  <span className="text-sm text-ink-faint">
-                    共 {formatCount(registry.length)} 个插件
-                    {registry.length > shown.length && `，当前显示 ${shown.length} 个`}
-                  </span>
+                  <div className="flex min-w-0 items-baseline gap-2 text-sm text-ink-faint">
+                    <span className="shrink-0">
+                      共 {formatCount(registry.length)} 个插件
+                      {registry.length > shown.length && `，当前显示 ${shown.length} 个`}
+                    </span>
+                    {pluginsOrigin && !pluginsOffline && (
+                      // Persistent provenance: which base served this list and
+                      // how fresh it claims to be — the one-glance answer to
+                      // “为什么数量和我记得的不一样”.
+                      <span className="truncate" title={pluginsOrigin.servedFrom}>
+                        目录来自 {catalogSourceLabel(pluginsOrigin.servedFrom)}
+                        {pluginsOrigin.updated && ` · 更新于 ${pluginsOrigin.updated}`}
+                      </span>
+                    )}
+                  </div>
                   <Button
                     size="sm"
                     variant="ghost"

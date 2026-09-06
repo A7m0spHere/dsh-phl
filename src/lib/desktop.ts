@@ -18,8 +18,11 @@ import type {
  * without booting Rust.
  */
 
-export const isDesktop =
-  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as object)
+import { isDesktop } from './desktopCore'
+
+// Re-exported so existing `from '@/lib/desktop'` imports keep working while
+// the domain split (roadmap O-13) lands one interaction at a time.
+export { isDesktop }
 
 type Unlisten = () => void
 
@@ -206,6 +209,38 @@ export async function moveRootData(
   return invoke<MoveSummary>('move_root_data', { from, to, transferId, onProgress: channel })
 }
 
+/* --------------------------- migration journal --------------------------- */
+
+export interface MigrationJournalEntry {
+  kind: string
+  /** pending = untouched, moving = interrupted mid-copy, moved = arrived. */
+  state: 'pending' | 'moving' | 'moved'
+  bytes: number
+}
+
+export interface MigrationJournal {
+  from: string
+  to: string
+  entries: MigrationJournalEntry[]
+  committed: boolean
+  startedAt: string
+}
+
+/**
+ * The journal of an interrupted or cancelled data-root migration, or `null`.
+ * An open journal is the restart-recovery entry: 继续 resumes from the
+ * record, 撤销 walks the moved directories back.
+ */
+export async function migrationStatus(): Promise<MigrationJournal | null> {
+  if (!isDesktop) return null
+  return invoke<MigrationJournal | null>('storage_migration_status')
+}
+
+/** Undo a non-committed migration: everything that arrived moves back. */
+export async function migrationUndo(): Promise<MoveSummary> {
+  return invoke<MoveSummary>('storage_migration_undo')
+}
+
 /* ------------------------------- versions ------------------------------- */
 
 /** `DshVersion` minus the runtime `state`, which the repository derives. */
@@ -352,9 +387,21 @@ export interface RemotePluginMeta {
 
 export type PluginProgressStage = 'preparing' | 'downloading' | 'verifying' | 'installing'
 
-export async function listDshPlugins(catalogBase: string): Promise<RemotePluginMeta[]> {
-  if (!isDesktop) return []
-  return invoke<RemotePluginMeta[]>('list_dsh_plugins', { registryBase: catalogBase })
+/** Mirrors the Rust `PluginCatalogWire` — entries plus fetch provenance. */
+export interface RemotePluginCatalog {
+  /** The base URL that served the catalog, or `'cache'` for an offline replay. */
+  servedFrom: string
+  usedFallback: boolean
+  fromCache: boolean
+  updated: string | null
+  plugins: RemotePluginMeta[]
+}
+
+export async function listDshPlugins(catalogBase: string): Promise<RemotePluginCatalog> {
+  if (!isDesktop) {
+    return { servedFrom: catalogBase, usedFallback: false, fromCache: false, updated: null, plugins: [] }
+  }
+  return invoke<RemotePluginCatalog>('list_dsh_plugins', { registryBase: catalogBase })
 }
 
 export interface InstallPluginArgs {
@@ -559,6 +606,38 @@ export async function launchInstance(args: LaunchInstanceArgs): Promise<LaunchRe
   })
 }
 
+/** One managed child as the durable registry saw it at spawn time. */
+export interface AdoptedProcess {
+  instanceId: string
+  pid: number
+  port: number
+  webUrl?: string | null
+}
+
+/** A previous session's process PHL declined to manage, with the reason.
+ * `keptRunning` = it may still run; PHL will not stop it. */
+export interface DroppedProcess {
+  instanceId: string
+  pid: number
+  reason: string
+  keptRunning: boolean
+}
+
+export interface AdoptReport {
+  adopted: AdoptedProcess[]
+  dropped: DroppedProcess[]
+}
+
+/**
+ * Re-adopt DSH children that survived a PHL restart (O-08). Call once at
+ * boot, after the instance list loaded. Unverifiable pids are reported but
+ * never terminated.
+ */
+export async function adoptProcesses(): Promise<AdoptReport> {
+  if (!isDesktop) return { adopted: [], dropped: [] }
+  return invoke<AdoptReport>('adopt_processes')
+}
+
 export async function stopInstance(instanceId: string): Promise<void> {
   if (!isDesktop) return
   await invoke('stop_instance', { instanceId })
@@ -588,6 +667,76 @@ export async function onInstanceExited(
     (event) => handler(event.payload),
   )
 }
+
+/* ------------------------------ task centre ------------------------------ */
+
+// Moved to `desktopTasks.ts` (roadmap O-13, first domain unit out of this
+// bridge): task types + listTasks re-exported unchanged.
+export { listTasks } from './desktopTasks'
+export type { TaskInfo, TaskList } from './desktopTasks'
+
+/* --------------------------- discovery + adoption ------------------------- */
+
+// Second O-13 domain unit out of this bridge. `desktopAdoption` imports only
+// types from here (erased at build), so the re-export is not a runtime cycle.
+export {
+  discoverDsh,
+  inspectDshHome,
+  inspectDshExecutable,
+  previewAdoption,
+  adoptInstance,
+  instanceSessionCount,
+  chooseDshHome,
+  chooseDshExecutable,
+} from './desktopAdoption'
+export type {
+  RemoteDshCandidate,
+  RemoteManagedInstance,
+  DiscoverySource,
+  DiscoveryConfidence,
+  AdoptionMode,
+  AdoptionSessionStrategy,
+  AdoptionRequest,
+  RemoteAdoptionPreview,
+  RemoteAdoptionOutcome,
+} from './desktopAdoption'
+
+/* ------------------------- session migration --------------------------- */
+
+// Third/fourth O-13 domain units: the P1 Session engine and the `.phlpack`
+// export/install pipeline. Type-only imports on their side, no runtime cycle.
+export {
+  listSessions,
+  listHomeSessions,
+  inspectSession,
+  copySession,
+  copySessions,
+} from './desktopSessions'
+export type {
+  RemoteSessionInfo,
+  RemoteSessionDetail,
+  RemoteSessionCopyOutcome,
+  RemoteSessionProgress,
+} from './desktopSessions'
+export {
+  previewInstancePackExport,
+  exportInstancePack,
+  previewPack,
+  installPack,
+  choosePackSavePath,
+  choosePackOpenPath,
+} from './desktopPack'
+export type {
+  RemotePackExportPlan,
+  RemoteExportPluginPlan,
+  PackExportOptions,
+  RemotePackExportReport,
+  RemotePackPreview,
+  RemotePackDependency,
+  PackDependencyStatus,
+  PackInstallRequest,
+  RemotePackInstallOutcome,
+} from './desktopPack'
 
 /* ---------------------------- diagnostics ----------------------------- */
 
@@ -661,11 +810,30 @@ export interface RemoteBundlePreview {
   port: number
   pluginCount: number
   exportedAt: string
+  /** 凭据名:导入后需要用户重新配置的变量(值从不随 Bundle 携带)。 */
+  credentials: string[]
+  /** 机器本地变量(PATH、DSH_HOME……):导入时会丢弃其值。 */
+  machineOnly: string[]
 }
 
-export async function exportInstanceBundle(id: string, dest: string): Promise<void> {
+/** Mirrors the Rust `BundleExportReport` — what an export kept back. */
+export interface RemoteBundleExportReport {
+  credentials: string[]
+  machineOnly: string[]
+}
+
+/** 导出预览:列出将不写入 Bundle 的字段,不产生任何文件。 */
+export async function previewInstanceExport(id: string): Promise<RemoteBundleExportReport> {
   if (!isDesktop) throw new Error('导出 Bundle 仅在桌面端可用')
-  await invoke('export_instance_bundle', { id, dest })
+  return invoke('preview_instance_export', { id })
+}
+
+export async function exportInstanceBundle(
+  id: string,
+  dest: string,
+): Promise<RemoteBundleExportReport> {
+  if (!isDesktop) throw new Error('导出 Bundle 仅在桌面端可用')
+  return invoke('export_instance_bundle', { id, dest })
 }
 
 export async function readInstanceBundle(path: string): Promise<RemoteBundlePreview> {
@@ -676,7 +844,7 @@ export async function readInstanceBundle(path: string): Promise<RemoteBundlePrev
 export async function importInstanceBundle(
   path: string,
   manifest: RemoteInstanceManifest,
-): Promise<RemoteInstanceRecord> {
+): Promise<RemoteBundleImportOutcome> {
   if (!isDesktop) throw new Error('导入 Bundle 仅在桌面端可用')
   return invoke('import_instance_bundle', { path, manifest })
 }
@@ -763,6 +931,15 @@ export async function deleteInstanceSnapshot(id: string, snapshotId: string): Pr
 
 /* ------------------------------ instances ----------------------------- */
 
+/** Provenance recorded when an instance was adopted from a local DSH. */
+export interface RemoteAdoptedFrom {
+  dshHome: string
+  detectedVersion?: string | null
+  adoptedAt: string
+  /** The management mode chosen at adoption: 'managed-copy' | 'external'. */
+  mode: string
+}
+
 /**
  * `instance.json` on disk, plus everything Rust derives from the directory:
  * the resolved paths and the plugin list read back out of `node_modules`.
@@ -788,6 +965,18 @@ export interface RemoteInstanceRecord {
   args: string[]
   /** Mirrors the Rust `ApiBinding` on the manifest; null = unmanaged. */
   api?: ApiBinding | null
+  /**
+   * Adoption fields (schema v2). All optional on the wire: a v1 manifest has
+   * none and Rust reads it as `managed-copy`/`created`. But `save_instance`
+   * round-trips the *whole* manifest, so once Rust hands these back the
+   * frontend must echo them unchanged — dropping them would let serde
+   * defaults reset an `external` instance to `managed-copy` and orphan its
+   * real DSH_HOME. That is why `toManifest` carries them.
+   */
+  managementMode?: 'managed-copy' | 'external' | 'pack-installed'
+  source?: 'created' | 'adopted' | 'phlpack'
+  externalHome?: string | null
+  adoptedFrom?: RemoteAdoptedFrom | null
   dshHome: string
   workspace: string
   plugins: {
@@ -799,6 +988,12 @@ export interface RemoteInstanceRecord {
     trust?: string
   }[]
   snapshots: RemoteSnapshotInfo[]
+}
+
+/** Mirrors the Rust `ImportOutcome` — the created record plus the credential names to re-enter. */
+export interface RemoteBundleImportOutcome {
+  record: RemoteInstanceRecord
+  credentials: string[]
 }
 
 /** Mirrors the Rust `SnapshotFile` — the frontend `Snapshot` shape. */
@@ -958,6 +1153,12 @@ export async function fetchProviderModels(args: {
     apiKey: args.apiKey ?? null,
     providerId: args.providerId ?? null,
   })
+}
+
+/** Optional catalog enrichment; callers persist via the existing API library flow. */
+export async function enrichModelMetadata(args: import('@/types').ModelMetadataRequest): Promise<import('@/types').ModelMetadataBatch> {
+  if (!isDesktop) return { results: args.models.map((model) => ({ model, matched: false, changed: false, ambiguous: false })), catalogStatus: 'mock' }
+  return invoke('plugin:model-metadata|enrich_model_metadata', { models: args.models, provider: args.provider ?? null })
 }
 
 /**

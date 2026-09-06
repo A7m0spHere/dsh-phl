@@ -28,13 +28,14 @@
 //! `settings.yaml` is a machine-owned file that DSH rewrites itself, so that
 //! is the accepted trade-off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::{CredentialStore, Creds};
 
+pub(crate) mod catalog;
 pub(crate) mod library;
 pub(crate) mod models;
 pub(crate) mod sync;
@@ -54,7 +55,7 @@ const AGENT_DEFAULT_MODEL: &str = "agent-default-model";
 // erases the whole object. The `baseUrl`/`baseURL` mismatch did exactly that:
 // it rejected the entire library instead of one field.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRef {
     pub id: String,
@@ -64,6 +65,80 @@ pub struct ModelRef {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Vec<ModelInput>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<ReasoningEfforts>,
+    /// Per-field provenance is PHL-only; never materialized into DSH YAML.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata_sources: std::collections::BTreeMap<String, MetadataSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelInput {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReasoningEfforts {
+    Disabled(FalseValue),
+    Levels(std::collections::BTreeMap<String, Option<String>>),
+}
+
+/// An untagged boolean would also accept `true`, which DSH does not support.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FalseValue;
+impl Serialize for FalseValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bool(false)
+    }
+}
+impl<'de> Deserialize<'de> for FalseValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if bool::deserialize(d)? {
+            Err(serde::de::Error::custom(
+                "reasoningEfforts must be false or a map",
+            ))
+        } else {
+            Ok(Self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MetadataSource {
+    #[serde(rename = "models.dev")]
+    ModelsDev,
+    #[serde(rename = "fallback")]
+    Fallback,
+    #[serde(rename = "manual")]
+    Manual,
+}
+
+impl ModelRef {
+    pub(crate) fn validate_capabilities(&self) -> Result<(), String> {
+        if self.context_window == Some(0) || self.max_tokens == Some(0) {
+            return Err(format!("模型 {} 的上下文和最大输出必须是正整数", self.id));
+        }
+        if let Some(ReasoningEfforts::Levels(levels)) = &self.reasoning_efforts {
+            let supported = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+            if !levels.keys().any(|k| k != "off")
+                || levels.iter().any(|(key, wire)| {
+                    !supported.contains(&key.as_str())
+                        || match wire {
+                            None => key != "off",
+                            Some(value) => value.trim().is_empty(),
+                        }
+                })
+            {
+                return Err(format!("模型 {} 的思考档位无效：至少声明一个思考档位，仅 off 可使用 null；或设为 false / 留空", self.id));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +457,22 @@ pub(crate) async fn load_config_file(root: &Path) -> Option<ApiConfig> {
     serde_json::from_str(&raw).ok()
 }
 
+/// The env-var names PHL itself knows carry credentials: every provider's
+/// `apiKeyEnv`, the exact name launch-injection puts a real key under. This
+/// is the *explicit* half of the bundle env classification — no name
+/// guessing involved — and it wins over the heuristic in `env_policy`.
+pub(crate) async fn credential_env_names(root: &Path) -> HashSet<String> {
+    match load_config_file(root).await {
+        Some(config) => config
+            .providers
+            .iter()
+            .map(|p| p.api_key_env.trim().to_ascii_uppercase())
+            .filter(|n| !n.is_empty())
+            .collect(),
+        None => HashSet::new(),
+    }
+}
+
 /// Materialize a first-version binding at instance-create time (shared by the
 /// create command and the launch path's missing-file backfill). Returns the
 /// binding with sync metadata on success; `None` when there is no library to
@@ -431,6 +522,7 @@ mod tests {
                 name: None,
                 context_window: Some(65536),
                 max_tokens: Some(8192),
+                ..Default::default()
             }],
             enabled: true,
         }
@@ -604,6 +696,46 @@ mod tests {
             "deepseek-v4"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn model_capabilities_roundtrip_and_provenance_never_materializes() {
+        let dir = temp_instance("capabilities-roundtrip");
+        let mut c = config();
+        c.providers[0].models = vec![serde_json::from_value(serde_json::json!({
+            "id":"custom-model", "name":"My model", "contextWindow":200000, "maxTokens":32768,
+            "input":["text","image"], "reasoningEfforts":{"off":null,"high":"custom-high"},
+            "metadataSources":{"contextWindow":"models.dev", "maxTokens":"fallback"}
+        }))
+        .unwrap()];
+        c.providers[1].models[0].reasoning_efforts = Some(ReasoningEfforts::Disabled(FalseValue));
+        sync_inner(&dir, &ApiBinding::default(), &c).await.unwrap();
+        let raw = tokio::fs::read_to_string(settings_path(&dir))
+            .await
+            .unwrap();
+        assert!(!raw.contains("metadataSources"));
+        assert!(!raw.contains("models.dev"));
+        assert!(!raw.contains("fallback"));
+        let imported = import_inner(&dir).await.unwrap().unwrap();
+        for provider in &c.providers {
+            let actual = imported
+                .providers
+                .iter()
+                .find(|p| p.name == provider.name)
+                .unwrap();
+            let mut expected = provider.models.clone();
+            for m in &mut expected {
+                m.metadata_sources.clear();
+            }
+            assert_eq!(actual.models, expected);
+        }
+        let before = resolve_sections(&c, &ApiBinding::default()).unwrap();
+        c.providers[0].models[0].metadata_sources.clear();
+        assert_eq!(
+            resolve_sections(&c, &ApiBinding::default()).unwrap(),
+            before
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
