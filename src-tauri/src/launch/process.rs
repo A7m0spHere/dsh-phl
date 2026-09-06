@@ -8,6 +8,13 @@ use std::time::Duration;
 
 use super::Processes;
 
+/// One read of an already-settled log — used by restart adoption, where the
+/// token line is long past any buffering.
+pub(crate) async fn read_web_url_once(log_path: &Path) -> Option<String> {
+    let raw = tokio::fs::read_to_string(log_path).await.ok()?;
+    parse_web_url(&raw)
+}
+
 pub(crate) async fn read_web_url(log_path: &Path) -> Option<String> {
     for _ in 0..8 {
         if let Ok(raw) = tokio::fs::read_to_string(log_path).await {

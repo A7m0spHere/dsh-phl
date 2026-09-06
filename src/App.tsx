@@ -42,6 +42,7 @@ export default function App() {
     const load = () => void syncPhlRootWithBackend()
       .then(() => initDesktopRoot())
       .then(() => Promise.all([loadCatalog(), loadInstances(), loadApiConfig()]))
+      .then(() => useInstanceStore.getState().adoptPreviousSession())
       .catch((err) => {
         console.error('[phl] startup load failed:', err)
         useUIStore.getState().toast({

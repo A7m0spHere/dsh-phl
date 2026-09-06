@@ -559,6 +559,38 @@ export async function launchInstance(args: LaunchInstanceArgs): Promise<LaunchRe
   })
 }
 
+/** One managed child as the durable registry saw it at spawn time. */
+export interface AdoptedProcess {
+  instanceId: string
+  pid: number
+  port: number
+  webUrl?: string | null
+}
+
+/** A previous session's process PHL declined to manage, with the reason.
+ * `keptRunning` = it may still run; PHL will not stop it. */
+export interface DroppedProcess {
+  instanceId: string
+  pid: number
+  reason: string
+  keptRunning: boolean
+}
+
+export interface AdoptReport {
+  adopted: AdoptedProcess[]
+  dropped: DroppedProcess[]
+}
+
+/**
+ * Re-adopt DSH children that survived a PHL restart (O-08). Call once at
+ * boot, after the instance list loaded. Unverifiable pids are reported but
+ * never terminated.
+ */
+export async function adoptProcesses(): Promise<AdoptReport> {
+  if (!isDesktop) return { adopted: [], dropped: [] }
+  return invoke<AdoptReport>('adopt_processes')
+}
+
 export async function stopInstance(instanceId: string): Promise<void> {
   if (!isDesktop) return
   await invoke('stop_instance', { instanceId })

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
-import { isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
+import { adoptProcesses, isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
 import { useCatalogStore } from './catalogStore'
@@ -25,6 +25,12 @@ interface InstanceState {
   load: () => Promise<void>
   /** Forces a re-read — used when the data root changes under the app. */
   reload: () => Promise<void>
+  /**
+   * Takes over DSH children that survived a PHL restart (their instances
+   * were launched by a previous session), and reports ones PHL refused to
+   * adopt. Called once at boot after `load()` resolved.
+   */
+  adoptPreviousSession: () => Promise<void>
 
   launch: (id: string) => Promise<void>
   cancelLaunch: (id: string) => void
@@ -171,6 +177,52 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     loadStarted = false
     set({ loaded: false })
     await get().load()
+  },
+
+  async adoptPreviousSession() {
+    if (!isDesktop) return
+    let report
+    try {
+      report = await adoptProcesses()
+    } catch (err) {
+      // Adoption is a boot nicety: a failure must not break the app the
+      // user just restarted — the instances simply start as stopped.
+      console.error('[phl] process adoption failed:', err)
+      return
+    }
+    if (!report.adopted.length && !report.dropped.length) return
+    let changed = false
+    const states = { ...get().states }
+    for (const a of report.adopted) {
+      if (!get().byId(a.instanceId)) continue
+      states[a.instanceId] = {
+        status: 'running',
+        progress: 1,
+        pid: a.pid,
+        startedAt: Date.now(),
+        webUrl: a.webUrl ?? undefined,
+      }
+      changed = true
+    }
+    if (changed) set({ states })
+    const ui = useUIStore.getState()
+    if (report.adopted.length > 0) {
+      ui.toast({
+        kind: 'info',
+        title: `已接管上次会话仍在本机运行的 ${report.adopted.length} 个 DSH 进程`,
+        message: '停止与「打开 WebUI」对这些实例照常可用。',
+        duration: 6000,
+      })
+    }
+    for (const d of report.dropped) {
+      if (!d.keptRunning) continue
+      ui.toast({
+        kind: 'warn',
+        title: '发现无法确认的遗留 DSH 进程',
+        message: `${d.reason}（PID ${d.pid}）。PHL 不会接管或终止它。`,
+        duration: 8000,
+      })
+    }
   },
 
   /* ---------------- lifecycle ---------------- */

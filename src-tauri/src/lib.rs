@@ -123,6 +123,7 @@ pub fn run() {
         .manage(resources::Tasks::default())
         .manage(launch::Launches::default())
         .manage(launch::Processes::default())
+        .manage(launch::registry::Registry::default())
         .manage(paths::PhlState::load())
         .manage(credentials::Creds::platform_default())
         .invoke_handler(tauri::generate_handler![
@@ -168,6 +169,7 @@ pub fn run() {
             launch::launch_instance,
             launch::stop_instance,
             launch::cancel_launch,
+            launch::adopt_processes,
             api_config::library::load_api_config,
             api_config::library::save_api_config,
             api_config::sync::sync_instance_api,
@@ -186,6 +188,15 @@ pub fn run() {
             diagnostics::clear_download_cache,
         ])
         .setup(|app| {
+            // Bind the process registry before any command can see it: the
+            // records a previous run wrote are the input for boot adoption.
+            {
+                let state = app.state::<paths::PhlState>();
+                let registry = app.state::<launch::registry::Registry>();
+                if let Some(path) = state.sibling_file("processes.json") {
+                    registry.bind(path);
+                }
+            }
             // Safety net: if the frontend fails to boot it can never call
             // `app_ready`, and a permanently invisible window looks like a
             // crash. Reveal it anyway so the error is at least visible.

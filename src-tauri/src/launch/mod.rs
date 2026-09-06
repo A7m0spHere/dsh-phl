@@ -31,6 +31,11 @@ use crate::paths::PhlState;
 use crate::versions::{now_iso, sanitize_version};
 
 pub(crate) mod process;
+pub(crate) mod registry;
+
+pub(crate) use registry::{
+    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, Registry,
+};
 
 pub(crate) use process::{
     allocate_port, build_command, count_plugins, kill_tree, log_tail, node_binary, read_web_url,
@@ -77,9 +82,36 @@ pub struct ProcessEntry {
     pub port: u16,
 }
 
-/// instance id → live process. In memory on purpose: if PHL itself restarts,
-/// the DSH children keep running unmanaged — same as any launcher. The close
-/// guard lists what the UI knows is running, not what a previous session left.
+impl Processes {
+    pub(crate) fn set(&self, instance_id: &str, entry: ProcessEntry) {
+        self.0
+            .lock()
+            .expect("processes lock")
+            .insert(instance_id.to_string(), entry);
+    }
+
+    /// Remove only if the entry still points at this pid — a relaunched
+    /// instance's fresh entry must never be deleted by a stale watcher or a
+    /// stale stop.
+    pub(crate) fn remove_if_pid(&self, instance_id: &str, pid: u32) {
+        let mut map = self.0.lock().expect("processes lock");
+        if map.get(instance_id).map(|e| e.pid) == Some(pid) {
+            map.remove(instance_id);
+        }
+    }
+
+    pub(crate) fn entry_of(&self, instance_id: &str) -> Option<ProcessEntry> {
+        self.0
+            .lock()
+            .expect("processes lock")
+            .get(instance_id)
+            .cloned()
+    }
+}
+
+/// instance id → live process. Memory is the working set; `registry` mirrors
+/// it to disk so a PHL restart can re-adopt the children it launched (see
+/// `registry` and `adopt_processes`).
 #[derive(Default)]
 pub struct Processes(pub Mutex<HashMap<String, ProcessEntry>>);
 
@@ -125,6 +157,7 @@ pub async fn launch_instance(
     app: AppHandle,
     launches: State<'_, Launches>,
     processes: State<'_, Processes>,
+    registry: State<'_, Registry>,
     phl: State<'_, PhlState>,
     creds: State<'_, crate::credentials::Creds>,
     transfer_id: String,
@@ -147,6 +180,7 @@ pub async fn launch_instance(
     let result = run_launch(
         &app,
         &processes,
+        &registry,
         &cancel,
         &phl.root(),
         &instance_id,
@@ -172,24 +206,18 @@ pub async fn launch_instance(
 #[tauri::command]
 pub async fn stop_instance(
     processes: State<'_, Processes>,
+    registry: State<'_, Registry>,
     instance_id: String,
 ) -> Result<(), String> {
     // Read, kill, and only then forget. Removing first meant a failed
     // `taskkill` (elevated child, access denied) left the process alive with
     // PHL no longer tracking it: its port looked free, the close guard stopped
     // listing it, and nothing in the UI could stop it any more.
-    let entry = processes
-        .0
-        .lock()
-        .expect("processes lock")
-        .get(&instance_id)
-        .cloned();
+    let entry = processes.entry_of(&instance_id);
     if let Some(entry) = entry {
         kill_tree(entry.pid).await?;
-        let mut map = processes.0.lock().expect("processes lock");
-        if map.get(&instance_id).map(|e| e.pid) == Some(entry.pid) {
-            map.remove(&instance_id);
-        }
+        processes.remove_if_pid(&instance_id, entry.pid);
+        registry.forget_pid(&instance_id, entry.pid);
     }
     Ok(())
 }
@@ -199,12 +227,111 @@ pub fn cancel_launch(launches: State<'_, Launches>, transfer_id: String) {
     launches.cancel(&transfer_id);
 }
 
+/* --------------------------- restart adoption --------------------------- */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedProcess {
+    pub instance_id: String,
+    pub pid: u32,
+    pub port: u16,
+    pub web_url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedProcess {
+    pub instance_id: String,
+    pub pid: u32,
+    pub reason: String,
+    /// False = the process is gone; true = it may still be running but PHL
+    /// will not manage (let alone kill) it. The UI wordings differ.
+    pub kept_running: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptReport {
+    pub adopted: Vec<AdoptedProcess>,
+    pub dropped: Vec<DroppedProcess>,
+}
+
+/// The boot reconciliation of O-08: children launched by a previous PHL are
+/// re-adopted when their identity checks out, and forgotten — without ever
+/// being terminated — when it does not. A record whose instance no longer
+/// exists in this root is dropped likewise (its directory may have been
+/// deleted while PHL was away).
+#[tauri::command]
+pub async fn adopt_processes(
+    processes: State<'_, Processes>,
+    registry: State<'_, Registry>,
+    phl: State<'_, PhlState>,
+) -> Result<AdoptReport, String> {
+    let root = phl.root();
+    let mut report = AdoptReport {
+        adopted: Vec::new(),
+        dropped: Vec::new(),
+    };
+    for rec in registry.snapshot() {
+        let instance_dir = root.join("instances").join(&rec.instance_id);
+        if !instance_dir.join("instance.json").exists() {
+            // The instance is gone; a stray child from a deleted instance is
+            // outside PHL's reach by design — report, never terminate.
+            let alive = probe_process(rec.pid).alive;
+            registry.forget_pid(&rec.instance_id, rec.pid);
+            report.dropped.push(DroppedProcess {
+                instance_id: rec.instance_id,
+                pid: rec.pid,
+                reason: "实例已不存在".into(),
+                kept_running: alive,
+            });
+            continue;
+        }
+        let probe = probe_process(rec.pid);
+        match decide(&rec, &probe) {
+            Adoption::Adopt => {
+                processes.set(
+                    &rec.instance_id,
+                    ProcessEntry {
+                        pid: rec.pid,
+                        port: rec.port,
+                    },
+                );
+                let web_url = match latest_launch_log(&instance_dir.join("logs")).await {
+                    Some(log) => process::read_web_url_once(&log).await,
+                    None => None,
+                };
+                report.adopted.push(AdoptedProcess {
+                    instance_id: rec.instance_id,
+                    pid: rec.pid,
+                    port: rec.port,
+                    web_url,
+                });
+            }
+            Adoption::Forget {
+                reason,
+                keep_running,
+            } => {
+                registry.forget_pid(&rec.instance_id, rec.pid);
+                report.dropped.push(DroppedProcess {
+                    instance_id: rec.instance_id,
+                    pid: rec.pid,
+                    reason,
+                    kept_running: keep_running,
+                });
+            }
+        }
+    }
+    Ok(report)
+}
+
 /* ------------------------------- launch ------------------------------- */
 
 #[allow(clippy::too_many_arguments)]
 async fn run_launch(
     app: &AppHandle,
     processes: &Processes,
+    registry: &Registry,
     cancel: &AtomicBool,
     root: &Path,
     instance_id: &str,
@@ -395,30 +522,39 @@ async fn run_launch(
         .spawn()
         .map_err(|e| format!("无法启动 DSH 进程: {e}"))?;
     let pid = child.id().ok_or("进程已启动但没有 PID")?;
-    processes
-        .0
-        .lock()
-        .expect("processes lock")
-        .insert(instance_id.clone(), ProcessEntry { pid, port });
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Record the executable *as the kernel sees it*: `node-system` spawns a
+    // bare `node` through PATH, and adoption compares against the full image
+    // path — storing the argv spelling would reject every such child.
+    let exe_path = probe_process(pid)
+        .exe_path
+        .unwrap_or_else(|| program.to_string_lossy().into_owned());
+    processes.set(&instance_id, ProcessEntry { pid, port });
+    // The durable half of the pairing: recorded right at spawn so a PHL that
+    // crashes a second later still knows what to adopt (or forget) at boot.
+    registry.remember(PersistedProcess {
+        instance_id: instance_id.clone(),
+        pid,
+        port,
+        started_at_ms,
+        exe_path,
+    });
 
     let started = Instant::now();
     loop {
         if Launches::is_cancelled(cancel) {
             // kill_tree, not child.kill(): node is only the root of the tree.
             let _ = kill_tree(pid).await;
-            processes
-                .0
-                .lock()
-                .expect("processes lock")
-                .remove(&instance_id);
+            processes.remove_if_pid(&instance_id, pid);
+            registry.forget_pid(&instance_id, pid);
             return Err("cancelled".into());
         }
         if let Ok(Some(status)) = child.try_wait() {
-            processes
-                .0
-                .lock()
-                .expect("processes lock")
-                .remove(&instance_id);
+            processes.remove_if_pid(&instance_id, pid);
+            registry.forget_pid(&instance_id, pid);
             let tail = log_tail(&log_path, 30).await;
             return Err(format!(
                 "DSH 进程在就绪前退出（code {}）。\n--- 日志末尾 ---\n{tail}",
@@ -436,11 +572,8 @@ async fn run_launch(
         let elapsed = started.elapsed();
         if elapsed >= READY_TIMEOUT {
             let _ = kill_tree(pid).await;
-            processes
-                .0
-                .lock()
-                .expect("processes lock")
-                .remove(&instance_id);
+            processes.remove_if_pid(&instance_id, pid);
+            registry.forget_pid(&instance_id, pid);
             let tail = log_tail(&log_path, 30).await;
             return Err(format!(
                 "等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"
@@ -460,11 +593,8 @@ async fn run_launch(
     // linger). One final liveness check before reporting success keeps the
     // frontend from displaying "running" for a corpse.
     if let Ok(Some(status)) = child.try_wait() {
-        processes
-            .0
-            .lock()
-            .expect("processes lock")
-            .remove(&instance_id);
+        processes.remove_if_pid(&instance_id, pid);
+        registry.forget_pid(&instance_id, pid);
         let tail = log_tail(&log_path, 30).await;
         return Err(format!(
             "DSH 进程在就绪后立即退出（code {}）。\n--- 日志末尾 ---\n{tail}",
@@ -486,10 +616,10 @@ async fn run_launch(
     tokio::spawn(async move {
         let status = child.wait().await;
         if let Some(processes) = watcher_app.try_state::<Processes>() {
-            let mut map = processes.0.lock().expect("processes lock");
-            if map.get(&watcher_id).map(|e| e.pid) == Some(pid) {
-                map.remove(&watcher_id);
-            }
+            processes.remove_if_pid(&watcher_id, pid);
+        }
+        if let Some(registry) = watcher_app.try_state::<Registry>() {
+            registry.forget_pid(&watcher_id, pid);
         }
         let code = status.ok().and_then(|s| s.code());
         let _ = watcher_app.emit(
