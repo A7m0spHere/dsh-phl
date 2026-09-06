@@ -36,7 +36,7 @@ function observePendingReleases(versions: DshVersion[]) {
 
 /** Live transfer state for one (instance, plugin) install. */
 export interface PluginTransferState {
-  stage: 'preparing' | 'downloading' | 'verifying' | 'installing'
+  stage: 'queued' | 'preparing' | 'downloading' | 'verifying' | 'installing'
   progress: number
   bytesDone: number
   bytesPerSec: number
@@ -145,6 +145,68 @@ interface CatalogState {
 }
 
 const controllers = new Map<string, AbortController>()
+
+/* ------------------------- transfer concurrency gate ------------------------- */
+
+/**
+ * The 「同时下载数」 setting enforced for real (roadmap O-10): a new transfer
+ * must own one of at most `concurrency` slots before it touches the network;
+ * the rest sit in `queued` state and start as predecessors finish or are
+ * cancelled. All transfers share the one budget — versions, runtimes and
+ * plugin installs compete honestly instead of each page self-limiting.
+ */
+const activeSlots = new Set<string>()
+const slotWaiters: Array<{ key: string; start: () => void }> = []
+
+function slotLimit(): number {
+  const raw = useSettingsStore.getState().concurrency
+  return Math.max(1, Math.floor(Number.isFinite(raw) ? raw : 2) || 1)
+}
+
+function pumpSlots(): void {
+  while (activeSlots.size < slotLimit() && slotWaiters.length > 0) {
+    slotWaiters.shift()!.start()
+  }
+}
+
+/**
+ * Wait for a slot. `false` means the caller must treat the operation as
+ * cancelled — the user aborted while queued (the transfer itself never
+ * started, which is exactly why cancel-before-start works).
+ */
+function acquireTransferSlot(key: string, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  if (activeSlots.size < slotLimit() && !activeSlots.has(key)) {
+    activeSlots.add(key)
+    return Promise.resolve(true)
+  }
+  return new Promise<boolean>((resolve) => {
+    const dequeue = () => {
+      const i = slotWaiters.findIndex((w) => w.key === key && w.start === waiter.start)
+      if (i >= 0) slotWaiters.splice(i, 1)
+      resolve(false)
+    }
+    const waiter = {
+      key,
+      start: () => {
+        signal.removeEventListener('abort', dequeue)
+        if (signal.aborted) {
+          resolve(false)
+          return
+        }
+        activeSlots.add(key)
+        resolve(true)
+      },
+    }
+    signal.addEventListener('abort', dequeue, { once: true })
+    slotWaiters.push(waiter)
+  })
+}
+
+function releaseTransferSlot(key: string): void {
+  activeSlots.delete(key)
+  pumpSlots()
+}
 
 /**
  * Applies a change to an instance's plugin list against the **current** store
@@ -312,6 +374,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
 
     patch({ kind: 'queued' })
     try {
+      if (!(await acquireTransferSlot(`v:${id}`, controller.signal))) throw new Cancelled()
       await repository.installVersion(
         version,
         (p) => {
@@ -363,6 +426,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         })
       }
     } finally {
+      releaseTransferSlot(`v:${id}`)
       controllers.delete(`v:${id}`)
     }
   },
@@ -408,7 +472,9 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
       set({ runtimes: get().runtimes.map((r) => (r.id === id ? { ...r, state } : r)) })
     const startedAt = Date.now()
 
+    patch({ kind: 'queued' })
     try {
+      if (!(await acquireTransferSlot(`r:${id}`, controller.signal))) throw new Cancelled()
       await repository.installRuntime(
         runtime,
         (p) => {
@@ -442,6 +508,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         useUIStore.getState().toast({ kind: 'error', title: `${runtime.name} 安装失败` })
       }
     } finally {
+      releaseTransferSlot(`r:${id}`)
       controllers.delete(`r:${id}`)
     }
   },
@@ -480,8 +547,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     const patch = (t: PluginTransferState) =>
       set({ pluginTransfers: { ...get().pluginTransfers, [key]: t } })
 
-    patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
+    patch({ stage: 'queued', progress: 0, bytesDone: 0, bytesPerSec: 0 })
     try {
+      if (!(await acquireTransferSlot(key, controller.signal))) throw new Cancelled()
+      patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
       const { version, registryId } = await repository.installPlugin(
         plugin,
         instance,
@@ -528,6 +597,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
         })
       }
     } finally {
+      releaseTransferSlot(key)
       const rest = { ...get().pluginTransfers }
       delete rest[key]
       set({ pluginTransfers: rest })

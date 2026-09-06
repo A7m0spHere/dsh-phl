@@ -43,6 +43,7 @@ export const popularity = (p: Plugin) => p.downloads + (p.stars ?? 0) * 10
 
 /** PCL-style stage labels — every phase of the pipeline gets a name. */
 export const STAGE_LABEL: Record<string, string> = {
+  queued: '排队中…',
   preparing: '准备中',
   downloading: '下载中',
   verifying: '校验中',

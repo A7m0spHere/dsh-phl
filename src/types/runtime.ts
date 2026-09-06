@@ -4,6 +4,8 @@
  */
 export type RuntimeInstallState =
   | { kind: 'available' }
+  /** Waiting for a transfer slot (the concurrency cap is enforced now). */
+  | { kind: 'queued' }
   | { kind: 'downloading'; progress: number; bytesDone: number; bytesPerSec: number }
   | { kind: 'extracting'; progress: number }
   | { kind: 'installed'; installedAt: string }

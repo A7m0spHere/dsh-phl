@@ -528,11 +528,10 @@ export function SettingsPage() {
               )}
               <SettingRow
                 title="同时下载数"
-                description="下载并发上限尚未接入传输管线；当前每个操作各自串行下载"
+                description="版本、Runtime 与插件安装共享的传输槽位上限；超出的任务排队为「排队中」，前一个完成或取消后自动开始"
                 control={
                   <Segmented
                     size="sm"
-                    disabled
                     value={String(settings.concurrency)}
                     onChange={(v) => settings.set('concurrency', Number(v))}
                     options={[

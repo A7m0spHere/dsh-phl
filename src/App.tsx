@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { MotionConfig } from 'motion/react'
 import { desktop, migrationStatus } from '@/lib/desktop'
+import { startTaskPolling } from '@/stores/taskStore'
 import { shortcutById, useGlobalShortcut } from '@/lib/shortcuts'
 import {
   useApiConfigStore,
@@ -102,6 +103,12 @@ export default function App() {
   useEffect(() => {
     const raf = requestAnimationFrame(() => void desktop.ready())
     return () => cancelAnimationFrame(raf)
+  }, [])
+
+  // The task centre reads the backend registry (O-10); the poll loop is
+  // adaptive and hidden-window-safe internally.
+  useEffect(() => {
+    startTaskPolling()
   }, [])
 
   // History traversal that the app does not initiate itself — native
