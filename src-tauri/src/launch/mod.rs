@@ -277,6 +277,10 @@ pub async fn adopt_processes(
         if !instance_dir.join("instance.json").exists() {
             // The instance is gone; a stray child from a deleted instance is
             // outside PHL's reach by design — report, never terminate.
+            // `forget` clears the row by instance id without the pid guard
+            // `forget_pid` uses; that is safe because adoption is the boot
+            // chain's last step and runs before any command of this session
+            // can have re-registered the instance.
             let alive = probe_process(rec.pid).alive;
             registry.forget(&rec.instance_id);
             report.dropped.push(DroppedProcess {

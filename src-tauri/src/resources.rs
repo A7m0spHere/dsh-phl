@@ -345,11 +345,14 @@ pub fn next_task_id(kind: &str) -> String {
 
 /* ------------------------------ unified entry ------------------------------ */
 
-/// The whole point of this module in one call: acquire the resources or
-/// refuse with a conflict message, register the task, run the body, record
-/// the outcome, release the locks — on every path. The body receives a task
-/// handle for phase reporting (`set_phase`, `cancel_observed`); `guarded`
-/// finishes the row with the body's result.
+/// The whole point of this module in one call: atomically acquire the
+/// resources (or refuse with a `[busy]` conflict message and register
+/// nothing — declined attempts never touched a resource, and recording every
+/// refused click would bury the history under rows that did no work), then
+/// register the task, run the body, record the outcome, release the locks —
+/// on every path. The body receives a task handle for phase reporting
+/// (`set_phase`, `cancel_observed`); `guarded` finishes the row with the
+/// body's result.
 #[allow(clippy::too_many_arguments)]
 pub async fn guarded<T, Fut>(
     id: String,
