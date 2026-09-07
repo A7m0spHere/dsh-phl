@@ -100,11 +100,11 @@ pub(crate) async fn disabled_plugin_ids(instance_root: &Path) -> std::collection
     disabled
 }
 
-fn indent_of(line: &str) -> usize {
+pub(crate) fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// Line range `[start, end)` of the item that targets `id` in a top-level list.
+/// Line range `[start, end)` of the item that mounts the plugin named `id`.
 ///
 /// A plugin is mounted by DSH through an `insert:` list, so the block may start
 /// at `- insert:` or (legacy) at a bare `- id:` line. The block ends at the next
@@ -112,23 +112,27 @@ fn indent_of(line: &str) -> usize {
 /// `"- "` prefix instead would also stop at *nested* sequence items (`      - a`
 /// under `config:`), cutting the block in half and orphaning its tail at the
 /// document's top level.
-fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
+///
+/// A block matches on either key of its mount row — the loader `id:` or the
+/// package `name:`. PHL writes both identically; a CLI- or hand-written file
+/// may differ, and `name` is what DSH resolves to a `node_modules` package.
+/// Since the scan reports the package dir as the plugin handle, toggling must
+/// find the block by that name too, or it would append a second block and DSH
+/// would insert the same package twice.
+pub(crate) fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
     let mut start: Option<usize> = None;
     let mut base = 0usize;
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
         match start {
             None => {
-                if trimmed.starts_with("- insert:") {
-                    if insert_item_contains_id(lines, i, id) {
-                        start = Some(i);
-                        base = indent_of(line);
-                    }
-                } else if let Some(rest) = trimmed.strip_prefix("- id:") {
-                    if rest.trim().trim_matches(|c| c == '\'' || c == '"') == id {
-                        start = Some(i);
-                        base = indent_of(line);
-                    }
+                if (trimmed.starts_with("- insert:")
+                    || trimmed.starts_with("- id:")
+                    || trimmed.starts_with("- name:"))
+                    && block_mounts(lines, i, id)
+                {
+                    start = Some(i);
+                    base = indent_of(line);
                 }
             }
             Some(s) => {
@@ -141,16 +145,56 @@ fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
     start.map(|s| (s, lines.len()))
 }
 
-fn insert_item_contains_id(lines: &[String], start: usize, id: &str) -> bool {
+/// Whether the top-level list item at `start` mounts `id` under its loader id
+/// or its package name. Keys are read only at the mount row's own child
+/// indent, so a `name:`/`disabled:` buried under a nested `config:` can never
+/// impersonate the plugin's own.
+fn block_mounts(lines: &[String], start: usize, id: &str) -> bool {
+    let trimmed = lines[start].trim_start();
     let item_end = find_item_end(lines, start);
-    lines[start + 1..item_end].iter().any(|l| {
-        l.trim_start()
-            .strip_prefix("- id:")
-            .is_some_and(|rest| rest.trim().trim_matches(|c| c == '\'' || c == '"') == id)
+    let (row, own) = if trimmed.starts_with("- insert:") {
+        let Some(row) = (start + 1..item_end).find(|&j| lines[j].trim_start().starts_with("- id:"))
+        else {
+            return false;
+        };
+        (row, key_value(&lines[row], "- id:"))
+    } else {
+        let prefix = if trimmed.starts_with("- id:") {
+            "- id:"
+        } else {
+            "- name:"
+        };
+        (start, key_value(trimmed, prefix))
+    };
+    let key_indent = indent_of(&lines[row]) + 2;
+    [own, row_mount_name(lines, row, item_end, key_indent)]
+        .into_iter()
+        .flatten()
+        .any(|k| k == id)
+}
+
+fn key_value(line: &str, prefix: &str) -> Option<String> {
+    line.trim_start().strip_prefix(prefix).map(|v| {
+        let v = v.trim();
+        v.trim_matches(|c| c == '\'' || c == '"').to_string()
     })
 }
 
-fn find_item_end(lines: &[String], item_start: usize) -> usize {
+/// The mount row's package name: a `name:` key at exactly `key_indent`.
+fn row_mount_name(
+    lines: &[String],
+    row: usize,
+    item_end: usize,
+    key_indent: usize,
+) -> Option<String> {
+    (row + 1..item_end).find_map(|j| {
+        (indent_of(&lines[j]) == key_indent)
+            .then(|| key_value(&lines[j], "name:"))
+            .flatten()
+    })
+}
+
+pub(crate) fn find_item_end(lines: &[String], item_start: usize) -> usize {
     let base = indent_of(&lines[item_start]);
     (item_start + 1..lines.len())
         .find(|&i| !lines[i].trim().is_empty() && indent_of(&lines[i]) <= base)
@@ -503,6 +547,34 @@ mod tests {
         let doc = assert_single_sequence_document(&text);
         assert_eq!(doc.len(), 1);
         assert_eq!(doc[0]["disabled"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn find_block_matches_the_mount_name_for_a_handwritten_id() {
+        // Out-of-band installs write `- insert:` with a loader `id` that
+        // differs from the npm package `name`. The scan reports the package
+        // dir as the handle, so a disable must locate the block by `name` too
+        // — else it appends a second block and DSH inserts the package twice.
+        let dir = temp_profile("name-handle");
+        std::fs::write(
+            patch_path(&dir),
+            "- insert:\n    - id: dsh-market\n      name: dshmarket\n",
+        )
+        .unwrap();
+        set_plugin_disabled(&dir, "dshmarket", true).await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(
+            doc.len(),
+            1,
+            "the existing block is toggled, not duplicated: {text}"
+        );
+        assert_eq!(doc[0]["insert"][0]["id"], "dsh-market");
+        assert_eq!(doc[0]["insert"][0]["name"], "dshmarket");
+        assert_eq!(doc[0]["insert"][0]["disabled"], true);
+        // And the flag reads back under both the loader id and the handle.
+        assert!(disabled_plugin_ids(&dir).await.contains("dsh-market"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
