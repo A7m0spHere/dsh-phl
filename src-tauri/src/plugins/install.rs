@@ -3,6 +3,7 @@
 //! cordis.patch.yml. Plus the enable/uninstall lifecycle commands.
 
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -39,7 +40,10 @@ pub async fn install_plugin(
 ) -> Result<PluginInstallOutcome, String> {
     // The profile directory is resolved backend-side from the instance id —
     // the manifest's profile is the authority, not a path from the WebView.
-    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    // `writable_` also clears the external-instance gate: PHL does not install
+    // plugins into a DSH_HOME the user keeps owning (spec §3.4).
+    let profile =
+        crate::instances::writable_profile_dir(&phl.root(), &instance_id, "安装插件到").await?;
     // A committed install changes the tree the disk-usage cache measured.
     let profile_for_cache = profile.clone();
     let flag = transfers.take(&transfer_id);
@@ -276,7 +280,12 @@ async fn run_plugin_install(
 /// plugin: the on-disk record, the cordis registration, and the enabled
 /// flag. Any step failing aborts the commit — the caller rolls back to the
 /// backup so the instance never sees a half-installed plugin.
-async fn commit_install(
+///
+/// Exposed to the crate because pack install reuses *this* primitive (not a
+/// second protocol) to turn an embedded plugin that unpack dropped into
+/// `node_modules/` into a fully registered one (§R3): writing the PHL install
+/// marker and the Cordis registration have exactly one implementation.
+pub(crate) async fn commit_install(
     dest: &Path,
     marker: &serde_json::Value,
     instance_root: &Path,
@@ -285,6 +294,10 @@ async fn commit_install(
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
         .await
         .map_err(|e| format!("无法写入安装记录: {e}"))?;
+
+    install_plugin_dependencies(instance_root, dest)
+        .await
+        .map_err(|e| format!("安装插件依赖失败: {e}"))?;
 
     register_cordis_patch(instance_root, registry_id, None)
         .await
@@ -299,6 +312,90 @@ async fn commit_install(
         .map_err(|e| format!("更新 cordis.patch.yml 失败: {e}"))?;
 
     Ok(())
+}
+
+/// Bound on `pnpm add` during a plugin install. A dependency closure can be
+/// large (a real plugin may pull react + codemirror + …), so this is generous,
+/// but it must never hang the commit — a timeout rolls the install back.
+const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Install the plugin's npm dependency closure into the profile `node_modules`.
+///
+/// The DSH loader imports each mounted package with the profile's own module
+/// resolution, so a plugin is only runnable once its `dependencies` live in the
+/// profile too — extraction alone (above) installs the bare package, and any
+/// non-self-contained plugin then crashes the whole tree at boot with
+/// `Cannot find package '<dep>'`. `pnpm` is the package manager the DSH profile
+/// is built around (`pnpm-workspace.yaml`), so the install is pinned to it; a
+/// missing `pnpm` surfaces as an actionable error, never a half-installed
+/// plugin the user only discovers on the next launch.
+async fn install_plugin_dependencies(profile: &Path, dest: &Path) -> Result<(), String> {
+    let specs = dependency_specs(dest).await?;
+    if specs.is_empty() {
+        return Ok(()); // self-contained plugin: nothing to resolve
+    }
+    let bin = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .current_dir(profile)
+        .arg("add")
+        .args(&specs)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // CREATE_NO_WINDOW (0x0800_0000): a GUI app must not pop a console for
+    // the package manager's child processes. `tokio::process::Command` exposes
+    // this as an inherent method (not the std CommandExt trait).
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = tokio::time::timeout(DEPENDENCY_INSTALL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "安装依赖超时（pnpm），已回滚".to_string())?
+        .map_err(|e| {
+            format!(
+                "无法运行 pnpm 安装依赖（DSH profile 依赖 pnpm，请先安装 pnpm 或 corepack）: {e}"
+            )
+        })?;
+    if !output.status.success() {
+        let tail = stderr_tail(&output.stderr);
+        return Err(format!("pnpm 安装依赖失败: {tail}"));
+    }
+    Ok(())
+}
+
+/// `name@range` specs for the plugin's own `dependencies`, read from its
+/// extracted `package.json`. Empty for a dependency-free plugin.
+async fn dependency_specs(dest: &Path) -> Result<Vec<String>, String> {
+    let text = match tokio::fs::read_to_string(dest.join("package.json")).await {
+        Ok(t) => t,
+        Err(e) => return Err(format!("无法读取插件 package.json: {e}")),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("插件 package.json 解析失败: {e}"))?;
+    let mut specs = value
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|deps| {
+            deps.iter()
+                .filter_map(|(name, range)| range.as_str().map(|r| format!("{name}@{r}")))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    specs.sort();
+    Ok(specs)
+}
+
+/// The last few lines of pnpm's stderr, for a failure the user can act on.
+fn stderr_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Undo the swap and the patch file after a failed commit, so the previous
@@ -387,6 +484,14 @@ mod tests {
     #[tokio::test]
     async fn commit_writes_record_registration_and_enabled_state() {
         let f = fixture("commit", false);
+        // A real npm package ships package.json; the commit now installs its
+        // dependency closure, so give the fixture one with no deps (the
+        // self-contained skip path).
+        std::fs::write(
+            f["dest"].join("package.json"),
+            r#"{"name":"dsh-foo","version":"1.2.3"}"#,
+        )
+        .unwrap();
         let marker = serde_json::json!({"version": "1.2.3"});
         commit_install(&f["dest"], &marker, &f["instance"], "dsh-foo")
             .await
@@ -492,5 +597,36 @@ mod tests {
         // dest holds the new copy again (rename aside -> rename backup fails
         // -> rename aside back), nothing is silently deleted.
         assert!(f["dest"].join("new.js").exists());
+    }
+
+    #[tokio::test]
+    async fn dependency_specs_are_sorted_and_ranged() {
+        let dir = temp_root("dep-specs");
+        let dest = dir.join("node_modules").join("dsh-foo");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(
+            dest.join("package.json"),
+            r#"{"dependencies":{"ws":"^8.0.0","schemastery":"^3.0.0","react":"18.3.1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            dependency_specs(&dest).await.unwrap(),
+            vec!["react@18.3.1", "schemastery@^3.0.0", "ws@^8.0.0"],
+        );
+    }
+
+    #[tokio::test]
+    async fn self_contained_plugin_has_no_dependency_specs() {
+        let dir = temp_root("dep-none");
+        let dest = dir.join("node_modules").join("dsh-bar");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("package.json"), r#"{"name":"dsh-bar"}"#).unwrap();
+        assert!(dependency_specs(&dest).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_few_lines_in_order() {
+        let bytes = b"line1\nline2\nline3\n".to_vec();
+        assert_eq!(stderr_tail(&bytes), "line1\nline2\nline3");
     }
 }
