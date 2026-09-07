@@ -351,7 +351,13 @@ export function InstancesPage() {
                 layout === 'grid' ? 'grid grid-cols-1 gap-2.5 lg:grid-cols-2' : 'flex flex-col gap-1.5'
               }
             >
-              <AnimatePresence mode="popLayout">
+              {/* `sync`, not `popLayout`: popLayout lifts an exiting card out of
+                  flow (position:absolute) while it animates out, and an
+                  interrupted exit — e.g. tab-switching mid-animation — strands
+                  that full-size ghost over the grid, swallowing every click on
+                  the instances page. sync cross-fades in flow with no floating
+                  node. */}
+              <AnimatePresence mode="sync">
                 {visible.map((instance) => (
                   <InstanceCard key={instance.id} instance={instance} layout={layout} />
                 ))}
