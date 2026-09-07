@@ -26,6 +26,10 @@ export function PageShell({
   maxWidth?: number
 }) {
   const { t } = useMotion()
+  // On a scaled window the header actions would squeeze the subtitle into a
+  // broken sliver. min() lets the column fall back to the full content width
+  // while large screens keep the reading measure.
+  const columnStyle = { maxWidth: `min(${maxWidth}px, 100%)` }
   return (
     <div className="flex h-full min-h-0 flex-col">
       <motion.header
@@ -34,22 +38,33 @@ export function PageShell({
         transition={t(0.24)}
         className="shrink-0 px-[var(--page-pad)] pb-2 pt-3"
       >
-        <div className="mx-auto w-full" style={{ maxWidth }}>
-          <div className="flex items-start gap-4">
-            <div className="min-w-0 flex-1">
+        <div className="mx-auto w-full" style={columnStyle}>
+          {/* grow-1 + a large flex-basis act as the wrap threshold: the title
+              block demands ~30rem before it will share a row, so a narrow /
+              zoomed column pushes the action buttons onto their own line
+              instead of squeezing the subtitle into a broken sliver. */}
+          <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+            <div className="min-w-0 grow basis-[30rem]">
               <h1 className="text-lg font-semibold tracking-tight text-ink">{title}</h1>
               {subtitle && (
-                <p className="mt-0.5 text-sm leading-relaxed text-ink-muted">{subtitle}</p>
+                <p
+                  className="mt-0.5 line-clamp-2 text-sm leading-relaxed text-ink-muted"
+                  title={typeof subtitle === 'string' ? subtitle : undefined}
+                >
+                  {subtitle}
+                </p>
               )}
             </div>
-            {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
+            {actions && (
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">{actions}</div>
+            )}
           </div>
           {toolbar && <div className="mt-2.5 flex items-center gap-2">{toolbar}</div>}
         </div>
       </motion.header>
 
       <div className={cn('min-h-0 flex-1 overflow-y-auto px-[var(--page-pad)] pb-6', bodyClassName)}>
-        <div className="mx-auto w-full" style={{ maxWidth }}>
+        <div className="mx-auto w-full" style={columnStyle}>
           {children}
         </div>
       </div>
