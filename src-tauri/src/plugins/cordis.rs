@@ -60,34 +60,42 @@ async fn write_patch_lines(instance_root: &Path, lines: &[String]) -> Result<(),
 pub(crate) async fn disabled_plugin_ids(instance_root: &Path) -> std::collections::HashSet<String> {
     let lines = read_patch_lines(instance_root).await;
     let mut disabled = std::collections::HashSet::new();
-    for (i, line) in lines.iter().enumerate() {
-        let Some(rest) = line.trim_start().strip_prefix("- id:") else {
-            continue;
-        };
-        let id = rest
-            .trim()
-            .trim_matches(|c| c == '\'' || c == '"')
-            .to_string();
-        if id.is_empty() {
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        let is_insert = trimmed.starts_with("- insert:");
+        let is_id = trimmed.starts_with("- id:");
+        if !is_insert && !is_id {
+            i += 1;
             continue;
         }
-        let Some(range) = find_block(&lines, &id) else {
+        let item_end = find_item_end(&lines, i);
+        let row_start = if is_insert {
+            (i + 1..item_end).find(|&j| lines[j].trim_start().starts_with("- id:"))
+        } else {
+            Some(i)
+        };
+        let Some(row_start) = row_start else {
+            i = item_end;
             continue;
         };
-        if range.0 != i {
-            continue; // a later duplicate block; the first one wins
-        }
-        let indent = child_indent(&lines, range);
-        let flagged = (range.0 + 1..range.1).any(|j| {
-            indent_of(&lines[j]) == indent
+        let id = lines[row_start]
+            .trim_start()
+            .strip_prefix("- id:")
+            .map(|r| r.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
+            .unwrap_or_default();
+        let key_indent = indent_of(&lines[row_start]) + 2;
+        let flagged = (row_start + 1..item_end).any(|j| {
+            indent_of(&lines[j]) == key_indent
                 && lines[j]
                     .trim_start()
                     .strip_prefix("disabled:")
                     .is_some_and(|v| v.trim() == "true")
         });
-        if flagged {
+        if !id.is_empty() && flagged {
             disabled.insert(id);
         }
+        i = item_end;
     }
     disabled
 }
@@ -96,12 +104,14 @@ fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// Line range `[start, end)` of the `- id: <id>` block in a top-level list.
+/// Line range `[start, end)` of the item that targets `id` in a top-level list.
 ///
-/// The block ends at the next non-empty line indented at or above the item's
-/// own level. Matching a trimmed `"- "` prefix instead would also stop at
-/// *nested* sequence items (`      - a` under `config:`), cutting the block
-/// in half and orphaning its tail at the document's top level.
+/// A plugin is mounted by DSH through an `insert:` list, so the block may start
+/// at `- insert:` or (legacy) at a bare `- id:` line. The block ends at the next
+/// non-empty line indented at or above the item's own level. Matching a trimmed
+/// `"- "` prefix instead would also stop at *nested* sequence items (`      - a`
+/// under `config:`), cutting the block in half and orphaning its tail at the
+/// document's top level.
 fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
     let mut start: Option<usize> = None;
     let mut base = 0usize;
@@ -109,7 +119,12 @@ fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
         let trimmed = line.trim_start();
         match start {
             None => {
-                if let Some(rest) = trimmed.strip_prefix("- id:") {
+                if trimmed.starts_with("- insert:") {
+                    if insert_item_contains_id(lines, i, id) {
+                        start = Some(i);
+                        base = indent_of(line);
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("- id:") {
                     if rest.trim().trim_matches(|c| c == '\'' || c == '"') == id {
                         start = Some(i);
                         base = indent_of(line);
@@ -126,10 +141,41 @@ fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
     start.map(|s| (s, lines.len()))
 }
 
+fn insert_item_contains_id(lines: &[String], start: usize, id: &str) -> bool {
+    let item_end = find_item_end(lines, start);
+    lines[start + 1..item_end].iter().any(|l| {
+        l.trim_start()
+            .strip_prefix("- id:")
+            .is_some_and(|rest| rest.trim().trim_matches(|c| c == '\'' || c == '"') == id)
+    })
+}
+
+fn find_item_end(lines: &[String], item_start: usize) -> usize {
+    let base = indent_of(&lines[item_start]);
+    (item_start + 1..lines.len())
+        .find(|&i| !lines[i].trim().is_empty() && indent_of(&lines[i]) <= base)
+        .unwrap_or(lines.len())
+}
+
+fn item_row_range(lines: &[String], range: (usize, usize)) -> (usize, usize) {
+    // find_block returns the top-level item range, which for an insert block
+    // begins at `- insert:`. Row-level work (child indent, the `disabled:`
+    // key) happens on the nested `- id:` row, so skip the insert opener.
+    if lines[range.0].trim_start().starts_with("- insert:") {
+        if let Some(i) =
+            (range.0 + 1..range.1).find(|&i| lines[i].trim_start().starts_with("- id:"))
+        {
+            return (i, range.1);
+        }
+    }
+    range
+}
+
 /// Indentation of the block's direct children, so keys are read and written
 /// at the right level instead of matching something nested deeper.
 fn child_indent(lines: &[String], range: (usize, usize)) -> usize {
-    (range.0 + 1..range.1)
+    let row = item_row_range(lines, range);
+    (row.0 + 1..row.1)
         .find(|&i| !lines[i].trim().is_empty())
         .map(|i| indent_of(&lines[i]))
         .unwrap_or_else(|| indent_of(&lines[range.0]) + 2)
@@ -145,11 +191,12 @@ pub(crate) async fn set_plugin_disabled(
     let mut lines = read_patch_lines(instance_root).await;
     match find_block(&lines, registry_id) {
         Some(range) => {
-            // Scope the key to the block's own level: a `disabled:` sitting
-            // inside a nested config mapping belongs to that sub-mapping,
-            // not to the plugin.
+            let row = item_row_range(&lines, range);
+            // Scope the key to the plugin row's own level: a `disabled:`
+            // sitting inside a nested `config:` mapping belongs to that
+            // sub-mapping, not to the plugin.
             let indent = child_indent(&lines, range);
-            let at = (range.0 + 1..range.1).find(|&i| {
+            let at = (row.0 + 1..range.1).find(|&i| {
                 indent_of(&lines[i]) == indent && lines[i].trim_start().starts_with("disabled:")
             });
             match (disabled, at) {
@@ -160,7 +207,7 @@ pub(crate) async fn set_plugin_disabled(
                     lines[i] = format!("{}disabled: true", " ".repeat(indent));
                 }
                 (true, None) => {
-                    lines.insert(range.0 + 1, format!("{}disabled: true", " ".repeat(indent)));
+                    lines.insert(row.0 + 1, format!("{}disabled: true", " ".repeat(indent)));
                 }
                 (false, None) => {}
             }
@@ -170,27 +217,51 @@ pub(crate) async fn set_plugin_disabled(
             if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
                 lines.push(String::new());
             }
-            lines.push(format!("- id: {registry_id}"));
-            lines.push(format!("  name: {registry_id}"));
-            lines.push("  disabled: true".into());
+            lines.extend(insert_block(registry_id, true));
             write_patch_lines(instance_root, &lines).await
         }
         None => Ok(()), // enabling something unregistered is a no-op
     }
 }
 
+/// The patch lines that mount one plugin through DSH's `insert` channel. PHL
+/// uses the package name as both the loader `id` and `name`: the plugin is
+/// resolved by `name`, and `id` is PHL's stable handle for enable/disable/
+/// uninstall. Writing a bare `- id:` (the old shape) instead makes DSH read it
+/// as "override a plugin that already exists" and silently drop it, so the
+/// plugin installs but never mounts.
+fn insert_block(registry_id: &str, disabled: bool) -> Vec<String> {
+    let mut block = vec![
+        "- insert:".to_string(),
+        format!("    - id: {registry_id}"),
+        format!("      name: '{registry_id}'"),
+    ];
+    if disabled {
+        block.push("      disabled: true".to_string());
+    }
+    block
+}
+
 async fn remove_plugin_block(instance_root: &Path, registry_id: &str) -> Result<(), String> {
     let mut lines = read_patch_lines(instance_root).await;
     if let Some((start, end)) = find_block(&lines, registry_id) {
         lines.drain(start..end);
+        trim_trailing_blanks(&mut lines);
         write_patch_lines(instance_root, &lines).await
     } else {
         Ok(())
     }
 }
 
-/// Adds the `- id: …` entry if missing. `disabled` seeds the block with the
-/// flag when the caller already knows the plugin starts disabled.
+fn trim_trailing_blanks(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+/// Mounts the plugin through DSH's `insert` channel if it is not already there.
+/// `disabled` seeds the block with the flag when the caller already knows the
+/// plugin starts disabled.
 pub(crate) async fn register_cordis_patch(
     instance_root: &Path,
     registry_id: &str,
@@ -203,11 +274,7 @@ pub(crate) async fn register_cordis_patch(
     if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.push(String::new());
     }
-    lines.push(format!("- id: {registry_id}"));
-    lines.push(format!("  name: {registry_id}"));
-    if disabled == Some(true) {
-        lines.push("  disabled: true".into());
-    }
+    lines.extend(insert_block(registry_id, disabled == Some(true)));
     write_patch_lines(instance_root, &lines).await
 }
 #[tauri::command]
@@ -359,7 +426,62 @@ mod tests {
         assert!(!text.contains("[]"), "placeholder replaced: {text}");
         assert!(text.contains("# Your patch layer"), "header kept: {text}");
         let doc = assert_single_sequence_document(&text);
-        assert_eq!(doc[0]["id"], "dshmarket");
+        assert_eq!(doc[0]["insert"][0]["id"], "dshmarket");
+        assert_eq!(doc[0]["insert"][0]["name"], "dshmarket");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn register_mounts_through_the_insert_channel() {
+        // The whole point of the fix: an installed plugin must be added with an
+        // `insert` list. A bare `- id:` entry is read by DSH as "override a
+        // plugin that already exists" and dropped, so it installs but never
+        // mounts. Assert the emitted file actually carries an insert.
+        let dir = temp_profile("mount");
+        register_cordis_patch(&dir, "dsh-better-sidebar", None)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert!(
+            doc[0].get("insert").is_some(),
+            "must be an insert block: {text}"
+        );
+        assert_eq!(doc[0]["insert"][0]["name"], "dsh-better-sidebar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn enable_disable_roundtrip_on_an_insert_block() {
+        let dir = temp_profile("toggle");
+        register_cordis_patch(&dir, "dsh-dream-skin", None)
+            .await
+            .unwrap();
+
+        // The plugin is mounted and enabled at first.
+        assert!(disabled_plugin_ids(&dir).await.is_empty());
+
+        set_plugin_disabled(&dir, "dsh-dream-skin", true)
+            .await
+            .unwrap();
+        let disabled = disabled_plugin_ids(&dir).await;
+        assert!(
+            disabled.contains("dsh-dream-skin"),
+            "flag not read back: {disabled:?}"
+        );
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert_single_sequence_document(&text);
+
+        set_plugin_disabled(&dir, "dsh-dream-skin", false)
+            .await
+            .unwrap();
+        assert!(disabled_plugin_ids(&dir).await.is_empty());
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert!(!text.contains("disabled: true"), "flag cleared: {text}");
+        assert!(
+            text.contains("    - id: dsh-dream-skin"),
+            "still mounted: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
