@@ -31,6 +31,7 @@ use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
+pub(crate) mod adoption;
 pub(crate) mod bundle;
 pub(crate) mod copy;
 pub(crate) mod env_policy;
@@ -39,7 +40,10 @@ pub(crate) mod snapshot;
 
 pub(crate) use copy::{copy_tree_with_progress, dir_size, SkipRule};
 use manifest::{classify_manifest, write_manifest, ManifestRead};
-pub(crate) use manifest::{load_manifest, read_manifest, InstanceManifest};
+pub(crate) use manifest::{
+    home_of, load_manifest, profile_root_of, read_manifest, AdoptedFrom, InstanceManifest,
+    InstanceSource, ManagementMode,
+};
 #[cfg(test)]
 use snapshot::{delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create};
 use snapshot::{scan_snapshots, SnapshotFile};
@@ -394,6 +398,23 @@ pub async fn instance_disk_usage(state: State<'_, PhlState>, id: String) -> Resu
     Ok(bytes)
 }
 
+/// Count the DSH sessions this instance's home holds. The "数据" section of
+/// the instance detail uses it; it is a filename walk under
+/// `<home>/sessions/*/*/session.jsonl*` (the spike's P0 rule: count, never
+/// parse). Works for both management modes because `home_of` resolves them.
+#[tauri::command]
+pub async fn instance_session_count(
+    state: State<'_, PhlState>,
+    id: String,
+) -> Result<usize, String> {
+    let dir = instance_dir(&state.root(), &id)?;
+    let manifest = load_manifest(&dir, &id).await?;
+    let home = home_of(&dir, &manifest);
+    tokio::task::spawn_blocking(move || crate::discovery::inspect::count_sessions(&home))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Directories under `<root>/instances` that carry no manifest — interrupted
 /// creates, and plugin trees written before instances were real. Surfacing
 /// them gives the user a way to reclaim the space.
@@ -518,7 +539,43 @@ pub(crate) async fn build_instance_tree(
 pub(crate) async fn profile_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
     let dir = instance_dir(root, id)?;
     let manifest = load_manifest(&dir, id).await?;
-    Ok(profile_root(&dir, &manifest.profile))
+    Ok(profile_root_of(&dir, &manifest))
+}
+
+/// Whether an instance points at an in-place (external) DSH_HOME.
+pub(crate) fn is_external(manifest: &InstanceManifest) -> bool {
+    manifest.management_mode == ManagementMode::External
+}
+
+/// `profile_dir` for callers about to *write* into the profile: resolves the
+/// path through the ungated read helper and clears the external-instance
+/// gate in one step, so no mutation command can forget to check it.
+pub(crate) async fn writable_profile_dir(
+    root: &Path,
+    id: &str,
+    action: &str,
+) -> Result<PathBuf, String> {
+    let dir = instance_dir(root, id)?;
+    let manifest = load_manifest(&dir, id).await?;
+    reject_external_write(&manifest, id, action)?;
+    profile_dir(root, id).await
+}
+
+/// Refuse a write into an external instance's DSH_HOME. In-place adoption
+/// deliberately keeps PHL out of the user's own directory (spec §3.1), so
+/// plugin install/uninstall/enable, snapshot restore and repair must all
+/// clear this gate before mutating. Reads are never gated.
+pub(crate) fn reject_external_write(
+    manifest: &InstanceManifest,
+    id: &str,
+    action: &str,
+) -> Result<(), String> {
+    if manifest.management_mode == ManagementMode::External {
+        return Err(format!(
+            "原地接入的实例「{id}」的 DSH_HOME 由你自己管理，PHL 不会{action}它。需要该能力请改用「复制到 PHL」方式接入"
+        ));
+    }
+    Ok(())
 }
 
 /// Persist just the API binding on an existing manifest — the sync path must
@@ -536,9 +593,9 @@ pub(crate) async fn set_instance_api(
 }
 
 pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord {
-    let profile = profile_root(dir, &manifest.profile);
+    let profile = profile_root_of(dir, &manifest);
     InstanceRecord {
-        dsh_home: dir.join("dsh-home").to_string_lossy().into_owned(),
+        dsh_home: home_of(dir, &manifest).to_string_lossy().into_owned(),
         workspace: dir.join("workspace").to_string_lossy().into_owned(),
         plugins: scan_plugins(&profile).await,
         snapshots: scan_snapshots(dir).await,
@@ -629,6 +686,16 @@ async fn run_clone(
             crate::errors::ErrCode::NotFound,
             format!("源实例不存在: {source_id}"),
         ));
+    }
+    // Cloning is a whole-directory copy. An external instance has no home to
+    // copy, and its round-tripped `externalHome` would make the clone a second
+    // instance pointing at the SAME DSH_HOME — a §1.1 violation. P0 has no
+    // clone-semantics for external homes, so refuse rather than fork the tree.
+    let source_manifest = load_manifest(&source, source_id).await?;
+    if is_external(&source_manifest) {
+        return Err(
+            "原地接入的实例暂不支持克隆：请改用「接入本机 DSH → 复制到 PHL」再克隆副本".to_string(),
+        );
     }
     let id = sanitize_segment(&manifest.id, "实例 id")?;
     let dest = instance_dir(root, &id)?;
@@ -731,6 +798,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn cloning_an_external_instance_is_refused() {
+        // A whole-tree clone of an external instance would either copy an
+        // empty directory or re-point the round-tripped external home at the
+        // source — both are wrong. The backend refuses; the menu disables it.
+        let root = temp_root("clone-external");
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        let src = root.join("instances").join("ext-src");
+        std::fs::create_dir_all(&src).unwrap();
+        let external_home = root.join("user-dsh");
+        std::fs::create_dir_all(&external_home).unwrap();
+        let mut src_manifest = manifest("ext-src", "External Source");
+        src_manifest.management_mode = ManagementMode::External;
+        src_manifest.external_home = Some(external_home.to_string_lossy().into_owned());
+        manifest::write_manifest(&src, &src_manifest).await.unwrap();
+
+        let err = run_clone(
+            &Arc::new(AtomicBool::new(false)),
+            &root,
+            "ext-src",
+            manifest("clone-target", "Clone"),
+            &Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("原地接入"), "got: {err}");
+        assert!(
+            !root.join("instances").join("clone-target").exists(),
+            "no half clone left behind"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("phl-inst-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -758,6 +858,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         }
     }
 
@@ -1463,6 +1567,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         };
         create_instance_inner(&root, manifest).await.unwrap();
         let dir = root.join("instances").join("broken-1");

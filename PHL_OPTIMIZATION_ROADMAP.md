@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-06 增量：已实现 PHL 原生模型信息补全（models.dev、七天缓存、歧义匹配保护、仅填缺失字段、能力字段 YAML 双向同步），使用规则、上游 schema 依据和验证说明见 [模型信息补全](docs/model-metadata-enrichment.md)。
+
 PHL 已经具备一个可运行的 DSH 桌面环境管理器的主体：版本与 Runtime 安装、实例隔离、插件管理、API 配置、启动停止、快照、Bundle、诊断和局部修复均有 Rust 实现。React、Zustand、Repository 与 Tauri/Rust 的总体分层可以保留。
 
 当前最值得投入的是**交付可靠性、操作失败后的恢复能力，以及环境的精确复现**。旧路线图里一些“未来任务”已经完成，继续照原顺序开发会重复建设；设置、文档与实际行为之间也需要重新对齐。
@@ -52,7 +54,7 @@ PHL 已经具备一个可运行的 DSH 桌面环境管理器的主体：版本�
 
 ### P0：先建立可信的交付基线
 
-- [ ] **O-01 修复 CI 与 Release 的 Rust 执行位置和检查顺序。** —— 实现已合入（b3fda5d：Rust 步骤限定 src-tauri、发布检查顺序与前端产物就绪）。验收要求的干净检出 CI、手动安装包构建与受控 tag 演练**尚未执行**，保持待验证。
+- [ ] **O-01 修复 CI 与 Release 的 Rust 执行位置和检查顺序。** —— 实现已合入（b3fda5d：Rust 步骤限定 src-tauri、发布检查顺序与前端产物就绪）。2026-09-07 本机 `npm run app:build` 已成功生成 NSIS；干净检出 CI 与受控 tag 演练仍未执行，保持待验证。
   - 证据：`.github/workflows/ci.yml:62` 起直接执行 Cargo，未指定工作目录；`release.yml:51` 同样在根目录执行 `cargo test`。本地根目录命令已复现找不到清单。
   - 行动：仅为 Rust 步骤指定 `src-tauri` 工作目录，或统一传 `--manifest-path src-tauri/Cargo.toml`；Node 步骤继续在仓库根目录运行。Release 的 Rust 检查前先准备前端产物；在全新检出中确认图标等构建输入齐全。CI 中 tag 条件与实际触发器对齐；手动构建与正式发布分开定义。
   - 验收：一次干净检出的 CI、一次手动安装包构建成功；受控 tag 演练验证版本一致性、产物及哈希、预发布状态。不能仅以本机有缓存时构建成功作为验收。
@@ -106,8 +108,8 @@ PHL 已经具备一个可运行的 DSH 桌面环境管理器的主体：版本�
 - [x] **O-10 统一长任务展示，落实并发设置。** —— f029a30：标题栏任务中心读取后端任务登记（阶段/取消请求/结果/错误提示/失败重试入口）；版本、Runtime、插件安装共享由 concurrency 强制的传输槽位队列，超额显示排队中；轮询隐藏时暂停、运行中加速。 使用 O-05 的任务模型呈现排队、运行、取消中、失败、完成；保留简短失败历史和重试入口。验收：跨页面可追踪；取消反馈及时；实际并发不超过设置值。
 - [x] **O-11 改善下载恢复与取消。** —— e60a798：等待与响应头均可被取消打断（1 s 轮询窗口）；错误分类（网络类退避重试 ≤3、4xx/磁盘即时失败）；断点续传绑定 URL+ETag/Last-Modified，206 确认同一实体才追加，任何不匹配从零重启，收尾对整文件重算摘要。本地模拟服务器测试覆盖续传/异体拒绝/停滞取消/致命 404。 `versions/download.rs` 当前从头创建缓存文件；等待网络响应或下一个流分块时，取消依赖后续检查。加入可中断等待、分类重试；断点续传须绑定来源和 ETag/Last-Modified 并重新校验。验收：本地模拟慢响应、中断和内容变化，取消能结束等待，续传不会拼接不同内容。
 - [x] **O-12 控制日志与磁盘扫描缓存。** —— 95d2c80：日志尾读 256 KiB 有界（截断行丢弃）、web URL 头部有界读取、每实例仅保留最近 10 个启动日志；instance_disk_usage 15 s memo + 变更点失效（创建/删除/克隆/插件装卸/快照恢复）。扫描可取消项未做（单命令粒度已足够小），记为残留限制。 `launch/process.rs:11` 与第 191 行附近读取完整日志；改为有界读取，设置滚动和保留期限；目录占用缓存并允许显式刷新。验收：大日志尾部读取内存受上限约束；扫描可取消，缓存有更新时间和失效规则。
-- [ ] **O-13 按职责拆分大页面与桌面桥接。** —— 部分完成（b365ed0）：desktopCore/desktopTasks 建立领域拆分模式并在 desktop.ts 兼容导出；设置页诊断交互整体迁入 DiagnosticsSection。PluginsPage、InstanceDetailPage 与 desktop.ts 其余域按「每次一个完整交互」在后续迭代继续。 PluginsPage 约 1014 行、SettingsPage 约 1000 行、InstanceDetailPage 约 827 行；`desktop.ts` 同时承载多领域接口。按插件详情/安装、设置分区、实例环境操作拆分；将平台桥接与业务 service 分开，复用 Repository 边界。验收：每次只迁移一个完整交互，已有行为与错误路径保持；不以文件行数作为质量指标。
-- [ ] **O-14 建立性能和可访问性基线。** —— 部分完成：PERF_BASELINE.md 记录可复现的构建/体积/测试计时基线与真机采集方法；桌面冷启动、50/200 实例、500 插件、内存等真机数值待采（文件内已列方法与占位）。 记录桌面冷启动、页面交互、50/200 实例列表、500 插件列表、内存与磁盘占用；先定位再决定虚拟列表、选择器细化或分包。验收：固定设备和样本可重复测量；键盘焦点、弹层关闭、125%/150% 缩放、精简动效均可用。
+- [ ] **O-13 按职责拆分大页面与桌面桥接。** —— 持续完成中：`desktop.ts` 已降至兼容导出壳（282 行、17 个领域 bridge 文件）；插件页已拆出 registry/installed/detail/update-state；2026-09-07 又将 `catalogStore.ts` 从 700+ 行拆为 91 行组合壳 + version/runtime/plugin actions + 通知策略，并将 `api_config/mod.rs` 从 1200+ 行拆为 147 行编排壳 + types/validation/launch_keys/tests。SettingsPage（约 931 行）和 InstanceDetailPage（约 878 行）仍需按完整交互继续拆分，因此不勾完成。验收：每次只迁移一个完整交互，已有行为与错误路径保持；不以文件行数作为质量指标。
+- [ ] **O-14 建立性能和可访问性基线。** —— 部分完成：PERF_BASELINE.md 已更新构建/体积/测试，并加入 `.phlpack` 64 MiB + 1000 文件的前后基准（build/validate/unpack 峰值工作集下降 95%+）及浏览器 Mock 交互预检。桌面冷启动、50/200 实例、500 插件、Tauri Profiler、125%/150% 缩放与常驻内存仍待真机采集。
 - [x] **O-15 收敛项目文档。** —— AGENTS.md 成为约定权威（CLAUDE.md 改为兼容指针）；README 的「环境修复为未来能力」与「LICENSE 占位（文件不存在）」两处失真已修正，许可证维持「发布前由维护者决定」的如实表述；SECURITY 修正 commit 固定已实现的描述、补充应用状态文件边界；各历史文档的分工写入 AGENTS 文档节。 README 已将局部修复列为未来能力，SECURITY 仍称 commit 固定未实现且凭据只有 env 引用；这些均落后于代码。保留旧计划作历史，建立当前状态入口；将适用项目约定维护到 canonical AGENTS.md，CLAUDE.md 作为兼容入口。核实 README 提到但本次文件清单未见的 LICENSE 占位，发布前由维护者决定授权方式。验收：实现状态、代码位置、已知限制和验证记录可相互追溯。
 
 ## 4. 长期发展清单
@@ -149,6 +151,14 @@ Source Build 的近期补充：现有生成任务含固定构建流程和工具�
 O-04 至 O-08 属于不同故障域，不宜混进一个“大重构”提交。先共享最小操作互斥设施，再按插件、迁移、凭据、进程逐个交付；每项保留独立验证记录。
 
 2026-09-06 执行轮的结果：三张任务卡之外，O-02～O-12、O-15 已实现合入并通过自动化验证（Rust 158 通过 / 4 忽略、前端 37 通过、typecheck/build/clippy/fmt 全绿）；O-01 待干净 CI 与 tag 演练，O-13、O-14 为持续迭代项。下一轮重点：执行 CI 发布演练、手测清单 §10 真机登记、继续 O-13 拆分与 O-14 真机基线采集。
+
+2026-09-06 「本机 DSH 接入」P0 轮：按《下一阶段开发规格》§28 完成 P0-3 Session Spike（`docs/research/dsh-session-integration.md`）、P0-1 Discovery（`src-tauri/src/discovery/`）、P0-2 Adoption（`instances/adoption.rs` + manifest schema v2）与前端接入向导（`AdoptDshPage.tsx` / `adoptionStore.ts` / `desktopAdoption.ts`），实现与偏差记录见 `docs/p0-local-dsh-adoption.md`。自动化验证：Rust 192 通过 / 5 忽略、前端 51 通过、typecheck/build/clippy/fmt 全绿。真机手测矩阵（规格 §32 Discovery/Adoption 段）与 P1（Session 迁移引擎、`.phlpack`）尚未开始。
+
+2026-09-06 「Session 迁移 + PHL Pack」P1 轮：按《下一阶段开发规格》§29 完成 P1-1 Session 迁移引擎（`src-tauri/src/sessions/`：逐帧 zstd codec + re-id 复制，保留 lineage/cwd，运行/外部写门禁、多目标 fan-out）、P1-2 `.phlpack` 格式与校验器（`src-tauri/src/pack/{format,mod}.rs`：ZIP 容器、v1 manifest、防穿越/软链/大小/重复/版本、SHA-256 完整性）、P1-3 导出（`pack/export.rs`：受管实例扫描、本地/远程插件分类与许可提示、凭据剥离、会话隐私二次确认）、P1-4 安装器（`pack/install.rs`：preview+resolver、staging 原子落位+回滚、embedded 插件/会话/overrides 解包、远程插件延后交回安装管线）。前端 `desktopSessions.ts` / `desktopPack.ts` 桥接 + 实例详情「对话迁移」内联面板 + 安装/导出整合包向导 + 实例页「安装整合包」入口。DSH schema 与 models.dev 数据形状均已对真实安装核实。新增 `ruzstd`/`zstd`（离线 crate，Node 互解已验证）。详见 `docs/p1-session-pack.md`。
+
+2026-09-06 「P0/P1 收尾 + P2」轮：关闭上一轮登记的全部遗留项并完成 P2。①接入向导「按对话选择迁移」闭环（规格 §3.2/§3.3）：`SessionStrategy::Selected` 从「下一版本」拒绝路径改为真实实现——复制排除会话库、`list_adoption_sessions` 列源对话、选定目录**原 id 原样**迁入（接入是迁移非分发，与 §5.1 的重 id 复制语义分开），向导补可选单选+对话勾选列表；②复制会话后源/目标计数即时刷新；③实例页「导入 Bundle」按规格 §26 移入「更多导入方式」下拉；④Discovery 平台路径按规格 §2.1 拆出 `discovery/{windows,macos,linux}.rs`（macOS/Linux 补 GUI 启动 PATH 不可见的 Homebrew/npm-global/nvm/Volta/Bun/~/.local bin 根；非宿主平台文件以 `#[cfg(test)] #[path=…]` 编入本机测试构建保持编译与单测覆盖），macOS/Linux **真机**验证仍属 L-12；⑤P2-1：`.phlpack` 格式抽出 `src-tauri/crates/phl-pack-core`（workspace 根设在 src-tauri 以免挪动打包路径；schema/校验/integrity/`PackBuilder`/`build_pack_from_dir`/dest-root 受限解包），新增 `crates/phl-pack-cli`（`phl-pack inspect/validate/unpack/build`），桌面端 export/install 变薄壳复用同一 core；⑥P2-2：`docs/skills/phl-export/SKILL.md`（侦察→分类→敏感询问→组布局→CLI，铁律「不发明格式」）；⑦规格 §32/§33 手测矩阵登记进 `dsh-phl-manual-test-checklist.md` §11–§14。验证：Rust（workspace）255 通过 / 5 忽略（host 229 + core 23 + cli 3）、前端 59 通过、typecheck/build/clippy/fmt 全绿。**尚未完成**：§11–§14 真机手测执行、L-12 macOS/Linux 真机验证、规格 §31 明确排除的市场/云同步/文件关联等。详见 `docs/p2-pack-core-skill.md`。
+
+2026-09-07 review 收口轮：完成 M3 catalog store action/通知策略拆分、M5 API config types/validation/launch_keys/tests 拆分；R7 将唯一 transfer id 和协作式取消贯穿 Pack 扫描、压缩、完整性哈希与解包的 64 KiB 循环，导出/安装 UI 增加取消入口，取消解包会删除当前半成品；R6 新增可复现前后基准。另加入 bridge 静态门禁（17 文件 / 71 个 invoke 全部有 Rust handler）并修复浏览器回归发现的嵌套按钮与 Toast ref 警告。验证：Rust workspace 268 通过 / 5 忽略；前端 73 通过；typecheck/build/clippy/fmt/bridge check 全绿；NSIS 构建成功。仍需真机项见手测清单 §15。
 
 ## 6. 如何判断优化有效
 

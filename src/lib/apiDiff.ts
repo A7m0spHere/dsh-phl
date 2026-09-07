@@ -16,7 +16,12 @@ const norm = (s?: string) => (s && s.trim() ? s : undefined)
 
 function modelsEqual(a: ApiModelRef[], b: ApiModelRef[]): boolean {
   if (a.length !== b.length) return false
-  const key = (m: ApiModelRef) => `${m.id}\u0000${norm(m.name) ?? ''}\u0000${m.contextWindow ?? ''}\u0000${m.maxTokens ?? ''}`
+  // Provenance belongs to PHL; compare only fields materialized into DSH.
+  const key = (m: ApiModelRef) => JSON.stringify([
+    m.id, norm(m.name), m.contextWindow, m.maxTokens,
+    m.input === undefined ? undefined : [...m.input].sort(),
+    m.reasoningEfforts && Object.entries(m.reasoningEfforts).sort(([a], [b]) => a.localeCompare(b)),
+  ])
   const ka = [...a].map(key).sort()
   const kb = [...b].map(key).sort()
   return ka.every((k, i) => k === kb[i])

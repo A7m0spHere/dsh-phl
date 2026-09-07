@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import * as desktop from '@/lib/desktop'
 import { registryBase } from './tauriVersions'
 import type { Instance, LaunchPhase } from '@/types'
@@ -101,7 +102,7 @@ async function launch(
   } catch (err) {
     if (signal.aborted) throw new Cancelled()
     if (err instanceof LaunchError) throw err
-    throw new LaunchError('启动失败', err instanceof Error ? err.message : String(err))
+    throw new LaunchError('启动失败', parseThrownError(err).message)
   } finally {
     signal.removeEventListener('abort', onAbort)
   }

@@ -99,6 +99,9 @@ const childPath = (root: string, name: string) =>
  * ------------------------------------------------------------------ */
 
 class MockRepository implements PhlRepository {
+  async enrichModelMetadata(args: import('@/types').ModelMetadataRequest): Promise<import('@/types').ModelMetadataBatch> {
+    return { results: args.models.map((model) => ({ model, matched: false, changed: false, ambiguous: false })), catalogStatus: 'mock' }
+  }
   async listInstances() {
     await sleep(120)
     return structuredClone(instanceSeed)

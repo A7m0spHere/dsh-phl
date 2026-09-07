@@ -104,6 +104,9 @@ pub(crate) async fn save_api_config_at(
         return Err(format!("不支持的 API 配置版本: {}", config.version));
     }
     for p in &config.providers {
+        for model in &p.models {
+            model.validate_capabilities()?;
+        }
         if !valid_provider_name(&p.name) {
             return Err(format!("非法的供应商标识名: {}", p.name));
         }

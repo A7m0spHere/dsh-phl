@@ -1,4 +1,6 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { motion } from 'motion/react'
 import {
   BookOpen,
@@ -79,8 +81,51 @@ export function SettingsPanel() {
 
 export function SettingsPage() {
   const section = useViewStore((s) => s.settingsSection)
-  const ui = useUIStore()
-  const settings = useSettingsStore()
+  // §M1: subscribe to only the fields this page renders/writes, not the whole
+  // stores. A toast push, a confirm-dialog open, or navigation state changing
+  // no longer re-renders the entire settings tree — but every value actually
+  // shown here still updates, because each is named in the shallow selector.
+  const ui = useUIStore(
+    useShallow((s) => ({
+      confirm: s.confirm,
+      toast: s.toast,
+      navigate: s.navigate,
+      confirmDelete: s.confirmDelete,
+      setPref: s.setPref,
+      theme: s.theme,
+      setTheme: s.setTheme,
+      density: s.density,
+      setDensity: s.setDensity,
+      layout: s.layout,
+      setLayout: s.setLayout,
+      motion: s.motion,
+      setMotion: s.setMotion,
+      scale: s.scale,
+      setScale: s.setScale,
+      showLaunchDock: s.showLaunchDock,
+      setGuideOpen: s.setGuideOpen,
+    })),
+  )
+  const settings = useSettingsStore(
+    useShallow((s) => ({
+      root: s.root,
+      setRoot: s.setRoot,
+      reset: s.reset,
+      startup: s.startup,
+      minimizeToTray: s.minimizeToTray,
+      closeStopsInstances: s.closeStopsInstances,
+      checkUpdates: s.checkUpdates,
+      source: s.source,
+      customSource: s.customSource,
+      concurrency: s.concurrency,
+      keepArchives: s.keepArchives,
+      versionRefreshMinutes: s.versionRefreshMinutes,
+      pendingReleaseAlerts: s.pendingReleaseAlerts,
+      portStart: s.portStart,
+      logLevel: s.logLevel,
+      set: s.set,
+    })),
+  )
   const instances = useInstanceStore((s) => s.instances)
   const measureDiskUsage = useInstanceStore((s) => s.measureDiskUsage)
   const versions = useCatalogStore((s) => s.versions)
@@ -117,7 +162,7 @@ export function SettingsPage() {
       ui.toast({
         kind: 'error',
         title: `删除 ${name} 失败`,
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   }
@@ -143,7 +188,7 @@ export function SettingsPage() {
       ui.toast({
         kind: 'error',
         title: '新目录读取失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     })
   }
@@ -205,7 +250,7 @@ export function SettingsPage() {
       ui.toast({
         kind: 'error',
         title: '撤销失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
         duration: 8000,
       })
     } finally {
@@ -240,10 +285,7 @@ export function SettingsPage() {
       ui.toast({
         kind: 'error',
         title: '迁移失败',
-        message:
-          err instanceof Error && err.message
-            ? `${err.message} 数据目录未更改；已完成的部分保留在新目录，处理后可重新迁移续传。`
-            : String(err),
+        message: `${parseThrownError(err).message} 数据目录未更改；已完成的部分保留在新目录，处理后可重新迁移续传。`,
         duration: 8000,
       })
     } finally {

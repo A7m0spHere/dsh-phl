@@ -66,16 +66,21 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - run: cargo fmt --check
+      # The manifest at src-tauri/ is a NON-virtual workspace (root crate +
+      # phl-pack-core + phl-pack-cli) with no `default-members`, so a bare
+      # `cargo test`/`check` silently runs only the root crate and never the
+      # extracted Pack Core or CLI. Every gate below is scoped to `--workspace`
+      # / `--all` so all three crates are actually exercised (§R2).
+      - run: cargo fmt --all -- --check
         shell: bash
 
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
         shell: bash
 
-      - run: cargo test
+      - run: cargo test --workspace
         shell: bash
 
-      - run: cargo check
+      - run: cargo check --workspace
         shell: bash
 
   # Full NSIS bundle is the slowest step and not required per-commit; it runs

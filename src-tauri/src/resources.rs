@@ -272,10 +272,17 @@ impl Task {
     /// `Transfers::cancel` flips, so the registry and the cancel plumbing
     /// cannot disagree about whether an abort was requested.
     pub fn cancel_observed(&self) -> bool {
-        self.flag
+        let flag = self
+            .flag
             .as_ref()
             .map(|f| f.load(Ordering::SeqCst))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        flag || self
+            .inner
+            .lock()
+            .expect("tasks")
+            .get(&self.id)
+            .is_some_and(|info| info.cancel_requested)
     }
 
     /// Id only for log lines — the row itself lives in the registry.
@@ -293,8 +300,17 @@ impl Task {
     /// either the flag or an explicit registry request), or Failed with the
     /// error message attached.
     pub fn finish(&self, outcome: Result<(), String>) {
+        // Read the external flag before locking the task map. Calling
+        // `cancel_observed()` while holding `inner` would try to lock the same
+        // non-reentrant mutex again now that that method also observes registry
+        // cancellation requests.
+        let flag_cancelled = self
+            .flag
+            .as_ref()
+            .map(|flag| flag.load(Ordering::SeqCst))
+            .unwrap_or(false);
         if let Some(info) = self.inner.lock().expect("tasks").get_mut(&self.id) {
-            let cancelled = self.cancel_observed()
+            let cancelled = flag_cancelled
                 || info.cancel_requested
                 || outcome.as_ref().err().is_some_and(|e| is_cancel_msg(e));
             // Every branch assigns `error` explicitly: a body clone dropping

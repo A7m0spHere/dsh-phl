@@ -1,6 +1,6 @@
 # PHL 性能与可访问性基线
 
-更新日期：2026-09-06。对应路线图 **O-14**：先建立可复现的测量，再决定是否虚拟列表 /
+更新日期：2026-09-07。对应路线图 **O-14**：先建立可复现的测量，再决定是否虚拟列表 /
 细化选择器 / 调整分包。本文件是**基线记录**，不是达标判定——多数交互耗时需在真机上用
 固定设备与样本采集，这里给出方法与占位，未测项一律标 `待采`。
 
@@ -10,18 +10,34 @@
 
 | 指标 | 测量命令 | 本轮值 | 说明 |
 |---|---|---|---|
-| `npm run build` 总耗时 | `time npm run build` | ~22 s | 含 tsc + vite 全量 |
-| `npm run typecheck` | `time npm run typecheck` | ~11 s | `tsc -b --noEmit` |
-| 前端单测 | `time npm test` | ~3–8 s（含冷启动） | 37 项测试 |
-| Rust 测试 | `cargo test --offline` | ~1.5 s（已编译） | 158 通过 / 4 忽略 |
-| 主 JS 分包 | `ls -l dist/assets/index-*.js` | 486,942 B（gzip 153.65 kB） | React + 依赖 + 共享逻辑 |
-| 主 CSS | `dist/assets/index-*.css` | 45,740 B | 全站样式 |
-| 页面懒加载分包 | 各 `*Page-*.js` | Plugins 37 kB / ApiConfig 34.5 kB / Settings 32.5 kB / InstanceDetail 28.9 kB / Create 25 kB / Versions 15.6 kB / Runtimes 5.6 kB | 路由级 code-split 生效 |
+| `npm run build` 总耗时 | `Measure-Command { npm run build }` | 14.32 s（热缓存） | 含 tsc + vite 全量 |
+| 前端单测 | `npm test` | 8.47 s | 13 文件 / 73 项通过 |
+| Rust 测试 | `cargo test --offline --workspace --all-targets --all-features` | 5.35 s 构建 + 6.44 s 测试 | 268 通过 / 5 忽略 |
+| Tauri release + NSIS | `npm run app:build` | Rust release 8 min 09 s | 产物 2,880,367 B；LTO + 单 codegen unit |
+| 主 JS 分包 | `dist/assets/index-*.js` | 503.75 kB（gzip 158.69 kB） | React + 依赖 + 共享逻辑；仍有 500 kB 警告 |
+| 主 CSS | `dist/assets/index-*.css` | 46.04 kB（gzip 9.12 kB） | 全站样式 |
+| 页面懒加载分包 | 各 `*Page-*.js` | Plugins 40.90 kB / ApiConfig 40.26 kB / Settings 33.26 kB / InstanceDetail 34.54 kB / Create 25.06 kB / Versions 15.54 kB / Runtimes 5.60 kB | 路由级 code-split 生效 |
 
-主 JS 体积不等于安装包体积，也不能据此推断首屏耗时。安装包（NSIS）体积在 `npm run app:build`
-产物处记录，属真机项。
+主 JS 体积不等于安装包体积，也不能据此推断首屏耗时。上述时间是本机热缓存单次结果，不能与 CI
+或冷构建横向比较。
 
-## 2. 桌面启动与交互（真机项，方法已定，值待采）
+## 2. `.phlpack` 流式 I/O 前后对比（R6）
+
+脚本：`scripts/pack-benchmark.ps1`。基线为远端提交 `f17030e` 的 release `phl-pack`（大文件使用
+`read_to_end` / `Vec`），当前版为固定 64 KiB 缓冲的流式构建、完整性校验与解包。数据集为一个
+64 MiB 不可压缩文件 + 1000 个 4 KiB 小文件，共 71,204,904 B；每项独立进程运行 3 次取中位数，
+每 10 ms 采样 Working Set。系统：Windows 11 `10.0.22631 x64`。
+
+| 操作 | 基线耗时 | 当前耗时 | 变化 | 基线峰值 | 当前峰值 | 变化 |
+|---|---:|---:|---:|---:|---:|---:|
+| build | 8,454.33 ms | 5,232.38 ms | -38.1% | 133.59 MiB | 6.20 MiB | -95.4% |
+| validate | 4,102.73 ms | 503.15 ms | -87.7% | 130.57 MiB | 5.33 MiB | -95.9% |
+| unpack | 14,993.72 ms | 7,239.35 ms | -51.7% | 128.29 MiB | 5.33 MiB | -95.8% |
+
+这是工程基准，不是用户机器承诺：样本偏向单个大文件，Windows 文件缓存会影响耗时，10 ms 采样也可能
+漏掉极短峰值。内存数量级下降与实现边界一致；后续修改 Pack I/O 时应复跑同一脚本。
+
+## 3. 桌面启动与交互（真机项，方法已定，值待采）
 
 测量方法：固定同一台 Windows 机器、同一数据根、冷启动，重复 ≥5 次取 p50/p95；`performance.now()`
 或外部计时。同条件回归超过 10% 时分析原因。PHL 自身启动与 DSH 就绪分开统计。
@@ -38,7 +54,14 @@
 已确定的开销收敛（本轮）：目录占用 15 s memo（`instance_disk_usage`），启动日志尾读 256 KiB 上限 +
 每实例仅保留最近 10 个日志，诊断仅在打开该分区时生成，任务中心轮询在窗口隐藏时暂停。
 
-## 3. 可访问性验收（手动，逐项目测）
+## 4. 浏览器 Mock 交互与可访问性预检
+
+2026-09-07 使用本地 Vite + Chromium 检查：设置 8 个分区连续切换、创建 Mock 实例、插件搜索、详情、
+安装、启停与更新页均可操作，控制台无 warning/error；插件搜索从输入到“共 1 个插件”约 91 ms。
+检查发现并修复创建页/插件卡的嵌套 `<button>` 与 Toast `popLayout` 缺少 ref，复查 `button button = 0`。
+这些结果证明浏览器渲染链路，没有覆盖 Tauri IPC、原生对话框或真实 DSH 进程。
+
+## 5. 可访问性验收（手动，逐项目测）
 
 | 项 | 期望 | 状态 |
 |---|---|---|
@@ -48,7 +71,7 @@
 | 精简动效 | `useMotion` 的 reduced/off 路径在任务中心/诊断已走 `t()` | 待测 |
 | 屏幕阅读器标签 | 标题栏/任务中心按钮有 `aria-label`，图标按钮 `label` 必填 | 已布点，待测 |
 
-## 4. 记录规约
+## 6. 记录规约
 
 - 只有实现合入且对应验收通过才在路线图勾选；本表数值是测量，不是承诺。
 - 新增可测量的性能改动时，在同条件复采并在此文件追加一行「日期 / 变更 / 前值 / 后值」。

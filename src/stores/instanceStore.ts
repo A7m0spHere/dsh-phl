@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
 import { adoptProcesses, isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
@@ -297,7 +298,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
           action: { label: '查看', run: () => ui.push({ name: 'instance', id }) },
         })
       } else {
-        patch({ status: 'error', error: { title: '未知错误', detail: String(err) } })
+        patch({ status: 'error', error: { title: '未知错误', detail: parseThrownError(err).message } })
       }
     } finally {
       launchControllers.delete(id)
@@ -328,7 +329,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       if (!exitedDuringStop.has(id)) {
         set({ states: { ...get().states, [id]: state } })
         useUIStore.getState().toast({
-          kind: 'error', title: `${instance.name} 停止失败`, message: String(err),
+          kind: 'error', title: `${instance.name} 停止失败`, message: parseThrownError(err).message,
         })
         return false
       }
@@ -398,7 +399,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
           .toast({
             kind: 'error',
             title: '创建快照失败',
-            message: err instanceof Error ? err.message : String(err),
+            message: parseThrownError(err).message,
           })
       }
       return null
@@ -437,7 +438,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         .toast({
           kind: 'error',
           title: '还原快照失败',
-          message: err instanceof Error ? err.message : String(err),
+          message: parseThrownError(err).message,
         })
     }
   },
@@ -456,7 +457,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         .toast({
           kind: 'error',
           title: '删除快照失败',
-          message: err instanceof Error ? err.message : String(err),
+          message: parseThrownError(err).message,
         })
     }
   },
@@ -490,7 +491,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     } catch (err) {
       set({ createProgress: null })
       if (!(err instanceof Cancelled)) {
-        useUIStore.getState().toast({ kind: 'error', title: '创建失败', message: String(err) })
+        useUIStore.getState().toast({ kind: 'error', title: '创建失败', message: parseThrownError(err).message })
       }
       return null
     } finally {
@@ -551,7 +552,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         publish,
         write: (value) => repository.saveInstance(value),
         onError: (err) => useUIStore.getState().toast({
-          kind: 'error', title: `保存「${before.name}」的修改失败`, message: String(err),
+          kind: 'error', title: `保存「${before.name}」的修改失败`, message: parseThrownError(err).message,
         }),
       })
       instanceWriters.set(id, writer)

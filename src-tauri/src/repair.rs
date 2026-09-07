@@ -229,19 +229,25 @@ fn is_known_remote_action(action: &str) -> bool {
 async fn recreate_skeleton(root: &Path, instance_id: &str) -> Result<(), String> {
     let dir = crate::instances::instance_dir(root, instance_id)?;
     let manifest = crate::instances::load_manifest(&dir, instance_id).await?;
-    for relative in [
-        PathBuf::from("dsh-home")
-            .join("profiles")
-            .join(&manifest.profile)
-            .join("node_modules"),
-        PathBuf::from("logs"),
-        PathBuf::from("workspace"),
-    ] {
-        let target = dir.join(&relative);
+    // Only the PHL-owned copy tree is rebuildable. An external instance's
+    // DSH_HOME is the user's directory — recreating an empty skeleton there
+    // would be the opposite of repair, so those entries are skipped; the
+    // wrapper dirs (workspace/logs) still live inside the instance tree.
+    let mut relative = vec![PathBuf::from("logs"), PathBuf::from("workspace")];
+    if !crate::instances::is_external(&manifest) {
+        relative.push(
+            PathBuf::from("dsh-home")
+                .join("profiles")
+                .join(&manifest.profile)
+                .join("node_modules"),
+        );
+    }
+    for rel in relative {
+        let target = dir.join(&rel);
         if !target.exists() {
             tokio::fs::create_dir_all(&target)
                 .await
-                .map_err(|e| format!("无法重建 {}: {e}", relative.display()))?;
+                .map_err(|e| format!("无法重建 {}: {e}", rel.display()))?;
         }
     }
     Ok(())
@@ -329,6 +335,10 @@ mod tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         }
     }
 

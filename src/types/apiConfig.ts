@@ -16,6 +16,28 @@ export interface ApiModelRef {
   name?: string
   contextWindow?: number
   maxTokens?: number
+  input?: Array<'text' | 'image'>
+  reasoningEfforts?: false | Record<string, string | null>
+  /** PHL-only, per-field provenance; never sent to settings.yaml. */
+  metadataSources?: Partial<Record<ModelMetadataField, ModelMetadataSource>>
+}
+
+export type ModelMetadataField = 'name' | 'contextWindow' | 'maxTokens' | 'input' | 'reasoningEfforts'
+export type ModelMetadataSource = 'models.dev' | 'fallback' | 'manual'
+export interface ModelMetadataRequest {
+  models: ApiModelRef[]
+  /** DSH provider route name, not PHL's opaque provider id. */
+  provider?: string
+}
+export interface ModelMetadataResolution {
+  model: ApiModelRef
+  matched: boolean
+  changed: boolean
+  ambiguous: boolean
+}
+export interface ModelMetadataBatch {
+  results: ModelMetadataResolution[]
+  catalogStatus: 'fresh' | 'stale' | 'unavailable' | 'mock'
 }
 
 /**

@@ -397,7 +397,15 @@ async fn run_launch(
         .map_err(|e| format!("安装 DSH {version_name} 的依赖失败: {e}"))?;
     }
 
-    let dsh_home = instance_dir.join("dsh-home");
+    // The home follows the manifest: a managed copy lives inside the instance
+    // directory, an externally-adopted instance points at its own DSH_HOME.
+    // Creating `profiles/web` under it is idempotent (external homes already
+    // have it; this only matters for a freshly created copy).
+    let manifest = crate::instances::read_manifest(&instance_dir).await;
+    let dsh_home = match &manifest {
+        Some(m) => crate::instances::home_of(&instance_dir, m),
+        None => instance_dir.join("dsh-home"),
+    };
     let workspace = instance_dir.join("workspace");
     for dir in [dsh_home.join("profiles").join(&profile), workspace.clone()] {
         tokio::fs::create_dir_all(&dir)

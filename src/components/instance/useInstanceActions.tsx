@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useCallback, useMemo } from 'react'
 import {
   Copy,
@@ -7,6 +8,7 @@ import {
   Play,
   Square,
   Camera,
+  Download,
   Star,
   Trash2,
   ExternalLink,
@@ -80,14 +82,19 @@ export function useInstanceActions(instance: Instance | undefined) {
       })
       return
     }
+    // An external instance's DSH_HOME is the user's own directory, outside
+    // PHL's tree — deletion can only ever mean "stop managing it" (spec §3.1).
+    const external = instance.managementMode === 'external'
     const ok = ui.confirmDelete
       ? await ui.confirm({
           title: `删除实例「${instance.name}」`,
-          message: '该实例独占的 DSH_HOME、插件、Profile 与 workspace 都会被一并删除，且不可恢复。',
+          message: external
+            ? '这是原地接入的实例：只会从 PHL 移除登记，你的 DSH_HOME 与其中所有内容都不会被动到。'
+            : '该实例独占的 DSH_HOME、插件、Profile 与 workspace 都会被一并删除，且不可恢复。',
           detail: instance.dshHome,
-          tone: 'danger',
-          confirmLabel: '永久删除',
-          typeToConfirm: instance.name,
+          tone: external ? 'default' : 'danger',
+          confirmLabel: external ? '从 PHL 移除' : '永久删除',
+          typeToConfirm: external ? undefined : instance.name,
         })
       : true
     if (ok) {
@@ -117,7 +124,7 @@ export function useInstanceActions(instance: Instance | undefined) {
       ui.toast({
         kind: 'error',
         title: '无法打开实例目录',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     })
   }, [instance, ui])
@@ -174,7 +181,7 @@ export function useInstanceActions(instance: Instance | undefined) {
       ui.toast({
         kind: 'error',
         title: '导出 Bundle 失败',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   }, [instance, ui])
@@ -183,6 +190,10 @@ export function useInstanceActions(instance: Instance | undefined) {
     if (!instance || !id) return []
     const status = store.stateOf(id).status
     const running = status === 'running'
+    // The backend gates these too (clone of an external home, snapshot
+    // restore, plugin writes); the menu explains instead of letting the user
+    // click into an error.
+    const external = instance.managementMode === 'external'
     return [
       {
         id: 'toggle',
@@ -205,9 +216,27 @@ export function useInstanceActions(instance: Instance | undefined) {
         onSelect: () => store.toggleFavorite(id),
       },
       { id: 'rename', label: '重命名', icon: <Pencil size={13} />, onSelect: rename },
-      { id: 'clone', label: '克隆实例', icon: <Copy size={13} />, onSelect: clone },
+      {
+        id: 'clone',
+        label: external ? '克隆实例（原地接入不支持）' : '克隆实例',
+        icon: <Copy size={13} />,
+        disabled: external,
+        onSelect: clone,
+      },
       { id: 'export', label: '导出 Bundle', icon: <Package size={13} />, onSelect: exportBundle },
-      { id: 'snapshot', label: '创建快照', icon: <Camera size={13} />, onSelect: snapshot },
+      {
+        id: 'export-pack',
+        label: '导出整合包',
+        icon: <Download size={13} />,
+        onSelect: () => ui.push({ name: 'exportPack', id }),
+      },
+      {
+        id: 'snapshot',
+        label: external ? '创建快照（原地接入不支持）' : '创建快照',
+        icon: <Camera size={13} />,
+        disabled: external,
+        onSelect: snapshot,
+      },
       {
         id: 'folder',
         label: '打开实例目录',

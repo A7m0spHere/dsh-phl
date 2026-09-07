@@ -297,13 +297,13 @@ function VersionRow({
 
   return (
     <motion.li variants={riseItem} layout="position">
-      <button
-        onClick={onSelect}
+      <div
         className={cn(
-          'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left ring-1 ring-inset transition-all duration-150',
+          'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 ring-1 ring-inset transition-all duration-150',
           active ? 'bg-accent-soft ring-accent' : 'bg-surface ring-line hover:ring-line-strong',
         )}
       >
+        <button onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-3 text-left">
         <span
           className={cn(
             'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
@@ -332,21 +332,6 @@ function VersionRow({
             {version.requiresNode.join(' / ')}
           </span>
         </span>
-
-        {!installed && !busy && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={(e) => {
-              e.stopPropagation()
-              onInstall()
-            }}
-          >
-            <Download size={12} />
-            安装
-          </Button>
-        )}
-
         <AnimatePresence initial={false}>
           {active && (
             <motion.span
@@ -361,7 +346,14 @@ function VersionRow({
             </motion.span>
           )}
         </AnimatePresence>
-      </button>
+        </button>
+        {!installed && !busy && (
+          <Button size="sm" variant="secondary" onClick={onInstall}>
+            <Download size={12} />
+            安装
+          </Button>
+        )}
+      </div>
     </motion.li>
   )
 }
@@ -427,13 +419,13 @@ function RuntimeCard({
   const unverified = hasVersion && !recommended
 
   return (
-    <button
-      onClick={onSelect}
+    <div
       className={cn(
         'rounded-lg p-2.5 text-left ring-1 ring-inset transition-all duration-150',
         active ? 'bg-accent-soft ring-accent' : 'bg-surface ring-line hover:ring-line-strong',
       )}
     >
+      <button onClick={onSelect} className="w-full text-left">
       <div className="flex items-center gap-2">
         <span
           className={cn(
@@ -475,21 +467,17 @@ function RuntimeCard({
         <span className="num ml-auto text-2xs text-ink-faint">
           {installed ? '已安装' : busy ? '安装中' : formatBytes(runtime.size)}
         </span>
-        {!installed && !busy && (
-          <Button
-            size="xs"
-            variant="secondary"
-            onClick={(e) => {
-              e.stopPropagation()
-              onInstall()
-            }}
-          >
+      </div>
+      </button>
+      {!installed && !busy && (
+        <div className="mt-2 flex justify-end">
+          <Button size="xs" variant="secondary" onClick={onInstall}>
             <Download size={11} />
             安装
           </Button>
-        )}
-      </div>
-    </button>
+        </div>
+      )}
+    </div>
   )
 }
 

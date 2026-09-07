@@ -16,7 +16,7 @@ use tauri::State;
 use super::env_policy::{partition_env, partition_imported_env, EnvPartition};
 use super::{
     apply_api_at_create, build_instance_tree, build_record, instance_dir, load_manifest,
-    profile_root, scan_plugins, InstanceManifest, InstanceRecord,
+    profile_root_of, scan_plugins, InstanceManifest, InstanceRecord,
 };
 use crate::api_config::credential_env_names;
 use crate::paths::PhlState;
@@ -120,7 +120,7 @@ pub(crate) async fn export_instance_bundle_inner(
     dest: &str,
 ) -> Result<BundleExportReport, String> {
     let (dir, manifest, partition) = load_shareable(root, id).await?;
-    let plugins = scan_plugins(&profile_root(&dir, &manifest.profile)).await;
+    let plugins = scan_plugins(&profile_root_of(&dir, &manifest)).await;
     let bundle = InstanceBundle {
         phl_bundle: 2,
         exported_at: now_iso(),

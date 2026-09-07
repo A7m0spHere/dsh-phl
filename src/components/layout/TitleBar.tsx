@@ -82,6 +82,25 @@ export function TitleBar() {
       <div data-tauri-drag-region className="flex items-center gap-1.5 pl-1 pr-1.5">
         <Logo size={16} />
         <span className="select-none text-sm font-semibold tracking-tight text-ink">PHL</span>
+        {/* Browser/mock mode looks identical to a real run (install progress,
+            link-plugins, "running"), so the only honest signal is a persistent
+            badge here — it's visible on every page, including the plugin detail
+            overlay and the launch dock, not just on the pages that disable. */}
+        {!desktop.isDesktop && (
+          <Tooltip
+            side="bottom"
+            content={
+              <span className="flex flex-col gap-1">
+                <span>浏览器模式（<Kbd>npm run dev</Kbd>）：演示数据，不写盘、不拉起真实进程。</span>
+                <span>安装/卸载插件、启动实例只会播放动画。桌面版请用 <Kbd>npm run app:dev</Kbd>。</span>
+              </span>
+            }
+          >
+            <span className="no-drag rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
+              浏览器模拟模式
+            </span>
+          </Tooltip>
+        )}
       </div>
 
       {/* Back/forward sit between identity and navigation: they belong to the

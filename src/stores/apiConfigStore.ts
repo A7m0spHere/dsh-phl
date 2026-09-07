@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import * as desktop from '@/lib/desktop'
 import { useSettingsStore } from './settingsStore'
@@ -5,6 +6,8 @@ import { useInstanceStore } from './instanceStore'
 import { useUIStore } from './uiStore'
 import { type AdoptionPlan, planAdoption } from '@/lib/apiDiff'
 import type { ApiBinding, ApiConfig, ApiProvider, InstanceLiveSnapshot } from '@/types'
+import { repository } from '@/services'
+import { hasMissingMetadata, metadataSummary } from '@/lib/modelMetadata'
 
 /**
  * Frontend half of the global API provider library (`src-tauri/src/api_config.rs`).
@@ -48,6 +51,8 @@ interface ApiConfigState {
   config: ApiConfig | null
   loaded: boolean
   saving: boolean
+  enriching: boolean
+  enrichMissingModels: () => Promise<void>
   /** Instance id whose binding is currently being materialized. */
   syncing: string | null
   /** Last-known live snapshot per instance (the file truth; refreshed on demand). */
@@ -99,8 +104,41 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
   config: null,
   loaded: false,
   saving: false,
+  enriching: false,
   syncing: null,
   snapshots: {},
+
+  async enrichMissingModels() {
+    const { config, enriching, saving } = get()
+    if (!config || enriching || saving) return
+    const root = useSettingsStore.getState().root
+    set({ enriching: true })
+    try {
+      const batches: import('@/types').ModelMetadataBatch[] = []
+      const providers: ApiProvider[] = []
+      for (const provider of config.providers) {
+        const candidates = provider.models.filter((m) => m.id.trim() && hasMissingMetadata(m))
+        if (!candidates.length) { providers.push(provider); continue }
+        const batch = await repository.enrichModelMetadata({ models: candidates, provider: provider.name })
+        batches.push(batch)
+        let cursor = 0
+        providers.push({ ...provider, models: provider.models.map((m) => candidates.includes(m) ? batch.results[cursor++].model : m) })
+      }
+      // No stale network response may replace edits, deletions or a switched root.
+      if (get().config !== config || root !== useSettingsStore.getState().root) {
+        useUIStore.getState().toast({ kind: 'info', title: '配置已发生变化，本次补全未应用，请重试' })
+        return
+      }
+      const combined: import('@/types').ModelMetadataBatch = {
+        results: batches.flatMap((b) => b.results),
+        catalogStatus: batches.find((b) => b.catalogStatus !== 'fresh')?.catalogStatus ?? 'fresh',
+      }
+      if (combined.results.some((r) => r.changed) && !await get().save({ ...config, providers })) return
+      useUIStore.getState().toast({ kind: 'info', title: '模型信息补全完成', message: metadataSummary(combined) })
+    } catch (err) {
+      useUIStore.getState().toast({ kind: 'warn', title: '模型信息补全暂不可用', message: parseThrownError(err).message })
+    } finally { set({ enriching: false }) }
+  },
 
   async load() {
     const root = useSettingsStore.getState().root
@@ -132,7 +170,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '保存 API 配置库失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     } finally {
@@ -235,7 +273,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '同步 API 配置失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     } finally {
@@ -256,7 +294,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '从实例导入失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     }

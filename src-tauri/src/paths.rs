@@ -38,7 +38,7 @@ pub(crate) fn sanitize_segment(value: &str, label: &str) -> Result<String, Strin
 /// (`\\?\C:\...`, `\\?\UNC\server\share\...`). Without this, a canonicalized
 /// child never lexically starts with a plain-form root and every containment
 /// check would false-positive on Windows.
-fn strip_verbatim(path: &Path) -> PathBuf {
+pub(crate) fn strip_verbatim(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     let stripped = text
         .strip_prefix(r"\\?\UNC\")

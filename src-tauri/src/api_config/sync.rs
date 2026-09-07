@@ -45,6 +45,9 @@ pub(crate) fn resolve_sections(
 
     let mut map = serde_yaml::Mapping::new();
     for p in &providers {
+        for model in &p.models {
+            model.validate_capabilities()?;
+        }
         if !valid_provider_name(&p.name) {
             return Err(format!("非法的供应商标识名: {}", p.name));
         }
@@ -71,6 +74,18 @@ pub(crate) fn resolve_sections(
                     }
                     if let Some(mt) = m.max_tokens {
                         mm.insert("maxTokens".into(), mt.into());
+                    }
+                    if let Some(input) = &m.input {
+                        mm.insert(
+                            "input".into(),
+                            serde_yaml::to_value(input).expect("input is serializable"),
+                        );
+                    }
+                    if let Some(efforts) = &m.reasoning_efforts {
+                        mm.insert(
+                            "reasoningEfforts".into(),
+                            serde_yaml::to_value(efforts).expect("efforts are serializable"),
+                        );
                     }
                     serde_yaml::Value::Mapping(mm)
                 })
@@ -173,6 +188,12 @@ pub async fn sync_instance_api(
     config: ApiConfig,
 ) -> Result<ApiBinding, String> {
     let dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
+    // Sync rewrites the instance's `settings.yaml` — a home write. External
+    // instances own their own settings (that is the whole point of adopting
+    // in place), so PHL refuses rather than reaching into the user's file.
+    if let Some(manifest) = crate::instances::read_manifest(&dir).await {
+        crate::instances::reject_external_write(&manifest, &instance_id, "同步全局 API 配置进")?;
+    }
     sync_inner(&dir, &binding, &config).await
 }
 
@@ -258,6 +279,15 @@ pub(crate) async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String
                             name: m.get("name").and_then(|v| v.as_str()).map(str::to_string),
                             context_window: m.get("contextWindow").and_then(|v| v.as_u64()),
                             max_tokens: m.get("maxTokens").and_then(|v| v.as_u64()),
+                            input: m
+                                .get("input")
+                                .cloned()
+                                .and_then(|v| serde_yaml::from_value(v).ok()),
+                            reasoning_efforts: m
+                                .get("reasoningEfforts")
+                                .cloned()
+                                .and_then(|v| serde_yaml::from_value(v).ok()),
+                            ..Default::default()
                         })
                     })
                     .collect()

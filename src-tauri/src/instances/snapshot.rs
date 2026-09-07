@@ -12,8 +12,8 @@ use tauri::State;
 use super::copy::SkipRule;
 use super::copy::{copy_tree_sync, copy_tree_with_progress};
 use super::{
-    build_record, instance_dir, instances_root, load_manifest, profile_root, sanitize_segment,
-    scan_plugins, CloneProgress, InstanceRecord,
+    build_record, home_of, instance_dir, instances_root, load_manifest, profile_root_of,
+    reject_external_write, sanitize_segment, scan_plugins, CloneProgress, InstanceRecord,
 };
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, PhlState};
@@ -128,7 +128,10 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
 
-    let dsh_home = dir.join("dsh-home");
+    // Snapshotting reads the home; for an external instance that is the
+    // user's own directory, and copying it *out* into the instance tree is
+    // safe. The danger is only ever the restore (below).
+    let dsh_home = home_of(&dir, &manifest);
     if !dsh_home.exists() {
         return Err("实例缺少 dsh-home，无法创建快照".into());
     }
@@ -177,15 +180,17 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         }
     };
 
+    // Counted before the struct: `manifest.version_id` is moved into the
+    // literal, and `profile_root_of` borrows the manifest — ordering them in
+    // one literal partial-moves before the borrow.
+    let plugin_count = scan_plugins(&profile_root_of(&dir, &manifest)).await.len();
     let snapshot = SnapshotFile {
         id: snap_id,
         label: format!("快照 {}", now_iso().replace('T', " ").trim_end_matches('Z')),
         created_at: now_iso(),
         version_id: manifest.version_id,
         runtime_id: manifest.runtime_id,
-        plugin_count: scan_plugins(&profile_root(&dir, &manifest.profile))
-            .await
-            .len(),
+        plugin_count,
         size: bytes_total,
     };
     let body = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
@@ -241,7 +246,12 @@ pub(crate) async fn restore_snapshot_inner(
 ) -> Result<InstanceRecord, String> {
     let id = sanitize_segment(id, "实例 id")?;
     let dir = instance_dir(root, &id)?;
+    let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
+    // Restore overwrites the live home in place. For an external instance
+    // that would stamp PHL's copy over the user's own directory — the one
+    // operation adoption explicitly forbids.
+    reject_external_write(&manifest, &id, "还原快照并覆盖")?;
 
     let snap_dir = snapshot_dir(&dir, snapshot_id)?;
     let raw = tokio::fs::read_to_string(snap_dir.join("snapshot.json"))
@@ -252,7 +262,7 @@ pub(crate) async fn restore_snapshot_inner(
     if !snap_home.exists() {
         return Err(format!("快照 {snapshot_id} 缺少 dsh-home，无法还原"));
     }
-    let current = dir.join("dsh-home");
+    let current = home_of(&dir, &manifest);
     if !current.exists() {
         return Err("实例缺少 dsh-home，无法还原".into());
     }

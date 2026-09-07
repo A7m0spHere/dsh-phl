@@ -1,9 +1,12 @@
 # PHL 手测清单
 
-> 覆盖范围：Runtime Manager → 启动/进程 → Bundle → 快照 → 诊断 → 故障恢复与冲突（§10）。
+> 覆盖范围：Runtime Manager → 启动/进程 → Bundle → 快照 → 诊断 → 故障恢复与冲突（§10）
+> → 本机 DSH 接入（§11）→ 对话迁移（§12）→ 整合包 `.phlpack`（§13）→ `phl-pack` CLI 与 Skill（§14）。
 > 测试方式：`npm run app:dev`（或双击 `run-dev.cmd`）打开桌面端。
 > 建议顺序按编号走，前面的结果是后面的前置条件。
 > 标注 ⭐ 的是必须通过的核心路径；其余是边界与守卫。
+> §11–§13 对应《下一阶段开发规格》§32 测试矩阵与 §33 隐私测试；Windows 之外平台的
+> 发现路径（macOS/Linux 的 npm/Homebrew bin 目录、GUI 启动 PATH 限制）属 L-12 专项。
 
 ## 0. 准备
 
@@ -61,7 +64,7 @@
 ## 6. Bundle
 
 - [ ] ⭐ 实例菜单「导出 Bundle」：保存对话框 → 生成的 JSON 包含 version / runtime / profile / env / args / 插件记录；含密钥值的 env 变量被剔除并列入「待补凭据」（见 §10）
-- [ ] ⭐ 实例页「导入 Bundle」：选文件 → 预览确认框显示名称/版本/插件数 → 导入成功出现在列表
+- [ ] ⭐ 实例页「更多导入方式 → 导入 Bundle」：选文件 → 预览确认框显示名称/版本/插件数 → 导入成功出现在列表
 - [ ] 导入后的实例：id 是新的、端口是建议端口；版本/Runtime/profile 等环境字段与导出时一致
 - [ ] 导入含插件记录的 bundle：toast 提示「N 条插件记录待重装」；插件列表为空（文件不随 bundle）
 - [ ] 喂一个损坏 / 手改 `phlBundle: 99` 的 JSON：报「不支持的 Bundle 版本」，不产生半成品实例
@@ -123,6 +126,159 @@
 | 日期 | PHL 版本/提交 | 系统 | 场景编号 | 结果 | 备注（错误码 / 日志） |
 |---|---|---|---|---|---|
 |  |  |  |  |  |  |
+
+## 11. 本机 DSH 发现与接入（Discovery + Adoption，规格 §28）
+
+前置：这台机器上存在至少一个真实的、已在用的 DSH（自带插件与历史对话最佳）。若只有 PHL
+管理的实例，用「设置 → 通用」记下数据目录后，手动在别处装一个 DSH（`npm i -g` 或已有
+`~/.dsh`）。§32 Discovery/Adoption 段。
+
+- [ ] ⭐ **自动扫描**：实例页「接入本机 DSH」→ 发现步骤列出候选；默认 `~/.dsh` 与 PATH 上的
+      DSH 命令各成一卡，显示版本 / 插件数 / 历史对话数 / 体积 / 来源徽标；无 macOS/Linux 死代码。
+- [ ] ⭐ **手动选择 DSH_HOME**：选一个合法 DSH 目录 → 生成候选卡；选一个非 DSH 目录 →
+      toast「该目录不是可接入的 DSH」，不入库。
+- [ ] **手动选择可执行文件**：选 `dsh` 命令 → 按规则推断 home，卡上标注「可执行文件为手动选择；
+      DSH_HOME 按…推断」。
+- [ ] **去重**：同一 home 同时被默认扫描与 PATH 命中 → 只出现一张卡（手动来源优先）。
+- [ ] **已被管理检测**：选一个 PHL 实例自己的 `dsh-home` → 卡片置灰并注明「已由「实例名」管理」；
+      「下一步」被拦截；即便绕过 UI，后端 `adopt_instance` 仍拒绝（双主守卫）。
+- [ ] **重新扫描**：改动 `~/.dsh`（装个插件）后点重扫 → 数字更新，选中项不被打乱。
+- [ ] ⭐ **Copy 模式（推荐）+ 全部迁移**：预览显示版本/插件/对话数/预计复制量/符号链接数 →
+      复制并接入 → 新实例出现在列表，`instances/<id>/dsh-home/` 完整；**原 DSH 目录一字未动**
+      （对照：`settings.yaml`、`sessions/` 仍在原处）。启动该实例 → DSH 里能看到原来的历史对话。
+- [ ] **Copy 模式 + 不迁移**：预览标注「不含历史对话」；接入后实例 `dsh-home/sessions` 不存在、
+      `storages/session_projcache` 被排除，但 `storages/workspace.json` 与 profiles 照常进来。
+- [ ] ⭐ **Copy 模式 + 按对话选择迁移**：勾「选择对话」→ 出源对话清单（id/ cwd / 时间 / 子代理标记）
+      → 选 1 条（或几条）接入 → 实例 `dsh-home/sessions` 只含选中的目录（原 id 保留），未选的不进；
+      空选被前端拦（「预览」禁用）+ 后端 `[state] 未选择…`；清单里一个已消失的目录提交 → 后端拒绝并回滚。
+- [ ] **符号链接插件**：源里放一个 `link:` 本地插件 → 预览提示「含 N 个符号链接，跳过」；接入后
+      该插件缺失但可重装，不跟随链接进外部目录。
+- [ ] ⭐ **External（原地接入）**：预览常驻「原地接入会继续使用现有 DSH_HOME，历史对话保持可见」；
+      接入后不复制目录树（`dsh-home/` 不存在，home 指向用户目录）；实例可启动、可读插件，但
+      克隆 / 创建快照 / 快照还原 / 插件写 / API 同步 全被拒；「删除实例」文案为「从 PHL 移除」，
+      删后**绝不**删除用户的 DSH_HOME。
+- [ ] **中途失败回滚**：Copy 大环境复制中途点取消 → 无半成品实例（`instances/.phl-adopt-*` 已清），
+      原 DSH 不变；重开接入向导能干净重来。
+- [ ] **凭据边界（Copy）**：接入后的实例 `api` 绑定为未绑定（不套全局库），沿用自带的 `settings.yaml`
+      —— 复制模式按设计保留用户自带配置，与 `.phlpack` 导出的强制剥离不同（规格 §12 边界，见 §13）。
+
+## 12. 对话迁移 / 分发（Session copy，规格 §29 P1-1）
+
+前置：至少两个 Copy 模式受管实例（A 有若干历史对话，B 为空），两者都**未运行**。§32 Session 段。
+
+- [ ] ⭐ **单条复制到单目标**：A 详情「数据 → 对话迁移」→ 选 1 条 → 目标勾 B → 复制 → 确认框
+      说明「每个目标得到全新对话，保留内容与工作目录、记录血缘」→ 成功后 B 启动 DSH 可见该对话；
+      **A 的原对话不变**；B 里新对话 id 是新的、`parentSession` 指向 A 的原 id、`cwd` 一致。
+- [ ] **多目标 fan-out**：同一对话复制到 B+C → 两个目标各得一条独立新会话。
+- [ ] **多源**：一次勾多条对话复制 → 每条都进目标。
+- [ ] **子代理会话**：list 里带「子代理」标记（展示但不特殊处理，规格 §9 留待真机反馈）。
+- [ ] ⭐ **运行中保护**：目标实例运行中 → 不出现在可选目标里；源运行中 → 「对话迁移」面板要求先停；
+      绕过前端直发命令 → 后端 `ensure_not_running` 拒绝。
+- [ ] **external 目标拒写**：原地接入的实例不作为复制目标（后端也拒绝向 external home 写会话）。
+- [ ] **源不受损**：任一复制后，源 `sessions/` 目录内容字节不变。
+- [ ] **兼容版本护栏**：伪造一个 `version != 0` 的会话 header → 复制报 `UnsupportedVersion`，
+      不产出半条会话（staging `.part` 被清）。
+- [ ] 复制后计数：A 与 B 的「历史对话」计数即时更新（无需重开页面）；目标重启 PHL 计数仍对。
+
+## 13. 整合包 `.phlpack` 导出与安装（Pack，规格 §29 P1-2~4 + §33 隐私）
+
+前置：一个已管理的 Copy 实例（带插件、带历史对话）；同机第二数据目录便于验证安装落点。§32 Pack 段。
+
+### 导出
+
+- [ ] ⭐ **预览**：实例菜单「导出整合包」→ Preview 列 DSH / Node / 在线插件数 / 内置插件数 /
+      历史对话「不包含」/ 敏感数据「已排除」/ 预计大小；本地插件默认建议嵌入且列出许可，
+      `license unknown` 的显示「PHL 无法确认是否允许重新分发」提示（不判合法）。
+- [ ] ⭐ **不含会话导出**：确认默认（不含对话）→ 选保存路径 → 生成 `<x>.phlpack`；
+      用 `phl-pack validate` 能过；ZIP 内含 `phlpack.json` + `embedded/plugins/*`，
+      无 `sessions/`，manifest `content.secretsExcluded=true`。
+- [ ] ⭐ **会话隐私门禁**：勾「包含历史对话」→ 必须先弹隐私警告（列出用户输入/文件内容/项目路径/
+      Tool 结果/私有代码/Token），二次确认后才放行；未确认直接导出 → 后端 `[state]` 拒。
+- [ ] **凭据剥离（§33，值层）**：实例 env 放自造 `OPENAI_API_KEY`/`DEEPSEEK_API_KEY`/`MY_TOKEN` →
+      导出（含会话）→ 对生成的 `.phlpack` 逐条目文本 grep **搜不到任何密钥值**；manifest 列出被剥离的
+      凭据**名字**；会话正文里若本身含 Token，PHL 不假装能识别，仅靠「包含会话必须提示隐私风险」兜底。
+- [ ] ⭐ **凭据剥离（§12/§33，文件层）**：给一个将被嵌入的本地插件目录里放一个 `.env`（含
+      `SECRET=abc`）与一个 `id_rsa` → 导出预览的 warnings 点名「插件 X 含疑似凭据文件，无论是否嵌入都不打包」
+      → 导出 → `phl-pack unpack` 出来的包里 **没有** `.env`/`id_rsa`，导出成功 toast 列出「已扣下」；
+      同时确认正常文件（`index.js`/`package.json`）照常进包（过滤是文件名级，不误伤 `tokenizer.js` 等）。
+- [ ] **CLI 同规则**：`phl-pack build` 一个布局目录，内放 `.env` 与 `.env.example` → 输出「已扣下 …/.env」
+      且包内无 `.env`，但 `.env.example` 照常进包（模板文档不算凭据）。
+
+### 安装
+
+- [ ] ⭐ **依赖检查 + 一键装**：实例页「安装整合包」→ 选/拖放 `.phlpack` → Import Preview 显示
+      作者/版本/DSH/Runtime/插件(在线/内置)/历史对话数（含「⚠ 包含用户对话数据」若带会话）→
+      检查依赖列出 `installed/downloadable/embedded/missing` → 安装 → staging 原子落位 →
+      新实例出现在列表，embedded 插件已就位，可选会话进入 `dsh-home/sessions`。
+- [ ] ⭐ **缺 DSH 不静默升级**：包引用本机没有的 DSH 版本 → 预览标 downloadable + 「找不到 DSH xxx，
+      用兼容版本可能有兼容问题」，允许先建实例后补，**不自动改版本**（规格 §19）。
+- [ ] **缺 required 插件**：required 且无任何来源的插件 → `blocked`，默认阻止安装；可选缺失 → 可跳过继续。
+- [ ] **远程插件延后**：registry 插件在提交后由 UI 逐个走正常插件安装管线，不在 pack 事务内联网装。
+- [ ] ⭐ **中途失败回滚**：解包阶段制造失败（如把 embedded 目标设成只读盘）→ 删除 staging，
+      不留半个实例（`instances/.phl-pack-*` 已清）。
+- [ ] **安全边界（§22）**：手造含 `../` 条目 / 绝对路径 / 软链 / 重复条目 / `formatVersion:999` /
+      篡改某 embedded 文件使其与 integrity 不符 的 `.phlpack` → 逐一被 `read_pack` 拒（越界/软链/重复/
+      超大/版本/一致性），且**拒绝发生在写盘之前**。
+- [ ] **完整性篡改检测**：装完后手改包里某 embedded 文件 1 个字节再校验 → integrity 报「校验值与内容不符」。
+- [ ] **schema 版本护栏**：manifest 用更高的 `schemaVersion`/`formatVersion` → 老 PHL 拒绝、不猜测解析。
+
+## 14. `phl-pack` CLI 与 phl-export Skill（P2，规格 §15/§30）
+
+前置：`cargo build -p phl-pack-cli` 产出 `target/debug/phl-pack(.exe)`，`phl-pack --help` 可用。
+
+- [ ] ⭐ **CLI 闭环**：`phl-pack build <布局目录> out.phlpack`（含 phlpack.json + embedded + sessions
+      布局）→ `validate` 通过 → `inspect` 摘要可读 → `unpack out.phlpack <目标>` 全载荷落到目标目录，
+      且每个写点被限制在目标目录内（dest-root confinement）。
+- [ ] **CLI 拒绝无效包**：`validate`/`inspect` 对缺 manifest、坏 JSON、越界条目、integrity 不符 均报错，
+      `build` 缺 `phlpack.json` 或声明的 embedded path 无 package.json 时报 consistency，绝不产坏包。
+- [ ] ⭐ **Skill 与 GUI 同格式**：一个用 `phl-export` Skill 产的 `.phlpack`，能被 PHL「安装整合包」正常
+      导入；反向，GUI 导出的包能被 `phl-pack inspect` 读懂（一套格式，两个入口不漂移）。
+- [ ] **Skill 敏感确认**：走 `docs/skills/phl-export/SKILL.md`：包含会话/本地插件/未知文件/覆盖输出
+      逐项询问，不发明格式、不手算哈希（全交 CLI）。
+
+### §11–§14 回归结果登记（并入 §10 同表亦可）
+
+| 日期 | PHL 版本/提交 | 系统 | 场景编号 | 结果 | 备注（错误码 / 日志） |
+|---|---|---|---|---|---|
+|  |  |  |  |  |  |
+
+## 15. 2026-09-07 Review 收口验收（自动 / 真机边界）
+
+以下项目已由本机自动化或浏览器 Mock 验证，记录在这里，避免真机重复验证实现细节：
+
+- [x] **M3 / M5 模块边界**：catalog store 已按 version/runtime/plugin actions + 通知策略组合；
+      API config 已拆为 types/validation/launch_keys/tests；外部调用面不变。
+- [x] **R1 / R3 / R4 / R5 自动路径**：凭据文件剥离、embedded 插件 marker + Cordis 登记、
+      安装失败返回预览、更新查询失败/重试/去重/不可检查状态均有测试并通过。
+- [x] **R7 协作式取消**：扫描、压缩、完整性哈希、解包在 64 KiB 循环内检查取消；
+      大文件中途取消测试通过，解包半成品会删除；导出/安装 UI 已提供取消按钮。
+- [x] **R6 可复现基准**：64 MiB + 1000 小文件、基线/当前 release 各 3 次，数据记录在
+      `PERF_BASELINE.md`；三条 Pack 路径峰值工作集下降 95% 以上。
+- [x] **M2 bridge 静态门禁**：`npm run bridge:check` 检查 17 个 bridge 文件 / 71 个 invoke，
+      无缺失 Rust handler、无重复注册。
+- [x] **浏览器 Mock 回归**：设置分区、实例创建、插件搜索/详情/安装/启停/更新页可用；
+      修复嵌套 button 与 Toast ref 后，控制台无 warning/error，DOM 无 `button button`。
+- [x] **自动门禁和构建**：前端 73 项、Rust workspace 268 项通过 / 5 忽略，typecheck/build/
+      clippy/fmt/bridge check 全绿；NSIS 安装包成功生成。
+
+以下项目必须在真实 Tauri + 真实 DSH 或 GitHub runner 上完成，不能用浏览器 Mock/单测代替：
+
+- [ ] ⭐ **安装包冷启动**：在干净 Windows 用户环境安装本轮 `PHL_0.1.0_x64-setup.exe`，确认首帧、
+      自绘标题栏、关闭确认、文件对话框和卸载流程正常。
+- [ ] ⭐ **R1 + R7 真实导出/取消**：真实实例含嵌套 `.env`/`token.json`，导出后解包核对排除；
+      另用大包在压缩中点「取消导出」，确认 UI 可响应且目标路径无残缺 `.phlpack`。
+- [ ] ⭐ **R3 真实插件加载**：安装仅含 `package.json` + 源码、无 `phl-plugin.json` 的 embedded 插件；
+      确认插件页可见、Cordis 登记存在，真实启动 DSH 能加载，并回归启用/停用/卸载。
+- [ ] **R4 失败返回视觉流程**：制造缺必需依赖的 Pack 安装失败，点「返回修改」，确认包路径/实例名保留，
+      焦点与错误提示正常，再次安装成功。
+- [ ] **R5 真实网络状态**：可更新页断网显示「检查失败 · 可重新检查」，恢复网络后成功；
+      非 npm 来源显示「来源无法检查」。请求去重已由单测覆盖，真机只验 UI 与真实 registry。
+- [ ] ⭐ **M2 Tauri IPC 冒烟**：逐域操作窗口控制、版本/Runtime/插件进度 Channel、launch/stop/adopt、
+      快照、Bundle/Pack、API 同步与模型补全、诊断、系统文件对话框，确认参数与权限在真实壳内工作。
+- [ ] **M1/M4 + R6 真机性能**：用 React Profiler 检查 Settings/Plugins 不因无关 toast/confirm/进度而整树
+      重渲染；大包导出/解包时窗口可拖动、可取消；记录桌面冷启动与峰值内存。
+- [ ] **R2 GitHub Windows CI / Release**：先收口本地与远端分支，再触发 Windows runner，确认三 crate
+      测试与短路径环境通过；之后做受控 tag 演练。未获明确授权前不提交、不推送、不创建 PR/tag。
 
 ## 已知的刻意外
 

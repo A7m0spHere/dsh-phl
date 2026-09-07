@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
@@ -5,7 +6,9 @@ import {
   CirclePause,
   CirclePlay,
   FileUp,
+  FolderInput,
   LayoutGrid,
+  Package,
   Plus,
   Rows3,
   Search,
@@ -29,7 +32,7 @@ import {
   type InstanceFilter,
   type InstanceSort,
 } from '@/stores'
-import { Button, EmptyState, Input, Segmented, Skeleton } from '@/components/ui'
+import { Button, EmptyState, Input, Menu, Segmented, Skeleton } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceCard } from '@/components/instance/InstanceCard'
@@ -171,7 +174,7 @@ export function InstancesPage() {
       ui.toast({
         kind: 'error',
         title: '无法读取 Bundle',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return
     }
@@ -234,7 +237,7 @@ export function InstancesPage() {
       ui.toast({
         kind: 'error',
         title: '导入 Bundle 失败',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   }
@@ -285,9 +288,33 @@ export function InstancesPage() {
           subtitle="每个实例固定自己的 DSH 版本、Runtime、插件与 DSH_HOME，可以同时运行、互不污染。"
           actions={
             <>
-              <Button variant="secondary" onClick={() => void importBundle()}>
-                <FileUp size={13} />
-                导入 Bundle
+              {/* The three primary doors are 新建 / 接入 / 安装整合包; the
+                  legacy Bundle importer stays reachable but demoted (spec
+                  §26). Menu first, so a future second "other" format slots
+                  in without re-growing the header. */}
+              <Menu
+                align="start"
+                trigger={({ open, toggle }) => (
+                  <Button variant="ghost" onClick={toggle} aria-expanded={open}>
+                    更多导入方式
+                  </Button>
+                )}
+                items={[
+                  {
+                    id: 'bundle',
+                    label: '导入 Bundle',
+                    icon: <FileUp size={13} />,
+                    onSelect: () => void importBundle(),
+                  },
+                ]}
+              />
+              <Button variant="secondary" onClick={() => push({ name: 'adopt' })}>
+                <FolderInput size={13} />
+                接入本机 DSH
+              </Button>
+              <Button variant="secondary" onClick={() => push({ name: 'installPack' })}>
+                <Package size={13} />
+                安装整合包
               </Button>
               <Button variant="primary" onClick={() => push({ name: 'create' })}>
                 <Plus size={13} />

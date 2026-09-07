@@ -11,6 +11,9 @@ export type Route =
   | { name: 'instances' }
   | { name: 'instance'; id: string }
   | { name: 'create'; cloneFrom?: string }
+  | { name: 'adopt' }
+  | { name: 'installPack' }
+  | { name: 'exportPack'; id: string }
   | { name: 'versions' }
   | { name: 'plugins' }
   | { name: 'apiConfig' }
@@ -22,6 +25,9 @@ export const routeTab = (r: Route): Tab => {
     case 'instances':
     case 'instance':
     case 'create':
+    case 'adopt':
+    case 'installPack':
+    case 'exportPack':
       return 'instances'
     default:
       return r.name
@@ -29,7 +35,7 @@ export const routeTab = (r: Route): Tab => {
 }
 
 export const routeKey = (r: Route): string =>
-  r.name === 'instance' ? `instance:${r.id}` : r.name
+  r.name === 'instance' || r.name === 'exportPack' ? `${r.name}:${r.id}` : r.name
 
 /* ------------------------------------------------------------------ *
  * URL-driven routing (mode B)
@@ -53,6 +59,12 @@ export const routePath = (r: Route): string => {
       return `/instance/${encodeURIComponent(r.id)}`
     case 'create':
       return r.cloneFrom ? `/create/${encodeURIComponent(r.cloneFrom)}` : '/create'
+    case 'adopt':
+      return '/adopt'
+    case 'installPack':
+      return '/install-pack'
+    case 'exportPack':
+      return `/export-pack/${encodeURIComponent(r.id)}`
     case 'apiConfig':
       return '/api-config'
     default:
@@ -70,6 +82,12 @@ export const parseRoute = (path: string): Route | null => {
       return parts[1] ? { name: 'instance', id: decodeURIComponent(parts[1]) } : null
     case 'create':
       return parts[1] ? { name: 'create', cloneFrom: decodeURIComponent(parts[1]) } : { name: 'create' }
+    case 'adopt':
+      return { name: 'adopt' }
+    case 'install-pack':
+      return { name: 'installPack' }
+    case 'export-pack':
+      return parts[1] ? { name: 'exportPack', id: decodeURIComponent(parts[1]) } : null
     case 'versions':
       return { name: 'versions' }
     case 'plugins':
@@ -136,7 +154,13 @@ let navSeq = 0
 const isAncestor = (ancestor: Route, to: Route): boolean => {
   if (routeTab(ancestor) !== routeTab(to)) return false
   if (ancestor.name !== 'instances') return false
-  return to.name === 'instance' || to.name === 'create'
+  return (
+    to.name === 'instance' ||
+    to.name === 'create' ||
+    to.name === 'adopt' ||
+    to.name === 'installPack' ||
+    to.name === 'exportPack'
+  )
 }
 
 /* ------------------------------------------------------------------ *

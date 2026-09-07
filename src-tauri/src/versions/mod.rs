@@ -729,6 +729,10 @@ mod net_tests {
             env: HashMap::new(),
             args: Vec::new(),
             api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
         };
         create_instance_inner(&root, manifest).await.unwrap();
 
