@@ -78,6 +78,11 @@ interface SettingsState {
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void
   setRoot: (root: string) => void
+  /**
+   * The storage page's switch: adopt the root only if the backend accepted it.
+   * Resolves true when the app and the backend agree on the new root.
+   */
+  setRootVerified: (root: string) => Promise<boolean>
   reset: () => void
 }
 
@@ -115,10 +120,32 @@ export const useSettingsStore = create<SettingsState>()(
       setRoot: (root) => {
         const next = normalizeRoot(root) || DEFAULT_ROOT
         set({ root: next })
-        // Mirror to the backend's authoritative root. Best-effort: if the
-        // backend is not there (browser) or the write fails, the local
-        // setting still stands and the pointer file stays where it was.
+        // Mirror to the backend's authoritative root. Best-effort by design:
+        // the boot handshake sets the root *from* the backend and must not
+        // write the pointer back, so this stays fire-and-forget. The storage
+        // page uses `setRootVerified` instead — there the backend has to agree
+        // before the UI moves.
         void setPhlRoot(next)
+      },
+      /**
+       * Switching the data root from 设置 → 存储.
+       *
+       * `setRoot` alone is not enough here: it is fire-and-forget, so a root
+       * the backend refuses (a relative path, an unwritable config dir) left the
+       * field showing the new path while every read and write still resolved
+       * against the old root — the list looked unchanged and edits landed in a
+       * directory the user thought they had left. The backend's answer decides.
+       */
+      setRootVerified: async (root) => {
+        const next = normalizeRoot(root) || DEFAULT_ROOT
+        if (!isDesktop) {
+          set({ root: next })
+          return true
+        }
+        const accepted = await setPhlRoot(next)
+        if (!accepted) return false
+        set({ root: normalizeRoot(accepted) || next })
+        return true
       },
       /**
        * Everything except the data root. `defaults.root` is the prototype's

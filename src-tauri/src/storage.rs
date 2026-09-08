@@ -728,6 +728,22 @@ mod tests {
         }
     }
 
+    /// Compare two paths by *identity*, not spelling.
+    ///
+    /// Windows gives the same directory two names: the 8.3 short form
+    /// (`C:\Users\RUNNER~1\…`) and the long form (`C:\Users\runneradmin\…`).
+    /// CI's `%TEMP%` is the short one, so a link created from it and a path
+    /// canonicalized from it are the same directory but different strings —
+    /// comparing the text made these tests fail on the runner only.
+    fn same_dir(a: &Path, b: &Path) -> bool {
+        let norm = |p: &Path| {
+            std::fs::canonicalize(p)
+                .map(|c| crate::paths::strip_verbatim(&c))
+                .unwrap_or_else(|_| crate::paths::strip_verbatim(p))
+        };
+        norm(a) == norm(b)
+    }
+
     fn no_cancel() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
     }
@@ -913,12 +929,11 @@ mod tests {
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
         );
-        assert_eq!(
-            crate::paths::strip_verbatim(&std::fs::read_link(inst.join("a-deps")).unwrap()),
-            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
-                .join("versions")
-                .join("v1")
-                .join("node_modules"),
+        assert!(
+            same_dir(
+                &std::fs::read_link(inst.join("a-deps")).unwrap(),
+                &from.join("versions").join("v1").join("node_modules"),
+            ),
             "the already-classified managed link was NOT re-pointed by the aborted move"
         );
         assert_eq!(
@@ -1148,12 +1163,11 @@ mod tests {
             .join("dsh-home")
             .join("profiles")
             .join("node_modules");
-        assert_eq!(
-            crate::paths::strip_verbatim(&std::fs::read_link(&restored).unwrap()),
-            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
-                .join("versions")
-                .join("v1")
-                .join("node_modules"),
+        assert!(
+            same_dir(
+                &std::fs::read_link(&restored).unwrap(),
+                &from.join("versions").join("v1").join("node_modules"),
+            ),
             "the restored link points at the source root, not the emptied one"
         );
         assert_eq!(
