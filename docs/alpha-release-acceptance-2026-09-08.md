@@ -4,6 +4,8 @@
 
 **当前不通过公开 Alpha 发行验收（NO-GO）。** 已具备内部试用的功能基础，但当前提交的 Windows CI 未通过，进程接管/窗口生命周期仍有未关闭缺陷，发行版本标识和安装后的真实桌面验收也未完成。
 
+> **2026-09-08 深夜更新**：候选提交的 Windows CI 已复跑全绿（见下文第 1 项与更新表），进程接管与窗口所有权两项代码缺陷也已修复。判定仍为 **NO-GO**，剩余理由是迁移恢复支持边界、Alpha 版本标识，以及干净环境安装与真实桌面验收尚未执行。
+
 验收对象：GitHub `main` 的 `6c01c76b901b40759bd42c4d24b63a5176112792`，对应工作仓库 `f1b5061` 的代码树（按既定发布规则排除本地文档）。本次保持产品代码不变，只补验收记录；未创建 tag 或 GitHub Release。
 
 ## 证据矩阵
@@ -24,11 +26,10 @@ CI：[run 34229973192](https://github.com/A7m0spHere/dsh-phl/actions/runs/342299
 
 ## 发行前必须关闭的事项
 
-1. **修复 Windows CI 路径断言并在候选提交上重新跑绿。**
-   - `storage::tests::a_same_drive_move_refuses_escaping_links_and_leaves_the_source_whole`，`src-tauri/src/storage.rs:916`。
-   - `storage::tests::undo_translates_managed_links_back_to_the_source_root`，`src-tauri/src/storage.rs:1151`。
-   - 两处实际值为 `C:\Users\RUNNER~1\...`，预期为 `C:\Users\runneradmin\...`；测试只去掉了 `\\?\` 前缀，没有把两侧都转换为真实路径。应比较 canonical 路径或目录身份，并保留内容、回滚和越界断言。日志支持“测试路径表示差异”，不支持直接认定实际数据迁移失败；但 CI 红灯仍是发布阻塞。
-2. **补齐接管进程退出监听和窗口所有权。**
+1. ~~**修复 Windows CI 路径断言并在候选提交上重新跑绿。**~~ **已关闭（2026-09-08 深夜）**：发布副本 `458c3d5` 的 CI 全绿——[run 34245682014](https://github.com/A7m0spHere/dsh-phl/actions/runs/34245682014)，Frontend 52s + Rust（fmt · clippy · test · check）3m40s。
+   - 两条断言改按**目录身份**比较（两侧 canonicalize），不再比较 8.3 短名与长名的字符串。
+   - 首轮重跑暴露了第二个、只在 runner 上出现的缺陷：同盘迁移用**原始文本**分类链接，而 runner 的 `%TEMP%` 是 `C:\Users\RUNNER~1\…`、数据根 canonicalize 成 `C:\Users\runneradmin\…` → 受管链接被误判为“指向受管版本之外”。修复：`canonical_with_suffix` 解析两侧**存在的最长祖先**再比较（被搬迁子树的旧路径已不存在，canonicalize 无法直接使用），并补一条 Windows 大小写等价回归。
+2. **补齐接管进程退出监听和窗口所有权。**（代码已修，见更新表；下方第 3 条的真机故障注入验收仍未执行。）
    - `launch/mod.rs:265` 的 `adopt_processes` 只登记，没有继续监听进程退出；PHL 重开后接管的 DSH 再崩溃，界面和 WebUI 可能保持运行状态。
    - `launch/mod.rs:629` 的旧 watcher 按 PID 清理进程表，却按 instance id 关闭 WebUI；快速重启时旧退出可能关闭新窗口。
    - 以上为当前代码路径确认，本轮未做真实 GUI 故障注入。验收应覆盖接管后退出、主动停止、PID 复用、旧退出晚于新启动，以及新 URL/token 的窗口重开。
@@ -51,12 +52,12 @@ CI：[run 34229973192](https://github.com/A7m0spHere/dsh-phl/actions/runs/342299
 
 | 上文阻塞 | 现在 | 提交与证据 |
 |---|---|---|
-| Windows CI 路径断言（`storage.rs` 两条链接测试） | **代码已修**，待候选提交重跑 CI | `6788d80`：断言改为比较目录身份（两侧 canonicalize），不再比较 8.3 短名与长名的字符串 |
+| Windows CI 路径断言（`storage.rs` 两条链接测试） | **已关闭** | `6788d80` 改断言为目录身份比较；runner 上又暴露同盘迁移按原始文本分类链接的缺陷，`458c3d5` 用 `canonical_with_suffix` 修掉。[run 34245682014](https://github.com/A7m0spHere/dsh-phl/actions/runs/34245682014) 全绿 |
 | 接管进程退出监听（`launch/mod.rs:265`） | **已修** | `fd94a39`：新增 `watch_adopted_process`，用收养时的同一身份门轮询，判定不再是本机进程后执行与 launch watcher 一致的清理 |
 | 旧 watcher 按 instance id 关窗（`launch/mod.rs:629`） | **已修** | `fd94a39`：`Processes::is_current_or_empty` 决定关窗权限——新 pid 保窗、纯 stop 仍关窗；回归 `a_watcher_only_closes_the_window_of_its_own_process` |
 | 迁移恢复边界 | 未动 | 待产品决定：补跨盘恢复，或在 Alpha UI 中禁用尚不支持的恢复操作 |
 | Alpha 版本标识 | 未动 | 待维护者定版本号与 tag 规则 |
 
-仍未关闭的验收项不变：候选提交的 Windows CI 重跑、干净 Windows 用户的 NSIS 安装/首启/卸载、真实桌面交互。
+仍未关闭的验收项：干净 Windows 用户的 NSIS 安装/首启/卸载、真实桌面交互（含接管后退出、PID 复用、旧退出晚于新启动的故障注入）、迁移恢复支持边界、Alpha 版本标识。候选提交的 Windows CI 已复跑通过。
 
 补充：`6788d80` 同时修了 设置 → 存储 → 切换数据目录 的三个缺陷（后端拒绝时的静默假成功、取消迁移误报失败、切根后存储页不刷新）——不属发行阻塞，但与"迁移恢复"同一条路径。
