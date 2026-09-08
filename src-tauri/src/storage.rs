@@ -252,10 +252,10 @@ pub async fn storage_migration_undo(
         None,
         &locks,
         &tasks,
-        move |_task| async move {
+        move |task| async move {
             let journal =
                 read_journal(&path)?.ok_or_else(|| "迁移记录不存在，无法撤销".to_string())?;
-            undo_migration(&path, &journal).await
+            undo_migration(&path, &journal, &task).await
         },
     )
     .await
@@ -264,7 +264,11 @@ pub async fn storage_migration_undo(
 /// Roll a non-committed migration back: everything that arrived in `to`
 /// (moved and half-copied alike) is walked back to `from`, then the journal
 /// is deleted. Data that never left the source stays untouched.
-async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveSummary, String> {
+async fn undo_migration(
+    path: &Path,
+    journal: &MigrationJournal,
+    task: &crate::resources::Task,
+) -> Result<MoveSummary, String> {
     if journal.committed {
         return Err("迁移已完成提交，不能整体撤销".into());
     }
@@ -291,6 +295,9 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
         if e.state == EntryState::Pending {
             continue;
         }
+        // A cross-volume undo copies gigabytes with no progress channel; the
+        // task row at least names the directory being restored.
+        task.set_phase(&format!("撤销 {}", e.kind));
         let src = to.join(&e.kind);
         let back = from.join(&e.kind);
         if src.exists() {
@@ -301,34 +308,45 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
                 tokio::fs::create_dir_all(&from)
                     .await
                     .map_err(|err| err.to_string())?;
-                tokio::fs::rename(&src, &back).await.map_err(|err| {
-                    format!("无法把 {} 搬回 {}: {err}", src.display(), back.display())
-                })?;
-                // The forward pass re-pointed every managed link at `to`, so
-                // rolling the move back has to translate them again — the
-                // restored tree would otherwise reference a root that is being
-                // emptied. `Raw` matching, because `to/versions` may never have
-                // moved and therefore cannot be canonicalized. The walk and its
-                // `mklink` calls are blocking, so they run off the runtime.
-                let rewritten = tokio::task::spawn_blocking({
-                    let (dir, from_root, to_root) = (back.clone(), to.clone(), from.clone());
-                    move || {
-                        crate::instances::repoint_managed_links(
-                            &dir,
-                            &from_root,
-                            &to_root,
-                            LinkMatch::Raw,
-                        )
+                if let Err(rename_err) = tokio::fs::rename(&src, &back).await {
+                    // A migration that crossed volumes cannot be undone by a
+                    // rename; put it back the same way it was copied forward.
+                    copy_back(&e.kind, &src, &back, &from, &to)
+                        .await
+                        .map_err(|err| {
+                            format!(
+                                "无法把 {} 搬回 {}：重命名失败（{rename_err}），复制也失败（{err}）",
+                                src.display(),
+                                back.display()
+                            )
+                        })?;
+                } else {
+                    // The forward pass re-pointed every managed link at `to`, so
+                    // rolling the move back has to translate them again — the
+                    // restored tree would otherwise reference a root that is being
+                    // emptied. `Raw` matching, because `to/versions` may never have
+                    // moved and therefore cannot be canonicalized. The walk and its
+                    // `mklink` calls are blocking, so they run off the runtime.
+                    let rewritten = tokio::task::spawn_blocking({
+                        let (dir, from_root, to_root) = (back.clone(), to.clone(), from.clone());
+                        move || {
+                            crate::instances::repoint_managed_links(
+                                &dir,
+                                &from_root,
+                                &to_root,
+                                LinkMatch::Raw,
+                            )
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
+                    if let Err(err) = rewritten {
+                        let _ = tokio::fs::rename(&back, &src).await;
+                        return Err(format!(
+                            "无法还原 {} 中的链接: {err}（该目录已放回目标根）",
+                            back.display()
+                        ));
                     }
-                })
-                .await
-                .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
-                if let Err(err) = rewritten {
-                    let _ = tokio::fs::rename(&back, &src).await;
-                    return Err(format!(
-                        "无法还原 {} 中的链接: {err}（该目录已放回目标根）",
-                        back.display()
-                    ));
                 }
             }
             returned.push(e.kind.clone());
@@ -342,6 +360,79 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
         bytes,
         cancelled: true,
     })
+}
+
+/// Undo one directory of a migration that crossed volumes, where no rename
+/// exists to roll back. The forward pass handles that case by copy + staging;
+/// this mirrors it — copy into `.phl-staging` under the target root, verify the
+/// byte count, rename the verified staging directory into place, and only then
+/// delete the copy at `to_root`. Links are translated during the copy
+/// (`Rewrite`), so the separate repoint pass the rename path needs would be
+/// both unnecessary and wrong here.
+async fn copy_back(
+    kind: &str,
+    src: &Path,
+    back: &Path,
+    from_root: &Path,
+    to_root: &Path,
+) -> Result<(), String> {
+    let stage_root = from_root.join(STAGING_DIR);
+    let stage = stage_root.join(kind);
+    let _ = tokio::fs::remove_dir_all(&stage).await;
+    tokio::fs::create_dir_all(&stage_root)
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = tokio::task::spawn_blocking({
+        let src = src.to_path_buf();
+        move || dir_size(&src)
+    })
+    .await
+    .unwrap_or(0);
+    let copied = copy_tree_with_progress(
+        src.to_path_buf(),
+        stage.clone(),
+        Arc::new(AtomicBool::new(false)),
+        SkipRule::Nothing,
+        LinkPolicy::Rewrite {
+            new_root: from_root.to_path_buf(),
+            match_on: LinkMatch::Canonical,
+            source_root: src.to_path_buf(),
+        },
+        to_root.to_path_buf(),
+        &|_p| {},
+    )
+    .await;
+    if let Err(error) = copied {
+        let _ = tokio::fs::remove_dir_all(&stage).await;
+        return Err(error);
+    }
+    let staged = tokio::task::spawn_blocking({
+        let stage = stage.clone();
+        move || dir_size(&stage)
+    })
+    .await
+    .unwrap_or(0);
+    if staged != bytes {
+        let _ = tokio::fs::remove_dir_all(&stage).await;
+        return Err(format!(
+            "{} 的暂存副本校验不一致（源 {bytes} 字节，暂存 {staged} 字节），已中止",
+            src.display()
+        ));
+    }
+    tokio::fs::rename(&stage, back).await.map_err(|e| {
+        format!(
+            "{} 已暂存于 {} 并通过校验，放回原根失败（可重试撤销）: {e}",
+            kind,
+            stage.display()
+        )
+    })?;
+    // Only now is the destination copy disposable — the restored directory is
+    // complete and verified.
+    if let Err(e) = tokio::fs::remove_dir_all(src).await {
+        eprintln!("[phl] 已把 {kind} 复制回原根，但删除目标根中的副本失败（可稍后手动删除）: {e}");
+    }
+    let _ = tokio::fs::remove_dir_all(&stage_root).await;
+    Ok(())
 }
 
 fn ensure_recovery_is_unambiguous(state: EntryState, src: &Path, dst: &Path) -> Result<(), String> {
@@ -769,6 +860,34 @@ mod tests {
         }
     }
 
+    /// A writable directory on a volume *other* than the one holding
+    /// `%TEMP%`, or `None` on a single-volume machine. A cross-volume undo can
+    /// only be proven against a real second volume: a mocked rename failure
+    /// would test the mock, not Windows.
+    struct OtherVolume(PathBuf);
+    impl OtherVolume {
+        fn new() -> Option<Self> {
+            let temp = std::env::temp_dir();
+            let temp_prefix = temp.components().next()?;
+            for letter in b'C'..=b'Z' {
+                let root = PathBuf::from(format!("{}:\\", letter as char));
+                if !root.is_dir() || root.components().next() == Some(temp_prefix) {
+                    continue;
+                }
+                let probe = root.join(format!("phl-cross-volume-{}", std::process::id()));
+                if std::fs::create_dir_all(&probe).is_ok() {
+                    return Some(Self(probe));
+                }
+            }
+            None
+        }
+    }
+    impl Drop for OtherVolume {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Compare two paths by *identity*, not spelling.
     ///
     /// Windows gives the same directory two names: the 8.3 short form
@@ -1143,9 +1262,13 @@ mod tests {
         assert!(to.join("instances/a.txt").exists());
         assert!(from.join("config/api.json").exists());
 
-        let summary = undo_migration(&journal, &read_journal(&journal).unwrap().unwrap())
-            .await
-            .unwrap();
+        let summary = undo_migration(
+            &journal,
+            &read_journal(&journal).unwrap().unwrap(),
+            &null_task(),
+        )
+        .await
+        .unwrap();
         assert_eq!(summary.moved, vec!["instances"]);
         assert!(from.join("instances/a.txt").exists(), "data walks back");
         assert!(!to.join("instances").exists());
@@ -1193,9 +1316,13 @@ mod tests {
         open.set("instances", EntryState::Moved, 0);
         open.save(&journal).unwrap();
 
-        let summary = undo_migration(&journal, &read_journal(&journal).unwrap().unwrap())
-            .await
-            .unwrap();
+        let summary = undo_migration(
+            &journal,
+            &read_journal(&journal).unwrap().unwrap(),
+            &null_task(),
+        )
+        .await
+        .unwrap();
         assert_eq!(summary.moved, vec!["instances"]);
 
         let restored = from
@@ -1283,7 +1410,9 @@ mod tests {
                 .await
                 .unwrap_err()
                 .contains("已保留"));
-            assert!(undo_migration(&journal_path, &journal).await.is_err());
+            assert!(undo_migration(&journal_path, &journal, &null_task())
+                .await
+                .is_err());
             assert_eq!(
                 std::fs::read(to.join("config/complete")).unwrap(),
                 b"only-complete-copy"
@@ -1304,6 +1433,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_back_restores_a_directory_and_translates_its_managed_links() {
+        // The cross-drive undo path: no rename exists, so the directory is
+        // copied back through staging exactly like the forward pass copied it
+        // out. The link must follow the data, not the root being emptied.
+        use crate::instances::copy::recreate_link;
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        let shared = to.join("versions").join("v1").join("node_modules");
+        std::fs::create_dir_all(shared.join("dep")).unwrap();
+        std::fs::write(shared.join("dep/index.js"), b"shared-module").unwrap();
+        let inst = to.join("instances").join("a").join("dsh-home");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::write(inst.join("home.json"), b"home").unwrap();
+        recreate_link(&inst.join("node_modules"), &shared, true).unwrap();
+        // The root the data returns to owns its own shared install, so the
+        // translated link has a real target there.
+        std::fs::create_dir_all(
+            from.join("versions")
+                .join("v1")
+                .join("node_modules")
+                .join("dep"),
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("versions/v1/node_modules/dep/index.js"),
+            b"shared-module",
+        )
+        .unwrap();
+        let from = std::fs::canonicalize(&from).unwrap();
+        let to = std::fs::canonicalize(&to).unwrap();
+
+        copy_back(
+            "instances",
+            &to.join("instances"),
+            &from.join("instances"),
+            &from,
+            &to,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(from.join("instances/a/dsh-home/home.json")).unwrap(),
+            b"home"
+        );
+        assert!(
+            !to.join("instances").exists(),
+            "the destination copy is deleted only after the restore is verified"
+        );
+        let link = from.join("instances/a/dsh-home/node_modules");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "the link survived as a link — nothing materialized"
+        );
+        assert_eq!(
+            std::fs::read(link.join("dep/index.js")).unwrap(),
+            b"shared-module",
+            "reads resolve through the translated link into the restored root"
+        );
+        let raw_target = crate::paths::strip_verbatim(&std::fs::read_link(&link).unwrap());
+        let expected = crate::paths::strip_verbatim(&from)
+            .join("versions")
+            .join("v1")
+            .join("node_modules");
+        assert_eq!(
+            raw_target, expected,
+            "the link was translated to the root it was restored into"
+        );
+        assert!(
+            !from.join(STAGING_DIR).exists() && !to.join(STAGING_DIR).exists(),
+            "no staging residue on either side"
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_returns_the_data_when_the_two_roots_sit_on_different_volumes() {
+        // Blocker #3 of the alpha acceptance: a migration that crossed volumes
+        // has no rename to undo. Only a real second volume proves it, so this
+        // test skips (loudly) where there is one drive; CI runners have one.
+        use crate::instances::copy::recreate_link;
+        let Some(other) = OtherVolume::new() else {
+            eprintln!("[phl] 只有一个卷，跳过跨盘撤销测试；跨盘分支由 copy_back 单元测试覆盖");
+            return;
+        };
+        let temp = TestRoot::new();
+        let from = other.0.join("old");
+        let to = temp.0.join("new");
+        std::fs::create_dir_all(&to).unwrap();
+        // Precondition, stated rather than assumed: a rename across these two
+        // roots must genuinely fail, otherwise this test proves nothing.
+        let probe = to.join("probe");
+        std::fs::write(&probe, b"x").unwrap();
+        if std::fs::rename(&probe, other.0.join("probe")).is_ok() {
+            eprintln!("[phl] 两个根之间可以重命名，跳过跨盘撤销测试");
+            let _ = std::fs::rename(other.0.join("probe"), &probe);
+            return;
+        }
+        std::fs::remove_file(&probe).unwrap();
+
+        // The forward pass left the data at `to` and the journal says so.
+        let shared = to.join("versions").join("v1").join("node_modules");
+        std::fs::create_dir_all(shared.join("dep")).unwrap();
+        std::fs::write(shared.join("dep/index.js"), b"shared-module").unwrap();
+        let home = to.join("instances").join("a").join("dsh-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("home.json"), b"home").unwrap();
+        recreate_link(&home.join("node_modules"), &shared, true).unwrap();
+        // The original root owns its own shared install, so the translated
+        // link lands on a real target.
+        std::fs::create_dir_all(
+            from.join("versions")
+                .join("v1")
+                .join("node_modules")
+                .join("dep"),
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("versions/v1/node_modules/dep/index.js"),
+            b"shared-module",
+        )
+        .unwrap();
+        let from = std::fs::canonicalize(&from).unwrap();
+        let to = std::fs::canonicalize(&to).unwrap();
+        let mut journal = MigrationJournal::fresh(&from, &to);
+        journal.set("instances", EntryState::Moved, 4);
+        let path = to.join(JOURNAL_NAME);
+        journal.save(&path).unwrap();
+
+        let summary = undo_migration(&path, &journal, &null_task()).await.unwrap();
+
+        assert_eq!(summary.moved, vec!["instances".to_string()]);
+        assert!(summary.cancelled, "undo reports a cancellation, not a move");
+        assert_eq!(
+            std::fs::read(from.join("instances/a/dsh-home/home.json")).unwrap(),
+            b"home",
+            "the data is back on its original volume"
+        );
+        assert!(
+            !to.join("instances").exists(),
+            "the destination copy was deleted after the restore was verified"
+        );
+        let link = from.join("instances/a/dsh-home/node_modules");
+        assert_eq!(
+            std::fs::read(link.join("dep/index.js")).unwrap(),
+            b"shared-module",
+            "reads resolve through the translated link on the restored root"
+        );
+        let raw_target = crate::paths::strip_verbatim(&std::fs::read_link(&link).unwrap());
+        let expected = crate::paths::strip_verbatim(&from)
+            .join("versions")
+            .join("v1")
+            .join("node_modules");
+        assert_eq!(raw_target, expected);
+        assert!(!path.exists(), "the journal is cleared by a completed undo");
+        assert!(
+            !from.join(STAGING_DIR).exists() && !to.join(STAGING_DIR).exists(),
+            "no staging residue on either side"
+        );
+    }
+
+    #[tokio::test]
     async fn undo_preserves_verified_destination_when_source_deletion_was_partial() {
         let root = TestRoot::new();
         let from = root.0.join("old");
@@ -1316,7 +1609,7 @@ mod tests {
         journal.set("config", EntryState::Moved, 8);
         let path = root.0.join(JOURNAL_NAME);
         journal.save(&path).unwrap();
-        assert!(undo_migration(&path, &journal).await.is_err());
+        assert!(undo_migration(&path, &journal, &null_task()).await.is_err());
         assert_eq!(
             std::fs::read(to.join("config/complete")).unwrap(),
             b"complete"
@@ -1339,7 +1632,7 @@ mod tests {
         let journal = MigrationJournal::fresh(&from, &to);
         let path = root.0.join(JOURNAL_NAME);
         journal.save(&path).unwrap();
-        undo_migration(&path, &journal).await.unwrap();
+        undo_migration(&path, &journal, &null_task()).await.unwrap();
         assert_eq!(
             std::fs::read(to.join("config/other-user-data")).unwrap(),
             b"not-owned"
