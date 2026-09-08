@@ -214,6 +214,33 @@ pub async fn launch_instance(
     result
 }
 
+/// May this pid be killed on behalf of `instance_id`?
+///
+/// Killing is the one irreversible action in PHL, so the same identity gate
+/// that decides adoption is applied *before* the kill: the persisted record
+/// says which process we launched, and a pid that no longer matches it has
+/// been reused by somebody else. A process with no record is ours by
+/// construction (PHL started it in this session); a process that is already
+/// gone needs no permission at all — the caller still cleans up.
+fn stop_permission(registry: &Registry, instance_id: &str, pid: u32) -> Result<(), String> {
+    let Some(rec) = registry.record_of(instance_id) else {
+        return Ok(());
+    };
+    match decide(&rec, &probe_process(pid)) {
+        Adoption::Adopt => Ok(()),
+        Adoption::Forget {
+            keep_running: true,
+            reason,
+        } => Err(crate::errors::coded(
+            crate::errors::ErrCode::State,
+            format!(
+                "实例 {instance_id} 的进程身份无法确认（{reason}，PID {pid}）：已停止跟踪，但不会终止它。请在任务管理器里确认后手动结束。"
+            ),
+        )),
+        Adoption::Forget { .. } => Ok(()),
+    }
+}
+
 /// Not running in the map → nothing to do; the exit event (or its absence)
 /// keeps the frontend state honest either way.
 #[tauri::command]
@@ -228,6 +255,7 @@ pub async fn stop_instance(
     // listing it, and nothing in the UI could stop it any more.
     let entry = processes.entry_of(&instance_id);
     if let Some(entry) = entry {
+        stop_permission(&registry, &instance_id, entry.pid)?;
         kill_tree(entry.pid).await?;
         processes.remove_if_pid(&instance_id, entry.pid);
         registry.forget_pid(&instance_id, entry.pid);
@@ -1002,6 +1030,29 @@ mod tests {
         );
         // Removal after disappearance is inert, not a panic.
         processes.remove_if_pid("inst", 111);
+    }
+
+    #[test]
+    fn stop_refuses_a_pid_the_registry_does_not_own() {
+        let registry = Registry::default();
+        // No record: a process PHL launched in this session is ours.
+        assert!(stop_permission(&registry, "inst", 1234).is_ok());
+
+        // A record whose creation stamp cannot belong to this pid: the number
+        // has been reused, so PHL must refuse to kill it.
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid: 1234,
+            port: 3080,
+            started_at_ms: 0,
+            exe_path: "C:\\node.exe".into(),
+        });
+        let err = stop_permission(&registry, "inst", std::process::id()).unwrap_err();
+        assert!(err.contains("身份无法确认"), "{err}");
+
+        // A pid that is already gone is not a kill target, but must not block
+        // the cleanup either.
+        assert!(stop_permission(&registry, "inst", 1234).is_ok());
     }
 
     #[test]

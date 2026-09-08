@@ -173,6 +173,16 @@ impl Registry {
         }
     }
 
+    /// What we recorded for an instance, for identity checks that happen
+    /// outside adoption (stopping a process, watching an adopted one).
+    pub(crate) fn record_of(&self, instance_id: &str) -> Option<PersistedProcess> {
+        self.entries
+            .lock()
+            .expect("registry lock")
+            .get(instance_id)
+            .cloned()
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<PersistedProcess> {
         self.entries
             .lock()

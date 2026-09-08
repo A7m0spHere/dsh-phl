@@ -161,6 +161,11 @@ pub(crate) fn profile_root_of(dir: &Path, manifest: &InstanceManifest) -> PathBu
 /// `classify_manifest`) anything stamped *above* it.
 pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
+/// Makes each manifest write's temp file unique within the process (see
+/// `write_manifest`); combined with the pid it also separates concurrent PHL
+/// instances sharing a data root.
+static MANIFEST_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// What reading an `instance.json` actually found. The distinctions matter:
 /// `Missing` means "not an instance at all", `Corrupt` is reclaimable junk,
 /// and `UnsupportedSchema` is a *valid instance this build cannot parse* —
@@ -248,6 +253,16 @@ pub(crate) async fn load_manifest(dir: &Path, id: &str) -> Result<InstanceManife
 /// Resolves an instance's active profile directory — the one owning
 /// `node_modules` and `cordis.patch.yml` — from the instance id. Plugin
 /// commands key on this id so the WebView never supplies a filesystem path.
+/// A temp name no other writer can share, and that a copy must not carry:
+/// `write_manifest` writes here and renames onto `instance.json`.
+fn manifest_tmp_path(dir: &Path) -> PathBuf {
+    dir.join(format!(
+        ".phl-manifest-{}-{}.tmp",
+        std::process::id(),
+        MANIFEST_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
 pub(crate) async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> Result<(), String> {
     // The schema version is backend-owned: whatever the caller sent, the file
     // always records the format this build writes. Callers load their copy
@@ -273,11 +288,41 @@ pub(crate) async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> R
     let body = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     // Write beside the target and rename, so a crash mid-write cannot leave a
     // truncated manifest — that would make the instance unreadable entirely.
-    let tmp = dir.join("instance.json.tmp");
+    //
+    // The temp name is unique per writer: `save_instance` holds the instance
+    // resource lock, but the launch path's API sync does not, so two writers
+    // can overlap. A shared `instance.json.tmp` let them interleave their
+    // bytes and then rename each other's half-written file into place. The
+    // `.phl-` prefix keeps a crashed temp file out of clones and snapshots
+    // (see `copy::skipped`).
+    let tmp = manifest_tmp_path(dir);
     tokio::fs::write(&tmp, body)
         .await
         .map_err(|e| format!("无法写入实例清单: {e}"))?;
     tokio::fs::rename(&tmp, path)
         .await
         .map_err(|e| format!("无法写入实例清单: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_temp_names_are_unique_and_invisible_to_copies() {
+        // Two writers (save_instance under the instance lock, and the launch
+        // path's API sync, which takes none) used to share `instance.json.tmp`
+        // and could interleave their bytes before renaming.
+        let dir = Path::new("phl").join("instances").join("a");
+        let first = manifest_tmp_path(&dir);
+        let second = manifest_tmp_path(&dir);
+        assert_ne!(first, second, "two writers must not share a temp file");
+
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            crate::instances::copy::skipped(&name),
+            "a temp file left by a crash must not ride into a clone or snapshot: {name}"
+        );
+        assert_eq!(first.parent(), Some(dir.as_path()));
+    }
 }

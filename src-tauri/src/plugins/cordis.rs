@@ -48,9 +48,18 @@ async fn write_patch_lines(instance_root: &Path, lines: &[String]) -> Result<(),
     tokio::fs::create_dir_all(instance_root)
         .await
         .map_err(|e| format!("实例目录不存在: {e}"))?;
-    tokio::fs::write(patch_path(instance_root), text)
+    // Write beside the target and rename, like the instance manifest and the
+    // API config: DSH loads this file at launch, so a crash mid-write must not
+    // leave a truncated patch it cannot parse. Plugin writes are serialized by
+    // the instance resource lock, so one temp name per instance is safe.
+    let path = patch_path(instance_root);
+    let tmp = path.with_extension("yml.tmp");
+    tokio::fs::write(&tmp, text)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("无法写入插件配置: {e}"))?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("无法写入插件配置: {e}"))
 }
 
 /// Registry ids currently flagged `disabled: true` in the profile's patch
@@ -588,6 +597,27 @@ mod tests {
         // And the flag reads back under both the loader id and the handle.
         assert!(disabled_plugin_ids(&dir).await.contains("dsh-market"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn writing_the_patch_file_leaves_no_temp_behind() {
+        // The write is tmp+rename so a crash cannot leave a truncated patch
+        // that DSH refuses to parse; the temp file must not survive a success.
+        let root = temp_profile("patch-atomic");
+        write_patch_lines(&root, &["- id: demo".to_string()])
+            .await
+            .unwrap();
+
+        let written = tokio::fs::read_to_string(patch_path(&root)).await.unwrap();
+        assert!(written.contains("id: demo"));
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
