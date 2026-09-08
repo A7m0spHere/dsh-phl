@@ -319,7 +319,8 @@
   一次跑完全部步骤并汇总 PASS/FAIL（fail 不中断 sweep）。CI 可完全复用。
 - `npm run test:desktop` — GUI 层：以 `PHL_ROOT=<temp>/phl-alpha-desktop-<ts>` 隔离 root 启动 `tauri dev`，
   场景清单见 `scripts/alpha-desktop-scenarios.json`，结果用 `scripts/alpha-desktop-record.mjs` 落
-  report JSON（随 root 一起生成；KEEP 用 `PHL_ALPHA_KEEP=1`）。**真实 `root.json` 指针全程不被触碰**
+  report JSON（生成在 root 旁，正常清理后仍保留；KEEP 用 `PHL_ALPHA_KEEP=1`；手动指定的
+  `PHL_ALPHA_ROOT` 始终保留）。**真实 `root.json` 指针全程不被触碰**
   （paths.rs：`PHL_ROOT` 优先且无 pointer → 一切持久化文件都进不了 `%APPDATA%\PHL`）。
 
 ### 层一新增链测试（本次补齐的缺口）

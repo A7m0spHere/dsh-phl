@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-08 Git 与健康复查：原有 WebUI / Alpha / 链接策略改动已保存为本地检查点 `e5f38c8`，`7176ad7` 衔接远端仅代码发布记录并保留本地文档。远端 `4317475` 的 CI 已成功（run `34176772394`）；它不包含本轮本地改动。最新审查、修复及证据见 [PROJECT_REVIEW.md](PROJECT_REVIEW.md)。当前优先处理：接管进程的持续退出监听、WebUI 窗口与进程代次绑定、迁移中断后的完整自动恢复，以及 Windows 安装包冷启动验收。迁移遇到最终目录已存在但日志仍为 `moving` 时，现先保留数据并报错，尚不能保证自动续传。
+
 2026-09-06 增量：已实现 PHL 原生模型信息补全（models.dev、七天缓存、歧义匹配保护、仅填缺失字段、能力字段 YAML 双向同步），使用规则、上游 schema 依据和验证说明见 [模型信息补全](docs/model-metadata-enrichment.md)。
 
 PHL 已经具备一个可运行的 DSH 桌面环境管理器的主体：版本与 Runtime 安装、实例隔离、插件管理、API 配置、启动停止、快照、Bundle、诊断和局部修复均有 Rust 实现。React、Zustand、Repository 与 Tauri/Rust 的总体分层可以保留。

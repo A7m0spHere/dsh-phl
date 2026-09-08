@@ -1,5 +1,53 @@
 # 项目审查与重构记录
 
+## 2026-09-08：Git 整理与当前健康复查
+
+结论：实例、版本、Runtime、插件、Pack 与快照主体均已实现，现有检查通过；当前仍有进程接管与 WebUI 生命周期缺口，迁移的极端中断恢复也未完全闭环。应先补稳定性和安装包验收，再扩展功能。本次检查包含 Git 历史、现有未提交变更、自动化检查和关键失败路径静态复查；没有操作正在运行的用户实例，也没有把过去的桌面验收当成本轮验证。
+
+### Git 整理
+
+- 初始：`main` 领先 `origin/main` 69、落后 1；31 个已跟踪文件显示修改（其中一个仅工作区换行差异），另有 6 个未跟踪文件。
+- `git fetch origin` 后确认远端 `4317475` 为仅代码发布记录。对比原 `7442240`，代码一致，远端省略了 15 个本地文档文件。
+- `e5f38c8` 保存原有 36 个实际变更文件（WebUI、Alpha 验收、链接策略等），与本轮新增修复分开留痕；`7176ad7` 用保留本地树的合并衔接该发布记录。
+- 删除已被 `main` 完整包含的本地分支 `feat/github-agent-install`、`fix/link-policy-and-ipc-contract`；原提交仍可从 `main` 历史访问。
+- 保留原来禁用的 push URL；本轮未推送、未创建 PR/tag、未触发发布。领先提交数包含本地历史和文档，不能当作尚未发布的功能数量。
+
+### 本轮修复
+
+| 优先级 | 触发条件与影响 | 修复及验证 |
+|---|---|---|
+| P1 | 迁移已经 rename 到目标，但 journal 仍为 `moving` 时退出；恢复会先删除目标，随后发现源不存在，导致唯一副本丢失。跨盘删除源到一半时也可能用残缺源覆盖完整目标。 | `storage.rs` 在任何目录变动前检查歧义状态，保留双方和 journal 并报错；跨盘在删除源之前写入已验证的 `moved` 状态。回归模拟源不存在和源残缺两种窗口，检查数据与 journal 保留。 |
+| P1 | 撤销遍历 `pending` 行，可能删除原本造成目标冲突的其他数据；源删除不完整、两侧目录都存在时也会误删完整目标。 | 跳过未执行行，对存在两份目录的已移动行拒绝自动撤销；两个文件级回归覆盖冲突数据和残缺源。 |
+| P1 | `test:desktop` 退出时递归删除手动指定的 `PHL_ALPHA_ROOT`，即使目录原先就有数据。 | 只有本次 `mkdtemp` 分配的目录才自动清理；指定目录及中断目录保留。真实脚本集成测试用假 npm 代替桌面启动，验证 sentinel 文件保留。 |
+| P2 | WebUI 用 `127.` 前缀及长度判断本机地址，`http://127.example.com/` 也能通过。 | 使用解析后的 `url::Host` 和 IP `is_loopback()`；拒绝伪装域名的回归加入现有 URL 测试。 |
+| P2 | 验收报告存放在自动删除的目录内，正常退出会一起丢失。 | 报告改放在 root 旁，以运行时间区分；集成测试确认自动清理后报告保留。Windows 中断改为终止子进程树，异常退出保留数据目录。 |
+
+新增 runner 测试同时接入 Alpha gate 与 CI 前端 job。
+
+### 仍需修复或验收
+
+| 优先级 | 问题及证据 | 下一步 |
+|---|---|---|
+| P1 | `launch/mod.rs:265` 的 `adopt_processes` 只登记存活进程，没有建立后续退出监听；唯一的 `child.wait()` watcher 在本次启动路径。重启后接管的进程随后退出，前端可能仍显示运行中，WebUI 也不会自动关闭。静态确认，未在用户进程上做故障注入。 | 为接管进程建立身份校验与存活监听，覆盖退出、停止、PID 复用和二次接管。 |
+| P2 | `launch/mod.rs:629` 的旧 watcher 虽按 PID 清理进程表，但 `close_for_instance` 只按 instance id 关闭窗口；`webui.rs` 的窗口标签也不包含进程代次。快速重启时延迟到达的旧退出可能关闭新窗口，重新聚焦也不会校正旧 URL/token。静态确认，未做真实 GUI 竞态复现。 | 将窗口所有权绑定当前进程或启动代次，补旧退出与重新启动交错测试。 |
+| P1 | 迁移歧义状态当前以保留数据并报错收口，需要人工核对，尚不是完整自动恢复。跨盘撤销仍使用 rename，不能保证跨盘成功；链接改写中断也需要更细的日志。 | 增加可区分的落位/链接改写/源清理阶段与恢复方案，并补真实跨盘、进程中断验收。 |
+| P2 | 主 JS 506.05 kB（gzip 159.41 kB），构建仍提示超过 500 kB。 | 按首屏性能测量决定后续分包，不以增大警告阈值代替优化。 |
+| 发布验收 | 本地新增内容尚未经过远端 CI 与干净 Windows 安装包冷启动；6 个 Rust 忽略测试未启用。 | 按手测清单执行安装包、真实插件加载和外部接入验收。 |
+
+### 本轮验证
+
+- `npm run typecheck`、`npm test`：通过，13 个文件 / 78 项前端测试。
+- `npm run bridge:check`：17 个 bridge，72 个调用 / 78 个注册，无缺失或重复。
+- `npm run build`：通过，保留上述分包提示。
+- `cargo test --manifest-path src-tauri/Cargo.toml --workspace --offline --quiet`：306 项通过（桌面库 270、CLI 3、Pack Core 33），6 项忽略。
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --offline --all-targets --all-features -- -D warnings`：通过。
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`、`git diff --check`：通过。
+- `node --test scripts/test-alpha-desktop.mjs`：1 项脚本集成测试通过；未启动真实 Tauri。脚本使用 Node test runner，命名与 Vitest 的自动发现规则分离。
+- `npm audit --omit=dev --audit-level=high`：生产依赖 0 项已知漏洞；没有审计开发依赖或 Rust 依赖漏洞。
+- [远端最近 CI](https://github.com/A7m0spHere/dsh-phl/actions/runs/34176772394) 成功，对应 `4317475`；不包含本轮本地变更。前一条 `7442240` 的 CI 也已成功，较早的 Windows 路径失败不能再视为当前阻塞。
+
+---
+
 ## 2026-09-08：GitHub 更新前审核
 
 范围：本地 `663cbe0` 与远端 `f17030e` 的树差异（89 个文件），重点检查插件写入、Pack 安装/导出、取消与异步状态，以及 bridge/store 拆分。两条历史没有共同祖先；发布时保留双方历史，以本次审查修复后的代码树整合，不强制覆盖远端引用。
