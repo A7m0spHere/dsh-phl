@@ -684,6 +684,7 @@ export function MoreSettings({ portIssue, attempted }: { portIssue?: string; att
                     <Switch
                       checked={draft.autoPort}
                       onChange={(v) => patch({ autoPort: v, port: v ? draft.port : suggestPort() })}
+                      label="自动分配端口"
                     />
                   </div>
                   <AnimatePresence initial={false}>

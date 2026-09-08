@@ -263,7 +263,13 @@ export function ProviderFields({
           <SettingRow
             title="启用"
             description="停用后此供应商不再下发给继承全局配置的实例"
-            control={<Switch checked={form.enabled} onChange={(v) => patch({ enabled: v })} />}
+            control={
+                  <Switch
+                    checked={form.enabled}
+                    onChange={(v) => patch({ enabled: v })}
+                    label="启用该供应商"
+                  />
+                }
           />
         </div>
       )}
