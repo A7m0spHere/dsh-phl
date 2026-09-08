@@ -162,7 +162,11 @@ impl LinkPolicy {
                 }
             },
             LinkMatch::Raw => match std::fs::read_link(link) {
-                Ok(t) => crate::paths::strip_verbatim(&t),
+                // A raw target may name a path that is already gone (the moved
+                // subtree) or spell it with an 8.3 name; resolve what exists.
+                Ok(t) => {
+                    canonical_with_suffix(&t).unwrap_or_else(|| crate::paths::strip_verbatim(&t))
+                }
                 Err(_) => {
                     return LinkAction::Refuse(format!(
                         "实例目录包含无法读取的链接，请先处理: {}",
@@ -178,7 +182,8 @@ impl LinkPolicy {
                     return LinkAction::Refuse("数据根目录不可读，无法判定链接归属".to_string())
                 }
             },
-            LinkMatch::Raw => crate::paths::strip_verbatim(data_root),
+            LinkMatch::Raw => canonical_with_suffix(data_root)
+                .unwrap_or_else(|| crate::paths::strip_verbatim(data_root)),
         };
         // The reparse point itself says whether this is a directory link — a
         // dangling junction cannot be resolved to find out.
@@ -232,7 +237,8 @@ impl LinkPolicy {
                             )
                         }
                     },
-                    LinkMatch::Raw => crate::paths::strip_verbatim(source_root),
+                    LinkMatch::Raw => canonical_with_suffix(source_root)
+                        .unwrap_or_else(|| crate::paths::strip_verbatim(source_root)),
                 };
                 // A raw target is text, so a `..` inside it could pass the
                 // prefix test and then resolve outside the destination.
@@ -270,6 +276,32 @@ impl LinkPolicy {
                 }
             }
         }
+    }
+}
+
+/// Canonicalize as much of `path` as exists, then re-append the remainder.
+///
+/// Windows gives one directory two names (the 8.3 short form and the long
+/// form) and `canonicalize` fails outright once the leaf is gone — exactly the
+/// state a same-drive rename leaves its in-tree links in. Resolving the
+/// longest existing ancestor yields a comparable absolute path either way,
+/// which is what makes the raw match hold on a runner whose `%TEMP%` is
+/// `C:\\Users\\RUNNER~1\\…` while the data root canonicalizes to
+/// `C:\\Users\\runneradmin\\…`.
+fn canonical_with_suffix(path: &Path) -> Option<PathBuf> {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(probe) {
+            let mut out = crate::paths::strip_verbatim(&resolved);
+            for part in suffix.iter().rev() {
+                out.push(part);
+            }
+            return Some(out);
+        }
+        let parent = probe.parent()?;
+        suffix.push(probe.file_name()?.to_os_string());
+        probe = parent;
     }
 }
 
@@ -901,6 +933,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn canonical_with_suffix_resolves_the_existing_part_and_keeps_the_rest() {
+        // The runner's %TEMP% is an 8.3 name while canonicalize returns the
+        // long one; a same-drive rename leaves in-tree links pointing at paths
+        // that no longer exist. Both need a comparable absolute path.
+        let root = tmp("canon-suffix");
+        let old = root.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        let dangling = old.join("instances").join("a").join("node_modules");
+
+        let resolved = canonical_with_suffix(&dangling).expect("the ancestor exists");
+        assert_eq!(
+            resolved,
+            crate::paths::strip_verbatim(&std::fs::canonicalize(&old).unwrap())
+                .join("instances")
+                .join("a")
+                .join("node_modules")
+        );
+        // A fully existing path is just its canonical form.
+        assert_eq!(
+            canonical_with_suffix(&old),
+            Some(crate::paths::strip_verbatim(
+                &std::fs::canonicalize(&old).unwrap()
+            ))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn a_link_inside_the_copied_tree_follows_the_copy() {
         // pnpm's isolated layout, measured on Windows: `node_modules/<dep>` is
@@ -951,6 +1012,44 @@ mod tests {
         );
         assert_eq!(copied, 8, "only the dependency's own bytes are counted");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raw_matching_survives_a_differently_spelled_but_equal_target() {
+        // The runner's failure, in portable form: a link whose raw text names
+        // an equivalent path (there an 8.3 name, here different case) while the
+        // root canonicalizes to the long form. A pure text compare refuses it;
+        // resolving what exists accepts it.
+        let root = tmp("raw-spelling");
+        let from_root = root.join("old");
+        let to_root = root.join("new");
+        let dep = from_root
+            .join("versions")
+            .join("v1")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        let tree = to_root.join("instances").join("a");
+        std::fs::create_dir_all(&tree).unwrap();
+
+        let upper = PathBuf::from(from_root.to_string_lossy().to_uppercase())
+            .join("versions")
+            .join("v1")
+            .join("node_modules");
+        dir_link(&upper, &tree.join("node_modules"));
+
+        repoint_managed_links(&tree, &from_root, &to_root, LinkMatch::Raw)
+            .expect("an equivalent spelling is still ours");
+
+        let target =
+            crate::paths::strip_verbatim(&std::fs::read_link(tree.join("node_modules")).unwrap());
+        assert!(
+            target.starts_with(crate::paths::strip_verbatim(&to_root)),
+            "translated to the new root: {}",
+            target.display()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
