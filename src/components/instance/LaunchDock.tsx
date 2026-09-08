@@ -196,12 +196,13 @@ export function LaunchDock() {
               shortcut: `:${i.port}`,
               onSelect: () => setFocus(i.id),
             }))}
-            trigger={({ toggle: openMenu }) => (
+            trigger={({ toggle: openMenu, menuProps }) => (
               <IconButton
                 label="切换启动目标"
                 size="hero"
                 variant={running ? 'secondary' : 'primary'}
                 onClick={openMenu}
+                {...menuProps}
                 className="h-9 w-7 rounded-l-none border-l border-black/10 dark:border-white/10"
               >
                 <ChevronUp size={13} />

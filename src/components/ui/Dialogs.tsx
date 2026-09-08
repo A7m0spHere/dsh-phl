@@ -14,17 +14,59 @@ export function DialogHost() {
   const [value, setValue] = useState('')
   const [typed, setTyped] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  /** Where focus came from, so closing can give it back. */
+  const restoreRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     if (!dialog) return
     setValue(dialog.kind === 'prompt' ? (dialog.spec.defaultValue ?? '') : '')
     setTyped('')
+    restoreRef.current = document.activeElement as HTMLElement | null
     const id = window.setTimeout(() => {
-      inputRef.current?.focus()
-      inputRef.current?.select()
+      const input = inputRef.current
+      if (input) {
+        input.focus()
+        input.select()
+      } else {
+        // A confirmation has no field: the panel itself takes focus so the
+        // dialog is reachable by keyboard and Escape keeps working.
+        panelRef.current?.focus()
+      }
     }, 60)
-    return () => window.clearTimeout(id)
+    return () => {
+      window.clearTimeout(id)
+      // Returning focus is part of the contract: without it the keyboard user
+      // lands back at the top of the document after every dialog.
+      restoreRef.current?.focus?.()
+    }
   }, [dialog])
+
+  /** Keep Tab inside the dialog — a modal that leaks focus is not modal. */
+  const trapTab = (event: React.KeyboardEvent) => {
+    if (event.key !== 'Tab') return
+    const panel = panelRef.current
+    if (!panel) return
+    const focusable = Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((node) => node.offsetParent !== null)
+    if (focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    const active = document.activeElement
+    if (!panel.contains(active)) {
+      event.preventDefault()
+      first.focus()
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
 
   useEffect(() => {
     if (!dialog) return
@@ -66,13 +108,18 @@ export function DialogHost() {
             className={MODAL_SCRIM}
           />
           <motion.div
+            ref={panelRef}
             variants={pop}
             initial="hidden"
             animate="show"
             exit="out"
             role="dialog"
-            aria-modal
-            className="relative w-[380px] overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
+            aria-modal="true"
+            aria-labelledby="phl-dialog-title"
+            aria-describedby={dialog.kind === 'confirm' ? 'phl-dialog-message' : undefined}
+            tabIndex={-1}
+            onKeyDown={trapTab}
+            className="relative w-[380px] overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line outline-none"
           >
             <div className="px-4 pb-3 pt-3.5">
               <div className="flex items-start gap-3">
@@ -82,9 +129,11 @@ export function DialogHost() {
                   </span>
                 )}
                 <div className="min-w-0 flex-1">
-                  <h2 className="text-base font-medium text-ink">{dialog.spec.title}</h2>
+                  <h2 id="phl-dialog-title" className="text-base font-medium text-ink">
+                    {dialog.spec.title}
+                  </h2>
                   {dialog.kind === 'confirm' && (
-                    <p className="mt-1 text-sm leading-relaxed text-ink-muted">
+                    <p id="phl-dialog-message" className="mt-1 text-sm leading-relaxed text-ink-muted">
                       {dialog.spec.message}
                     </p>
                   )}

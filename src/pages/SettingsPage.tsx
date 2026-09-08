@@ -471,6 +471,7 @@ export function SettingsPage() {
                     disabled
                     checked={settings.minimizeToTray}
                     onChange={(v) => settings.set('minimizeToTray', v)}
+                    label="关闭窗口时最小化到托盘"
                   />
                 }
               />
@@ -481,6 +482,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.closeStopsInstances}
                     onChange={(v) => settings.set('closeStopsInstances', v)}
+                    label="退出时停止所有实例"
                   />
                 }
               />
@@ -492,6 +494,7 @@ export function SettingsPage() {
                     disabled
                     checked={settings.checkUpdates}
                     onChange={(v) => settings.set('checkUpdates', v)}
+                    label="自动检查 DSH 新版本"
                   />
                 }
               />
@@ -502,6 +505,7 @@ export function SettingsPage() {
                   <Switch
                     checked={ui.confirmDelete}
                     onChange={(v) => ui.setPref('confirmDelete', v)}
+                    label="删除实例前二次确认"
                   />
                 }
               />
@@ -563,6 +567,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.keepArchives}
                     onChange={(v) => settings.set('keepArchives', v)}
+                    label="保留安装包"
                   />
                 }
               />
@@ -589,6 +594,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.pendingReleaseAlerts}
                     onChange={(v) => settings.set('pendingReleaseAlerts', v)}
+                    label="GitHub 版本上架 npm 时提醒"
                   />
                 }
               />
@@ -675,6 +681,7 @@ export function SettingsPage() {
                     <Switch
                       checked={ui.showLaunchDock}
                       onChange={(v) => ui.setPref('showLaunchDock', v)}
+                      label="显示底部启动栏"
                     />
                   }
                 />

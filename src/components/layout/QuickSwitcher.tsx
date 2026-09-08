@@ -199,16 +199,20 @@ export function QuickSwitcher() {
             initial="hidden"
             animate="show"
             exit="out"
+            role="dialog"
+            aria-modal="true"
+            aria-label="快速切换"
             className="relative w-[520px] overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
           >
             <div className="flex items-center gap-2.5 border-b border-line px-3.5 py-3">
-              <Search size={15} className="shrink-0 text-ink-faint" />
+              <Search size={15} className="shrink-0 text-ink-faint" aria-hidden />
               <input
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="搜索实例、页面或操作"
-                className="min-w-0 flex-1 bg-transparent text-md text-ink outline-none placeholder:text-ink-faint/70"
+                aria-label="搜索实例、页面或操作"
+                className="min-w-0 flex-1 bg-transparent text-md text-ink outline-none placeholder:text-ink-faint"
               />
               <Kbd>Esc</Kbd>
             </div>
