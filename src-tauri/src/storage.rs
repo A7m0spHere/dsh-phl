@@ -308,10 +308,22 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
                 // rolling the move back has to translate them again — the
                 // restored tree would otherwise reference a root that is being
                 // emptied. `Raw` matching, because `to/versions` may never have
-                // moved and therefore cannot be canonicalized.
-                if let Err(err) =
-                    crate::instances::repoint_managed_links(&back, &to, &from, LinkMatch::Raw)
-                {
+                // moved and therefore cannot be canonicalized. The walk and its
+                // `mklink` calls are blocking, so they run off the runtime.
+                let rewritten = tokio::task::spawn_blocking({
+                    let (dir, from_root, to_root) = (back.clone(), to.clone(), from.clone());
+                    move || {
+                        crate::instances::repoint_managed_links(
+                            &dir,
+                            &from_root,
+                            &to_root,
+                            LinkMatch::Raw,
+                        )
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
+                if let Err(err) = rewritten {
                     let _ = tokio::fs::rename(&back, &src).await;
                     return Err(format!(
                         "无法还原 {} 中的链接: {err}（该目录已放回目标根）",
@@ -558,7 +570,13 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         // data root *replaces* the original — a filter that made sense for
         // cloning an instance would drop every `snapshots/` and `logs/` here
         // and the source is deleted right after, destroying them for good.
-        let bytes = dir_size(&src);
+        // Blocking tree walk: off the runtime, like the copy itself.
+        let bytes = tokio::task::spawn_blocking({
+            let src = src.clone();
+            move || dir_size(&src)
+        })
+        .await
+        .unwrap_or(0);
 
         // Fast path, same drive: rename. The journal row already says
         // `moving`, so an interrupt here is recovered the same way as a
@@ -571,10 +589,22 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             // `Raw`: the tree has already been renamed, so a link into its old
             // location (pnpm's `.pnpm`, for instance) is dangling and could
             // never be classified by resolving it. The rename moves paths, and
-            // path text is exactly what has to be translated.
-            if let Err(e) =
-                crate::instances::repoint_managed_links(&dst, &from, &to, LinkMatch::Raw)
-            {
+            // path text is exactly what has to be translated. The walk and its
+            // `mklink` calls are blocking, so they run off the runtime.
+            let rewritten = tokio::task::spawn_blocking({
+                let (dir, from_root, to_root) = (dst.clone(), from.clone(), to.clone());
+                move || {
+                    crate::instances::repoint_managed_links(
+                        &dir,
+                        &from_root,
+                        &to_root,
+                        LinkMatch::Raw,
+                    )
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
+            if let Err(e) = rewritten {
                 let _ = tokio::fs::rename(&dst, &src).await;
                 journal.set(kind, EntryState::Pending, 0);
                 if let Some(p) = journal_path {
@@ -646,7 +676,12 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             let _ = tokio::fs::remove_dir_all(&stage).await;
             return Err(error);
         }
-        let staged = dir_size(&stage);
+        let staged = tokio::task::spawn_blocking({
+            let stage = stage.clone();
+            move || dir_size(&stage)
+        })
+        .await
+        .unwrap_or(0);
         if staged != bytes {
             let _ = tokio::fs::remove_dir_all(&stage).await;
             return Err(format!(
