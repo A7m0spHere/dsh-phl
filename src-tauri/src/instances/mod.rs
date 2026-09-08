@@ -762,11 +762,17 @@ async fn run_clone(
         Arc::clone(flag),
         SkipRule::RunStateAtRoot,
         // A real instance's `node_modules` is ~1000 junctions into the shared,
-        // immutable `versions/` tree. Recreate them pointing at the same
-        // target: materializing would duplicate gigabytes, and refusing (the
-        // old blanket rule) made every instance that ever ran install-deps
-        // uncloneable. Links that leave the managed tree are still refused.
-        LinkPolicy::Preserve,
+        // immutable `versions/` tree, and pnpm's plugin layout adds junctions
+        // into the instance's own `.pnpm`. Version links keep pointing at the
+        // shared target; in-tree links follow the copy. Links that leave both
+        // are still refused (see `LinkPolicy::Preserve`).
+        // `dest`, not `staging`: the staging directory is renamed into place
+        // right after the copy, and an absolute in-tree link that named the
+        // staging path would dangle the moment it lands.
+        LinkPolicy::Preserve {
+            source_root: source.clone(),
+            dest_root: dest.clone(),
+        },
         root.to_path_buf(),
         &|progress| {
             let _ = on_progress.send(progress);
@@ -821,7 +827,10 @@ mod tests {
             root.join("target"),
             Arc::new(AtomicBool::new(false)),
             SkipRule::Nothing,
-            LinkPolicy::Preserve,
+            LinkPolicy::Preserve {
+                source_root: root.join("missing"),
+                dest_root: root.join("target"),
+            },
             root.clone(),
             &|_| {},
         )
@@ -841,11 +850,14 @@ mod tests {
         }
         let flag = Arc::new(AtomicBool::new(false));
         let result = copy_tree_with_progress(
-            source,
+            source.clone(),
             target.clone(),
             Arc::clone(&flag),
             SkipRule::Nothing,
-            LinkPolicy::Preserve,
+            LinkPolicy::Preserve {
+                source_root: source,
+                dest_root: target.clone(),
+            },
             root.clone(),
             &|_| {
                 flag.store(true, Ordering::SeqCst);
@@ -1387,12 +1399,16 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let flag = AtomicBool::new(false);
             let mut done = 0u64;
+            let links = LinkPolicy::Preserve {
+                source_root: src.clone(),
+                dest_root: dst.clone(),
+            };
             let ctx = CopyCtx {
                 flag: &flag,
                 total: 512,
                 tx: &tx,
                 skip: SkipRule::RunStateAtRoot,
-                links: &LinkPolicy::Preserve,
+                links: &links,
                 data_root: &root_for_policy,
             };
             copy_tree(&src, &dst, &mut done, &ctx).map(|()| done)
@@ -1959,6 +1975,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&link);
         copy::recreate_link(&link, &versions_nm, true).unwrap();
 
+        // pnpm's plugin layout, measured on Windows with pnpm 9: a dependency
+        // is a junction into the home's *own* `.pnpm` — inside the instance,
+        // not the shared version tree. Refusing it made every instance with a
+        // dependency-bearing plugin unclonable, the same defect one level down.
+        let plugin_nm = home
+            .join("profiles")
+            .join("default")
+            .join("plugins")
+            .join("node_modules");
+        let store = plugin_nm
+            .join(".pnpm")
+            .join("dep@1.0.0")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("index.js"), b"pnpm-dep").unwrap();
+        let internal = plugin_nm.join("pnpm-dep");
+        copy::recreate_link(&internal, &store, true).unwrap();
+
         let cloned = run_clone(
             &Arc::new(AtomicBool::new(false)),
             &root,
@@ -1986,6 +2021,39 @@ mod tests {
         assert!(
             cloned_link.join("dep").join("index.js").exists(),
             "the recreated link still resolves"
+        );
+
+        // The in-tree link follows the copy instead of pointing back at the
+        // source instance — a clone that referenced the original's `.pnpm`
+        // would break the moment the source is deleted or edited.
+        let cloned_internal = root
+            .join("instances")
+            .join("cln-b2bb")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default")
+            .join("plugins")
+            .join("node_modules")
+            .join("pnpm-dep");
+        assert!(
+            std::fs::symlink_metadata(&cloned_internal)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the pnpm-style link survives as a link"
+        );
+        let clone_home =
+            std::fs::canonicalize(root.join("instances").join("cln-b2bb").join("dsh-home"))
+                .unwrap();
+        let target = std::fs::canonicalize(&cloned_internal).unwrap();
+        assert!(
+            target.starts_with(&clone_home),
+            "the in-tree link must point inside the clone, not at the source: {}",
+            target.display()
+        );
+        assert_eq!(
+            std::fs::read(cloned_internal.join("index.js")).unwrap(),
+            b"pnpm-dep"
         );
 
         // Snapshot create walks the same engine over the same home.
@@ -2033,6 +2101,20 @@ mod tests {
         assert!(
             link.join("dep").join("index.js").exists(),
             "the restored home resolves through the recreated link"
+        );
+        // The pnpm-style link is rebuilt against the live home, not against
+        // the snapshot directory it was copied from.
+        assert!(
+            std::fs::symlink_metadata(&internal)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "restore keeps the pnpm-style link"
+        );
+        assert_eq!(
+            std::fs::read(internal.join("index.js")).unwrap(),
+            b"pnpm-dep",
+            "and it resolves inside the restored home"
         );
         assert!(
             !home

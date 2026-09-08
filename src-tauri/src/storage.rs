@@ -568,8 +568,12 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             // into the OLD root that the deletion step will erase. Re-point
             // them before declaring the kind moved (and refuse + roll the
             // rename back on anything the copy path would refuse).
+            // `Raw`: the tree has already been renamed, so a link into its old
+            // location (pnpm's `.pnpm`, for instance) is dangling and could
+            // never be classified by resolving it. The rename moves paths, and
+            // path text is exactly what has to be translated.
             if let Err(e) =
-                crate::instances::repoint_managed_links(&dst, &from, &to, LinkMatch::Canonical)
+                crate::instances::repoint_managed_links(&dst, &from, &to, LinkMatch::Raw)
             {
                 let _ = tokio::fs::rename(&dst, &src).await;
                 journal.set(kind, EntryState::Pending, 0);
@@ -608,12 +612,14 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             stage.clone(),
             Arc::clone(flag),
             SkipRule::Nothing,
-            // `versions/` moves with the root, so a link is re-pointed at the
-            // same relative location under the destination instead of at the
-            // old absolute prefix, which dangles once the source is deleted.
+            // The whole root moves, so a link into the shared `versions/` tree
+            // or into this subtree is re-pointed at the same relative location
+            // under the destination instead of at the old absolute prefix,
+            // which dangles once the source is deleted.
             LinkPolicy::Rewrite {
                 new_root: to.clone(),
                 match_on: LinkMatch::Canonical,
+                source_root: src.clone(),
             },
             from.clone(),
             &|p| {

@@ -63,19 +63,40 @@ impl SkipRule {
 #[derive(Debug)]
 pub(crate) enum LinkPolicy {
     /// Clone / snapshot / restore / adoption: recreate a managed link in the
-    /// destination pointing at the **same** shared target. The referenced
-    /// `versions/` tree is immutable and outlives every copy, so the new tree
-    /// needs its own materialized 282 MB of it — and a snapshot must stay
-    /// cheap, which materializing would destroy. Non-managed links still
-    /// refuse: the copy never grows a reference to mutable state it does not
-    /// own, so clone isolation holds exactly where it matters.
-    Preserve,
+    /// destination. Two kinds qualify.
+    ///
+    /// A link into the shared `<root>/versions/` tree keeps pointing at the
+    /// **same** target: that tree is immutable and outlives every copy, so the
+    /// new tree needs no materialized 282 MB of it — and a snapshot must stay
+    /// cheap, which materializing would destroy.
+    ///
+    /// A link whose target sits **inside the tree being copied** follows the
+    /// copy instead (`dest_root` + the same relative path). pnpm lays a
+    /// plugin's dependencies out exactly that way — `node_modules/<dep>` is a
+    /// junction into `node_modules/.pnpm/<dep>@<v>/…` — and refusing it made
+    /// every instance with a dependency-bearing plugin unclonable, which is
+    /// the same defect the version links used to cause, one level down.
+    ///
+    /// Everything else still refuses: the copy never grows a reference to
+    /// mutable state it does not own, so clone isolation holds where it matters.
+    Preserve {
+        /// Root of the tree being copied (a clone's source instance, a
+        /// snapshot's `dsh-home`), canonicalized on use.
+        source_root: PathBuf,
+        /// Where that tree is landing, for rebuilding in-tree links.
+        dest_root: PathBuf,
+    },
     /// Data-root relocation: `versions/` moves *with* the root, so a link is
     /// recreated pointing at the same relative location under the new root —
     /// the old absolute prefix would dangle the moment the source is deleted.
     Rewrite {
         new_root: PathBuf,
         match_on: LinkMatch,
+        /// The subtree being moved. Only targets under it (or under the shared
+        /// `versions/`) are translated: a link into some other part of the old
+        /// root would be re-pointed at a directory the migration never moves,
+        /// so it stays refused.
+        source_root: PathBuf,
     },
 }
 
@@ -128,7 +149,7 @@ impl LinkPolicy {
     pub(crate) fn action(&self, link: &Path, data_root: &Path) -> LinkAction {
         let match_on = match self {
             LinkPolicy::Rewrite { match_on, .. } => *match_on,
-            LinkPolicy::Preserve => LinkMatch::Canonical,
+            LinkPolicy::Preserve { .. } => LinkMatch::Canonical,
         };
         let previous = match match_on {
             LinkMatch::Canonical => match std::fs::canonicalize(link) {
@@ -150,42 +171,98 @@ impl LinkPolicy {
                 }
             },
         };
-        let versions = match match_on {
+        let root = match match_on {
             LinkMatch::Canonical => match std::fs::canonicalize(data_root) {
-                Ok(r) => crate::paths::strip_verbatim(&r).join("versions"),
+                Ok(r) => crate::paths::strip_verbatim(&r),
                 Err(_) => {
                     return LinkAction::Refuse("数据根目录不可读，无法判定链接归属".to_string())
                 }
             },
-            LinkMatch::Raw => crate::paths::strip_verbatim(data_root).join("versions"),
+            LinkMatch::Raw => crate::paths::strip_verbatim(data_root),
         };
-        if !previous.starts_with(&versions) {
-            // Inside the root but outside versions (e.g. a sibling instance's
-            // home), or outside entirely: a copy must not inherit a reference
-            // to state it does not own.
-            return LinkAction::Refuse(format!(
-                "实例目录包含指向受管版本之外位置的链接，请先处理: {}",
-                link.display()
-            ));
-        }
         // The reparse point itself says whether this is a directory link — a
         // dangling junction cannot be resolved to find out.
         let dir = link_is_dir(link);
         match self {
-            LinkPolicy::Preserve => LinkAction::Recreate {
-                target: previous.clone(),
-                previous,
-                dir,
-            },
-            LinkPolicy::Rewrite { new_root, .. } => {
-                let rel = previous
-                    .strip_prefix(&versions)
-                    .expect("checked: previous starts with versions");
-                // The new root may not exist yet mid-migration, so this is a
-                // pure path translation — existence was proven on the old side.
-                let target = crate::paths::strip_verbatim(new_root)
-                    .join("versions")
-                    .join(rel);
+            LinkPolicy::Preserve {
+                source_root,
+                dest_root,
+            } => {
+                // Shared, immutable version install: keep pointing at it.
+                if previous.starts_with(root.join("versions")) {
+                    return LinkAction::Recreate {
+                        target: previous.clone(),
+                        previous,
+                        dir,
+                    };
+                }
+                // A link inside the tree being copied travels with the copy.
+                let source = match std::fs::canonicalize(source_root) {
+                    Ok(p) => crate::paths::strip_verbatim(&p),
+                    Err(_) => {
+                        return LinkAction::Refuse("复制源目录不可读，无法判定链接归属".to_string())
+                    }
+                };
+                match previous.strip_prefix(&source) {
+                    Ok(rel) => LinkAction::Recreate {
+                        target: crate::paths::strip_verbatim(dest_root).join(rel),
+                        previous,
+                        dir,
+                    },
+                    // Inside the root but outside the copied tree (e.g. a
+                    // sibling instance's home), or outside entirely: a copy
+                    // must not inherit a reference to state it does not own.
+                    Err(_) => LinkAction::Refuse(format!(
+                        "实例目录包含指向受管版本之外位置的链接，请先处理: {}",
+                        link.display()
+                    )),
+                }
+            }
+            LinkPolicy::Rewrite {
+                new_root,
+                source_root,
+                ..
+            } => {
+                let moving = match match_on {
+                    LinkMatch::Canonical => match std::fs::canonicalize(source_root) {
+                        Ok(p) => crate::paths::strip_verbatim(&p),
+                        Err(_) => {
+                            return LinkAction::Refuse(
+                                "迁移源目录不可读，无法判定链接归属".to_string(),
+                            )
+                        }
+                    },
+                    LinkMatch::Raw => crate::paths::strip_verbatim(source_root),
+                };
+                // A raw target is text, so a `..` inside it could pass the
+                // prefix test and then resolve outside the destination.
+                if previous
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return LinkAction::Refuse(format!(
+                        "实例目录包含带有相对路径段的链接，请先处理: {}",
+                        link.display()
+                    ));
+                }
+                let translatable =
+                    previous.starts_with(root.join("versions")) || previous.starts_with(&moving);
+                let Ok(rel) = previous.strip_prefix(&root) else {
+                    return LinkAction::Refuse(format!(
+                        "实例目录包含指向受管版本之外位置的链接，请先处理: {}",
+                        link.display()
+                    ));
+                };
+                if !translatable {
+                    return LinkAction::Refuse(format!(
+                        "实例目录包含指向受管版本之外位置的链接，请先处理: {}",
+                        link.display()
+                    ));
+                }
+                // The whole root moves, so every target under it is translated
+                // to the same relative place. `versions/` may not exist yet
+                // mid-migration, so this is a pure path translation.
+                let target = crate::paths::strip_verbatim(new_root).join(rel);
                 LinkAction::Recreate {
                     previous,
                     target,
@@ -281,9 +358,13 @@ pub(crate) fn repoint_managed_links(
     to_root: &Path,
     match_on: LinkMatch,
 ) -> Result<(), String> {
+    // The caller hands us `<to_root>/<kind>`; the links inside still point at
+    // `<from_root>/<kind>`, which is exactly the subtree the move relocates.
+    let kind = dir.strip_prefix(to_root).unwrap_or(Path::new(""));
     let policy = LinkPolicy::Rewrite {
         new_root: to_root.to_path_buf(),
         match_on,
+        source_root: from_root.join(kind),
     };
     // Phase 1: classify only.
     let mut planned: Vec<(PathBuf, PathBuf, PathBuf, bool)> = Vec::new();
@@ -590,7 +671,11 @@ mod tests {
         // paths on both sides.
         let real_root = std::fs::canonicalize(&root).unwrap();
 
-        match LinkPolicy::Preserve.action(&managed, &real_root) {
+        let copy_policy = || LinkPolicy::Preserve {
+            source_root: instance.clone(),
+            dest_root: root.join("copy-of-a"),
+        };
+        match copy_policy().action(&managed, &real_root) {
             LinkAction::Recreate { dir, target, .. } => {
                 assert!(dir, "a directory link is rebuilt as a directory link");
                 assert_eq!(
@@ -607,7 +692,7 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
         let borrowed = instance.join("borrowed");
         dir_link(&sibling, &borrowed);
-        match LinkPolicy::Preserve.action(&borrowed, &real_root) {
+        match copy_policy().action(&borrowed, &real_root) {
             LinkAction::Refuse(_) => {}
             LinkAction::Recreate { .. } => panic!("non-managed link was accepted"),
         }
@@ -615,7 +700,7 @@ mod tests {
         // A dangling link is refused too — its target cannot be classified.
         let dangling = instance.join("dangling");
         dir_link(&root.join("versions").join("gone"), &dangling);
-        match LinkPolicy::Preserve.action(&dangling, &real_root) {
+        match copy_policy().action(&dangling, &real_root) {
             LinkAction::Refuse(why) => assert!(why.contains("断开"), "got: {why}"),
             LinkAction::Recreate { .. } => panic!("dangling link was accepted"),
         }
@@ -637,6 +722,7 @@ mod tests {
         let policy = LinkPolicy::Rewrite {
             new_root: new_root.clone(),
             match_on: LinkMatch::Canonical,
+            source_root: instance.clone(),
         };
         match policy.action(&managed, &real_root) {
             LinkAction::Recreate { target, .. } => {
@@ -673,7 +759,10 @@ mod tests {
             to.clone(),
             Arc::new(AtomicBool::new(false)),
             SkipRule::Nothing,
-            LinkPolicy::Preserve,
+            LinkPolicy::Preserve {
+                source_root: from.clone(),
+                dest_root: to.clone(),
+            },
             std::fs::canonicalize(&root).unwrap(),
             &|_| {},
         )
@@ -709,12 +798,16 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
         dir_link(&sibling, &from.join("borrowed"));
 
+        let dest = root.join("instances").join("dst");
         let err = copy_tree_with_progress(
             from.clone(),
-            root.join("instances").join("dst"),
+            dest.clone(),
             Arc::new(AtomicBool::new(false)),
             SkipRule::Nothing,
-            LinkPolicy::Preserve,
+            LinkPolicy::Preserve {
+                source_root: from.clone(),
+                dest_root: dest,
+            },
             std::fs::canonicalize(&root).unwrap(),
             &|_| {},
         )
@@ -742,7 +835,10 @@ mod tests {
         std::fs::create_dir_all(&dep).unwrap();
         std::fs::write(dep.join("index.js"), b"shared").unwrap();
 
-        let tree = from_root.join("instances").join("a");
+        // The tree is already at its destination (the rename happened first),
+        // and its links still name the old root — exactly what the fast path
+        // hands `repoint_managed_links`.
+        let tree = to_root.join("instances").join("a");
         std::fs::create_dir_all(&tree).unwrap();
         // Names decide classification order (NTFS returns entries in name
         // order): the managed link is reached first, the escaping one second.
@@ -756,8 +852,7 @@ mod tests {
         dir_link(&elsewhere, &tree.join("z-borrowed"));
 
         let before = crate::paths::strip_verbatim(&std::fs::read_link(&managed).unwrap());
-        let err =
-            repoint_managed_links(&tree, &from_root, &to_root, LinkMatch::Canonical).unwrap_err();
+        let err = repoint_managed_links(&tree, &from_root, &to_root, LinkMatch::Raw).unwrap_err();
         assert!(err.contains("受管版本之外"), "got: {err}");
         let after = crate::paths::strip_verbatim(&std::fs::read_link(&managed).unwrap());
         assert_eq!(
@@ -789,6 +884,7 @@ mod tests {
         let canonical = LinkPolicy::Rewrite {
             new_root: from_root.clone(),
             match_on: LinkMatch::Canonical,
+            source_root: to_root.clone(),
         };
         assert!(
             matches!(canonical.action(&link, &to_root), LinkAction::Refuse(_)),
@@ -801,6 +897,106 @@ mod tests {
             from_root.join("versions").join("v1").join("node_modules"),
             "the link points back at the source root"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_link_inside_the_copied_tree_follows_the_copy() {
+        // pnpm's isolated layout, measured on Windows: `node_modules/<dep>` is
+        // a junction into `node_modules/.pnpm/<dep>@<v>/node_modules/<dep>`, i.e.
+        // *inside* the instance. Refusing it made every instance with a
+        // dependency-bearing plugin unclonable — the same defect the version
+        // links used to cause, one level down.
+        let root = tmp("link-in-tree");
+        let from = root.join("instances").join("src");
+        let store = from
+            .join("node_modules")
+            .join(".pnpm")
+            .join("dep@1.0.0")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("index.js"), b"pnpm-dep").unwrap();
+        let link = from.join("node_modules").join("dep");
+        dir_link(&store, &link);
+
+        let to = root.join("instances").join("dst");
+        let copied = copy_tree_with_progress(
+            from.clone(),
+            to.clone(),
+            Arc::new(AtomicBool::new(false)),
+            SkipRule::Nothing,
+            LinkPolicy::Preserve {
+                source_root: from.clone(),
+                dest_root: to.clone(),
+            },
+            std::fs::canonicalize(&root).unwrap(),
+            &|_| {},
+        )
+        .await
+        .expect("a pnpm-style tree must copy");
+
+        let copied_link = to.join("node_modules").join("dep");
+        assert!(is_link(&copied_link), "the junction survives as a link");
+        let target = std::fs::canonicalize(&copied_link).unwrap();
+        assert!(
+            target.starts_with(std::fs::canonicalize(&to).unwrap()),
+            "the rebuilt link must point inside the copy, not back at the source: {}",
+            target.display()
+        );
+        assert_eq!(
+            std::fs::read(copied_link.join("index.js")).unwrap(),
+            b"pnpm-dep"
+        );
+        assert_eq!(copied, 8, "only the dependency's own bytes are counted");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rewrite_translates_an_in_tree_link_with_the_root() {
+        // The migration half: the whole root moves, so a link into the
+        // instance's own `.pnpm` must be translated to the new root,
+        // exactly like a link into `versions/`.
+        let root = tmp("link-rewrite-in-tree");
+        let old_root = root.join("old");
+        let new_root = root.join("new");
+        let store = old_root
+            .join("instances")
+            .join("a")
+            .join("node_modules")
+            .join(".pnpm")
+            .join("dep@1.0.0")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&store).unwrap();
+        let link = old_root
+            .join("instances")
+            .join("a")
+            .join("node_modules")
+            .join("dep");
+        dir_link(&store, &link);
+
+        let policy = LinkPolicy::Rewrite {
+            new_root: new_root.clone(),
+            match_on: LinkMatch::Canonical,
+            source_root: old_root.join("instances"),
+        };
+        match policy.action(&link, &std::fs::canonicalize(&old_root).unwrap()) {
+            LinkAction::Recreate { target, .. } => assert_eq!(
+                target,
+                new_root
+                    .join("instances")
+                    .join("a")
+                    .join("node_modules")
+                    .join(".pnpm")
+                    .join("dep@1.0.0")
+                    .join("node_modules")
+                    .join("dep")
+            ),
+            LinkAction::Refuse(why) => panic!("in-tree link refused: {why}"),
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
