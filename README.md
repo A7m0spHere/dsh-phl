@@ -59,7 +59,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ```text
 src-tauri/target/release/PHL.exe                        可直接双击的可执行文件
-src-tauri/target/release/bundle/nsis/PHL_0.1.0_x64-setup.exe   安装程序
+src-tauri/target/release/bundle/nsis/PHL_<version>_x64-setup.exe   安装程序（版本取自 package.json）
 ```
 
 安装程序装完会在开始菜单创建快捷方式；也可以直接把 `PHL.exe` 发送到桌面快捷方式。

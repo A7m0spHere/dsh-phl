@@ -4,6 +4,10 @@
 
 ## 1. 结论与产品方向
 
+2026-09-08 Alpha 发行验收：当前 **NO-GO（暂不公开发行）**。最新发布提交 `6c01c76` 的 Windows CI 有两处短/长路径断言失败；接管进程退出监听、窗口代次隔离、迁移恢复支持边界和安装后桌面验收仍未关闭。浏览器模式冒烟通过。详见 [本轮 Alpha 发行验收](docs/alpha-release-acceptance-2026-09-08.md)；此前 CI 成功记录对应旧提交，不代表当前候选通过。
+
+2026-09-08 深夜续（接任轮）：发布副本 `85fa056` 的 CI 已全绿（run `34246526554`）——短/长路径断言改为比较目录身份，同盘迁移改用 `canonical_with_suffix` 分类链接（runner 的 8.3 短名曾让受管链接被误判为越界）。窗口显示统一走 `reveal`（取消最小化、必要时移回主显示器），修复"进程活着但窗口停在屏幕外"的假死。本轮补上**跨盘撤销**：撤销此前只做 `rename`，跨卷迁移的撤销必然失败，现按前向迁移的 copy+staging 方式回搬并重写受管链接，并新增一条真实双卷测试（单卷机器会跳过并说明）。Alpha 版本标识已定：四处来源（package.json · Cargo.toml · tauri.conf.json · Cargo.lock）统一为 `0.1.0-alpha.1`，新增 `scripts/check-versions.mjs` 作为 gate 第一步，release workflow 复用同一脚本并按 `v<version>` 校验 tag；About 面板的版本改由 Vite 从 package.json 注入，不再硬编码。剩余发行阻塞：干净 Windows 环境的 NSIS 安装/首启/卸载、真实桌面交互的故障注入验收（含跨盘迁移撤销的真机路径）。
+
 2026-09-08 Git 与健康复查：原有 WebUI / Alpha / 链接策略改动已保存为本地检查点 `e5f38c8`，`7176ad7` 衔接远端仅代码发布记录并保留本地文档。远端 `4317475` 的 CI 已成功（run `34176772394`）；它不包含本轮本地改动。最新审查、修复及证据见 [PROJECT_REVIEW.md](PROJECT_REVIEW.md)。当前优先处理：接管进程的持续退出监听、WebUI 窗口与进程代次绑定、迁移中断后的完整自动恢复，以及 Windows 安装包冷启动验收。迁移遇到最终目录已存在但日志仍为 `moving` 时，现先保留数据并报错，尚不能保证自动续传。
 
 2026-09-06 增量：已实现 PHL 原生模型信息补全（models.dev、七天缓存、歧义匹配保护、仅填缺失字段、能力字段 YAML 双向同步），使用规则、上游 schema 依据和验证说明见 [模型信息补全](docs/model-metadata-enrichment.md)。

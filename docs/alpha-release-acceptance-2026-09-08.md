@@ -4,7 +4,7 @@
 
 **当前不通过公开 Alpha 发行验收（NO-GO）。** 已具备内部试用的功能基础，但当前提交的 Windows CI 未通过，进程接管/窗口生命周期仍有未关闭缺陷，发行版本标识和安装后的真实桌面验收也未完成。
 
-> **2026-09-08 深夜更新**：候选提交的 Windows CI 已复跑全绿（见下文第 1 项与更新表），进程接管与窗口所有权两项代码缺陷也已修复。判定仍为 **NO-GO**，剩余理由是迁移恢复支持边界、Alpha 版本标识，以及干净环境安装与真实桌面验收尚未执行。
+> **2026-09-08 深夜更新**：候选提交的 Windows CI 已复跑全绿（见下文第 1 项与更新表），进程接管与窗口所有权两项代码缺陷也已修复。判定仍为 **NO-GO**，剩余理由是干净 Windows 环境的安装/首启/卸载验收，以及真实桌面交互的故障注入（接管后退出、PID 复用、旧退出晚于新启动、跨盘迁移撤销）。
 
 验收对象：GitHub `main` 的 `6c01c76b901b40759bd42c4d24b63a5176112792`，对应工作仓库 `f1b5061` 的代码树（按既定发布规则排除本地文档）。本次保持产品代码不变，只补验收记录；未创建 tag 或 GitHub Release。
 
@@ -33,8 +33,8 @@ CI：[run 34229973192](https://github.com/A7m0spHere/dsh-phl/actions/runs/342299
    - `launch/mod.rs:265` 的 `adopt_processes` 只登记，没有继续监听进程退出；PHL 重开后接管的 DSH 再崩溃，界面和 WebUI 可能保持运行状态。
    - `launch/mod.rs:629` 的旧 watcher 按 PID 清理进程表，却按 instance id 关闭 WebUI；快速重启时旧退出可能关闭新窗口。
    - 以上为当前代码路径确认，本轮未做真实 GUI 故障注入。验收应覆盖接管后退出、主动停止、PID 复用、旧退出晚于新启动，以及新 URL/token 的窗口重开。
-3. **明确迁移的 Alpha 支持边界。** 目前歧义落位状态会保留双方并报错，需要人工核对；跨盘撤销仍依赖 rename。要么完成恢复日志与跨盘恢复验收，要么在 Alpha UI 中明确禁用尚未支持的迁移恢复操作，不能只在发布说明里声称“可恢复”。
-4. **准备真实 Alpha 候选和安装验收。** 统一三处版本及锁文件，选择带 Alpha 后缀的候选版本；候选 CI 通过后在干净 Windows 环境验证安装→首启→创建→启动/停止→克隆/快照→Pack 导入/导出→重启接管→卸载，并给产物记录 SHA-256。
+3. **明确迁移的 Alpha 支持边界。**（跨盘撤销代码已修，见下方续轮表；真机故障注入验收仍未执行。）原缺口：跨盘撤销仍依赖 rename，跨卷迁移一旦取消或中断就无法撤销。
+4. **准备真实 Alpha 候选和安装验收。**（版本标识已定：`0.1.0-alpha.1`，四处来源统一并有 gate 校验；干净环境安装验收仍未执行。）原要求：统一版本及锁文件，候选 CI 通过后在干净 Windows 环境验证安装→首启→创建→启动/停止→克隆/快照→Pack 导入/导出→重启接管→卸载，并给产物记录 SHA-256。
 
 ## 验收工具的额外缺口
 
@@ -61,3 +61,27 @@ CI：[run 34229973192](https://github.com/A7m0spHere/dsh-phl/actions/runs/342299
 仍未关闭的验收项：干净 Windows 用户的 NSIS 安装/首启/卸载、真实桌面交互（含接管后退出、PID 复用、旧退出晚于新启动的故障注入）、迁移恢复支持边界、Alpha 版本标识。候选提交的 Windows CI 已复跑通过。
 
 补充：`6788d80` 同时修了 设置 → 存储 → 切换数据目录 的三个缺陷（后端拒绝时的静默假成功、取消迁移误报失败、切根后存储页不刷新）——不属发行阻塞，但与"迁移恢复"同一条路径。
+## 更新（2026-09-08 深夜续，接任轮）
+
+本节取代上一节表格的最后两行，**不改变 NO-GO 判定**：判定依赖干净环境安装与真机故障注入，两者仍未执行。
+
+| 上文阻塞 | 现在 | 提交与证据 |
+|---|---|---|
+| 迁移恢复边界（跨盘撤销） | **代码已修** | 撤销此前只做 `rename`，跨卷迁移取消或中断后必然无法撤销。现按前向迁移的方式回搬：`copy_back` 复制到 `from` 下的 `.phl-staging` → 校验字节数 → 落位 → 才删除目标根副本，复制过程用 `LinkPolicy::Rewrite` 把受管链接翻译回原根。新增 `undo_returns_the_data_when_the_two_roots_sit_on_different_volumes`，在本机 C:/D: 两个真实卷上跑通（单卷机器跳过并打印原因）；跨盘分支的复制/校验/链接翻译另有 `copy_back_restores_a_directory_and_translates_its_managed_links` 常驻覆盖 |
+| Alpha 版本标识 | **已定版** | 四处来源统一为 `0.1.0-alpha.1`（package.json · src-tauri/Cargo.toml · tauri.conf.json · Cargo.lock 的 `dsh-phl` 行）；新增 `scripts/check-versions.mjs` 作为 gate 第 1 步，release workflow 复用同一脚本，并在 push 事件上要求 tag == `v<version>`（因此 `v0.1.0-alpha.1` 既通过校验，也会被标为 prerelease）；About 面板不再硬编码版本，改由 Vite 从 package.json 注入 `__PHL_VERSION__` |
+
+跨盘撤销的边界（如实记录，不视为已验收）：
+
+- 双卷测试验证的是撤销的**复制路径、字节校验与链接翻译**；GUI 层的"取消迁移 → 撤销"仍只有代码路径确认，没有真机故障注入。
+- 落位歧义（journal 行仍为 `moving` 而目标已存在）继续保留双方并报错，这是设计选择而非缺口。
+- 跨盘回搬没有进度百分比：任务行只显示正在恢复的目录名（`撤销 <kind>`）。
+
+### 安装包与安装/首启/卸载（本机，非干净用户环境）
+
+- 产物：`npm run app:build` 成功，`src-tauri/target/release/bundle/nsis/PHL_0.1.0-alpha.1_x64-setup.exe`，2,909,149 B，SHA-256 `F31304F28CD937F093BD8E22BA558193BE2CCB6C072D9C19373984B21F1F18AC`。带 semver 预发布后缀的版本能正常打包，NSIS 未拒绝 `-alpha.1`。
+- 安装：`setup.exe /S /D=C:\Temp\phl-alpha-install` 退出码 0，但 **`/D=` 被忽略**——`installMode: both` 在静默模式下选按机器安装，落到 `C:\Program Files\PHL`（`dsh-phl.exe` 7,503,360 B + `uninstall.exe`），并写入 HKLM 卸载项、ProgramData 开始菜单快捷方式和公共桌面快捷方式。非管理员用户静默安装会失败，交互安装才能选按用户；这一点应写进发布说明。
+- 首启：以 `PHL_ROOT=<临时目录>` 启动安装后的 `dsh-phl.exe`，窗口标题 `PHL` 且响应正常；真实状态 `%APPDATA%\PHL\root.json`（21:56）与 `processes.json`（21:09）时间戳未变，隔离生效。本轮未与窗口交互（无 Computer Use）。
+- 卸载：`uninstall.exe /S` 退出码 0，`C:\Program Files\PHL`、HKLM 卸载项、两处快捷方式均已移除；`%LOCALAPPDATA%\PHL`（空目录，2026-09-03 创建）为先前开发运行遗留，未改动。
+- 边界：以上全部在**本机同一个用户环境**完成，不能替代干净 Windows 用户环境的安装→首启→创建→启动/停止→克隆/快照→Pack 导入/导出→重启接管→卸载全链路。
+
+仍未关闭的验收项：干净 Windows 用户的完整安装/首启/卸载链路、真实桌面交互（含接管后退出、PID 复用、旧退出晚于新启动）、跨盘迁移撤销的真机故障注入。候选提交的 Windows CI 已复跑通过。

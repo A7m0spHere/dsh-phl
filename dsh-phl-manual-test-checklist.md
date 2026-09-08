@@ -315,7 +315,7 @@
 
 ### 命令
 
-- `npm run test:alpha` — 确定性 gate：typecheck · bridge:check · vitest · cargo fmt/clippy(-D)/workspace tests。
+- `npm run test:alpha` — 确定性 gate：version check · typecheck · bridge:check · vitest · desktop runner tests · cargo fmt/clippy(-D)/workspace tests。
   一次跑完全部步骤并汇总 PASS/FAIL（fail 不中断 sweep）。CI 可完全复用。
 - `npm run test:desktop` — GUI 层：以 `PHL_ROOT=<temp>/phl-alpha-desktop-<ts>` 隔离 root 启动 `tauri dev`，
   场景清单见 `scripts/alpha-desktop-scenarios.json`，结果用 `scripts/alpha-desktop-record.mjs` 落
