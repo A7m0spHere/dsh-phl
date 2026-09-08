@@ -38,6 +38,8 @@ interface InstanceState {
   cancelLaunch: (id: string) => void
   stop: (id: string) => Promise<boolean>
   toggle: (id: string) => void
+  /** Opens (or focuses) the instance's WebUI, reporting a double failure. */
+  openWebUi: (id: string) => Promise<void>
 
   createSnapshot: (id: string) => Promise<Snapshot | null>
   restoreSnapshot: (id: string, snapshotId: string) => Promise<void>
@@ -279,20 +281,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       // The allocated port and the run timestamp are real configuration now —
       // memory-only updates used to lose the port on restart.
       get().updateInstance(id, { lastRunAt: new Date().toISOString(), port: outcome.port })
-      // DSH guards the WebUI behind a per-boot token in the printed URL; the
-      // bare host:port just says "authentication required", so every link
-      // prefers the captured URL and only falls back when the log had none.
-      const webTarget = outcome.webUrl ?? `http://localhost:${outcome.port}`
       // A launcher's delivered promise: getting to the running app must not
       // cost an extra click. Desktop opens (or focuses) the instance's
       // embedded WebUI window; the browser mock build keeps the manual
       // action instead of spawning unasked tabs on every mock launch.
-      if (isDesktop) void openDshWebUi(id, webTarget, instance.name)
+      if (isDesktop) void get().openWebUi(id)
       ui.toast({
         kind: 'success',
         title: `${instance.name} 已就绪`,
         message: isDesktop ? 'WebUI 已在独立窗口打开' : `WebUI 运行在 localhost:${outcome.port}`,
-        action: { label: '打开', run: () => void openDshWebUi(id, webTarget, instance.name) },
+        action: { label: '打开', run: () => void get().openWebUi(id) },
       })
     } catch (err) {
       if (err instanceof Cancelled) {
@@ -676,5 +674,26 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   runningCount: () =>
     get().instances.filter((i) => get().stateOf(i.id).status === 'running').length,
   hasPendingWrites: () => [...instanceWriters.values()].some((writer) => writer.busy),
+
+  /**
+   * "打开 WebUI" for one instance. The bridge reports whether the request
+   * reached an embedded window or fell back to the system browser; a double
+   * failure becomes a toast here instead of a promise rejected into `void`.
+   */
+  async openWebUi(id: string) {
+    const instance = get().byId(id)
+    if (!instance) return
+    const state = get().states[id]
+    const url = state?.webUrl ?? `http://localhost:${instance.port}`
+    const result = await openDshWebUi(id, url, instance.name)
+    if (!result.ok) {
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: `无法打开 ${instance.name} 的 WebUI`,
+        message: result.reason,
+        duration: 8000,
+      })
+    }
+  },
   flushWrites: async () => { await Promise.all([...instanceWriters.values()].map((writer) => writer.flush())) },
 }))

@@ -3,6 +3,7 @@ import type { Instance, InstanceRuntimeState } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   stop: vi.fn(), launch: vi.fn(), saveInstance: vi.fn(), toast: vi.fn(), listInstances: vi.fn(),
+  openDshWebUi: vi.fn(),
   cloneInstance: vi.fn(),
   onExit: null as null | ((event: { instanceId: string; pid: number; code: number | null }) => void),
 }))
@@ -12,7 +13,7 @@ vi.mock('@/services', async () => ({
 }))
 vi.mock('@/lib/desktop', () => ({
   isDesktop: true,
-  openDshWebUi: vi.fn().mockResolvedValue(undefined),
+  openDshWebUi: mocks.openDshWebUi,
   onInstanceExited: async (handler: typeof mocks.onExit) => { mocks.onExit = handler; return () => {} },
 }))
 vi.mock('./catalogStore', () => ({ useCatalogStore: { getState: () => ({
@@ -36,6 +37,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   mocks.saveInstance.mockResolvedValue(undefined)
   mocks.listInstances.mockResolvedValue([instance])
+  mocks.openDshWebUi.mockResolvedValue({ ok: true, how: 'window' })
   await useInstanceStore.getState().reload()
   useInstanceStore.setState({ instances: [{ ...instance }], states: { test: { ...running } } })
 })
@@ -124,5 +126,30 @@ describe('instance lifecycle', () => {
     expect(mocks.toast).not.toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'success' }),
     )
+  })
+
+  it('surfaces a WebUI that could not be opened at all', async () => {
+    // Both halves of the contract failed — the embedded window was refused and
+    // the system-browser fallback threw. The old code let the second rejection
+    // vanish into a `void` call site: a button that did nothing, with no way
+    // for the user to know why.
+    mocks.openDshWebUi.mockResolvedValue({
+      ok: false,
+      reason: '内嵌窗口失败：拒绝访问；改用系统浏览器也失败：找不到处理程序',
+    })
+    await useInstanceStore.getState().openWebUi('test')
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'error',
+        title: expect.stringContaining('无法打开'),
+        message: expect.stringContaining('系统浏览器'),
+      }),
+    )
+  })
+
+  it('stays quiet when the WebUI opened in a window', async () => {
+    mocks.openDshWebUi.mockResolvedValue({ ok: true, how: 'window' })
+    await useInstanceStore.getState().openWebUi('test')
+    expect(mocks.toast).not.toHaveBeenCalled()
   })
 })

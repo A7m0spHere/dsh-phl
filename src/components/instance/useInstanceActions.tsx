@@ -18,7 +18,7 @@ import type { MenuItem } from '@/components/ui'
 import {
   chooseSaveFile,
   exportInstanceBundle,
-  openDshWebUi,
+
   openExternal,
   previewInstanceExport,
   revealPath,
@@ -143,7 +143,9 @@ export function useInstanceActions(instance: Instance | undefined) {
    * `openDshWebUi`). Menus that need the browser specifically say so. */
   const openWebUI = useCallback(() => {
     if (!instance) return
-    void openDshWebUi(instance.id, webUrl(), instance.name)
+    // Through the store action: it owns the "window, browser, or a toast"
+    // contract, so the menu and the launch toast cannot diverge.
+    void useInstanceStore.getState().openWebUi(instance.id)
   }, [instance])
 
   const openWebUIInBrowser = useCallback(() => {
