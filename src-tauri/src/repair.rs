@@ -54,11 +54,6 @@ pub struct RepairOutcome {
 }
 
 #[tauri::command]
-pub async fn scan_residue(phl: State<'_, PhlState>) -> Result<Vec<ResidueItem>, String> {
-    scan_residue_inner(&phl.root()).await
-}
-
-#[tauri::command]
 pub async fn repair_instance(
     locks: State<'_, crate::resources::ResourceLocks>,
     tasks: State<'_, crate::resources::Tasks>,

@@ -199,7 +199,6 @@ macro_rules! phl_command_handler {
             storage::storage_migration_status,
             storage::storage_migration_undo,
             repair::repair_instance,
-            repair::scan_residue,
             verify::verify_instance,
             diagnostics::run_diagnostics,
             diagnostics::clear_download_cache,
@@ -245,8 +244,6 @@ pub fn run() {
             exit_app,
             launch::launch_instance,
             webui::open_or_focus_webui,
-            webui::close_webui_window,
-            webui::list_open_webui_windows,
         ])
         .setup(|app| {
             // Bind the process registry before any command can see it: the

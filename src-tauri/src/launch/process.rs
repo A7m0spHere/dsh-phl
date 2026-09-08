@@ -314,18 +314,29 @@ pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
     ))
 }
 
+/// A hung kill must not hang the stop command forever. The blocking worker
+/// cannot be cancelled, but the caller gets an answer and the process entry
+/// stays tracked, so the user can retry instead of watching a spinner.
+const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The spawned node is only the tree root — DSH shells out to plugins and
 /// tools, so the whole tree has to go with it.
 #[cfg(windows)]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
-    let output = tokio::task::spawn_blocking(move || {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
+    let output = tokio::time::timeout(
+        KILL_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        }),
+    )
     .await
+    .map_err(|_| {
+        format!("终止进程 {pid} 超时（taskkill 超过 10 秒无响应），可在任务管理器中手动结束")
+    })?
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     check_kill_output(pid, output)
@@ -335,12 +346,16 @@ pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
     // No libc dependency: `kill` on the direct child. DSH's own children are
     // expected to exit with it; a tree-kill here would need a setsid pre-exec.
-    let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-    })
+    let output = tokio::time::timeout(
+        KILL_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output()
+        }),
+    )
     .await
+    .map_err(|_| format!("终止进程 {pid} 超时（kill 超过 10 秒无响应）"))?
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     check_kill_output(pid, output)
