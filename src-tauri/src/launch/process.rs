@@ -72,6 +72,33 @@ async fn read_head(log_path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Replace the per-boot WebUI token in a log excerpt.
+///
+/// `dsh web` prints the authenticated URL as the first line of its log, and
+/// PHL puts log tails into toasts and diagnostics reports that users paste into
+/// issues. The token is per-boot and the log is local, but while the instance
+/// runs it is a live credential — it must not cross the IPC boundary.
+pub(crate) fn redact_web_token(text: &str) -> String {
+    const KEY: &str = "token=";
+    const PLACEHOLDER: &str = "token=<redacted>";
+    if !text.contains(KEY) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(KEY) {
+        out.push_str(&rest[..idx]);
+        out.push_str(PLACEHOLDER);
+        let tail = &rest[idx + KEY.len()..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ')' | ','))
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(crate) fn parse_web_url(log_text: &str) -> Option<String> {
     for line in log_text.lines() {
         const MARKER: &str = "dsh web:";
@@ -279,10 +306,12 @@ pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
         lines.remove(0);
     }
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join(
+    // Redacted here rather than at each call site: this string ends up in
+    // toasts and diagnostics reports, and a short log has the token line in it.
+    redact_web_token(&lines[start..].join(
         "
 ",
-    )
+    ))
 }
 
 /// The spawned node is only the tree root — DSH shells out to plugins and

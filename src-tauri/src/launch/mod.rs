@@ -42,7 +42,7 @@ pub(crate) use process::{
     resolve_node, CREATE_NO_WINDOW,
 };
 #[cfg(test)]
-pub(crate) use process::{check_kill_output, parse_web_url, port_free};
+pub(crate) use process::{check_kill_output, parse_web_url, port_free, redact_web_token};
 
 /// Emitted when a launched DSH process exits for any reason — crash, manual
 /// stop, normal shutdown. The frontend folds this into the instance's UI
@@ -971,6 +971,34 @@ mod tests {
             .unwrap()
             .block_on(log_tail(&path, 2));
         assert_eq!(tail, "l2\nl3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_webui_token_never_leaves_the_backend() {
+        // `dsh web` prints the authenticated URL at the top of the log, and a
+        // short log puts that line inside the tail PHL shows the user.
+        let line = "dsh web: http://127.0.0.1:3080/?token=6qeWvc1o3FEaOTrI4YOOIAP9F_1MSDi4AbNhh2HWO7w\nready";
+        let redacted = redact_web_token(line);
+        assert!(!redacted.contains("6qeWvc"), "{redacted}");
+        assert!(redacted.contains("token=<redacted>"));
+        assert!(redacted.contains("ready"), "the rest of the log survives");
+
+        // A token that ends at a query separator keeps the rest of the query.
+        assert_eq!(
+            redact_web_token("http://h/?token=abc&x=1"),
+            "http://h/?token=<redacted>&x=1"
+        );
+        assert_eq!(redact_web_token("nothing to hide"), "nothing to hide");
+
+        // And the tail path itself redacts, not just the helper.
+        let dir = temp_dir("tail-token");
+        let path = dir.join("launch.log");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let tail = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(log_tail(&path, 10));
+        assert!(!tail.contains("6qeWvc"), "{tail}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

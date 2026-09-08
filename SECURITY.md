@@ -25,12 +25,19 @@ PHL 是一个管理本地文件系统、下载并执行第三方代码（插件�
 
 ### 凭据与 Secret
 
-- Key 本体存放在两处：全局供应商库 `config/api.json` 可以保存用户粘贴的
-  **Key 明文**（本地文件，不进实例目录、不进任何 Bundle），实例目录只持有
-  「环境变量名」（`apiKeyEnv`）——`settings.yaml` 写的是名字，启动时由后端
-  把 Key 注入子进程环境。
+- Key 本体存放在**系统凭据库**（Windows Credential Manager，条目 `PHL:provider:<id>`），
+  `config/api.json` 只保留供应商配置与凭据**引用**。旧版 `api.json` 里的明文 Key
+  在读取时迁移进凭据库并重写文件；凭据库写入失败时保留明文并打印警告，不会静默丢弃。
+  实例目录只持有「环境变量名」（`apiKeyEnv`）——`settings.yaml` 写的是名字，启动时
+  由后端把 Key 注入子进程环境。凭据条目按 provider id 全局共享（跨数据根），目录迁移
+  不会重新命名凭据。
 - PHL 自身日志不输出 Key、Authorization 头或完整 secret；子进程（dsh）的
   stdout/stderr 会写入实例 `logs/`，其内容由 DSH 决定，超出 PHL 的承诺范围。
+- **WebUI token**：`dsh web` 把带 token 的地址打印在日志第一行。PHL 只在进程存活期间
+  用它打开内嵌窗口；任何回传前端的日志片段（启动失败提示、诊断导出）都会把 token
+  替换为 `<redacted>`（`launch::process::redact_web_token`）。日志文件本身保留该行，
+  因为它是 PHL 重启后恢复 WebUI 地址的唯一来源；token 随进程退出即失效，且日志不进
+  Bundle、不进快照、不进 `.phlpack`。
 - **Bundle（格式 2）导出不含凭据值**：变量名命中全局库声明的 `apiKeyEnv`，
   或名称含凭据字样（KEY / TOKEN / SECRET / PASS / CREDENTIAL / AUTH …）时，
   只导出变量名并提示导入方重新配置；`PATH`、`DSH_HOME` 等机器本地变量同样
