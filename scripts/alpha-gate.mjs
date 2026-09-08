@@ -4,10 +4,11 @@
  *
  *   npm run test:alpha
  *
- * Runs, in order: typecheck · bridge check · frontend tests · the whole Rust
- * workspace (fmt + clippy + all crate/lib tests). Every step runs exactly
- * once; failures do not stop the sweep — the summary lists all of them, so a
- * single pass over the gate gives the complete picture.
+ * Runs, in order: version check · typecheck · bridge check · frontend tests ·
+ * the desktop runner tests · the whole Rust workspace (fmt + clippy + all
+ * crate/lib tests). Every step runs exactly once; failures do not stop the
+ * sweep — the summary lists all of them, so a single pass over the gate gives
+ * the complete picture.
  *
  * The GUI/desktop layer is deliberately NOT here (it needs a display and a
  * Tauri window): use `npm run test:desktop`, which launches PHL against an
@@ -21,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 const steps = [
+  { name: 'version check', cmd: 'node', args: ['scripts/check-versions.mjs'] },
   { name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
   { name: 'bridge check', cmd: 'npm', args: ['run', 'bridge:check'] },
   { name: 'frontend tests', cmd: 'npm', args: ['test'] },

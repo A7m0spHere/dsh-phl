@@ -35,28 +35,14 @@ jobs:
 
       # The tag must name the version the app reports; a mismatched tag would
       # publish an installer whose about-dialog disagrees with its filename.
-      # The three version sources must also agree with each other, so a
-      # manually dispatched build cannot mix versions either.
-      - name: Verify versions (package.json · Cargo.toml · tauri.conf.json · tag)
-        shell: pwsh
-        run: |
-          $pkg = (Get-Content package.json | ConvertFrom-Json).version
-          $conf = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          $crate = (cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json).packages |
-            Where-Object { $_.name -eq "dsh-phl" } |
-            Select-Object -ExpandProperty version
-          if ($pkg -ne $conf -or $crate -ne $conf) {
-            Write-Error "version mismatch: package.json=$pkg Cargo.toml=$crate tauri.conf.json=$conf"
-            exit 1
-          }
-          if ($env:GITHUB_EVENT_NAME -eq "push") {
-            $expected = "v" + $conf
-            $actual = "${{ github.ref_name }}"
-            if ($actual -ne $expected) {
-              Write-Error "tag $actual does not match app version $expected"
-              exit 1
-            }
-          }
+      # The four version sources must also agree with each other, so a manually
+      # dispatched build cannot mix versions either. Same script as the gate:
+      # one definition of "consistent", checked before the build is paid for.
+      - name: Verify versions (package.json · Cargo.toml · tauri.conf.json · Cargo.lock · tag)
+        shell: bash
+        env:
+          PHL_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: node scripts/check-versions.mjs
 
       - run: npm test
         shell: bash

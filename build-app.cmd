@@ -4,7 +4,7 @@ rem  PHL - build the desktop application.
 rem
 rem  Output:
 rem    src-tauri\target\release\PHL.exe
-rem    src-tauri\target\release\bundle\nsis\PHL_0.1.0_x64-setup.exe
+rem    src-tauri\target\release\bundle\nsis\PHL_<version>_x64-setup.exe
 rem
 rem  ASCII only on purpose - see the note in run-dev.cmd.
 rem ---------------------------------------------------------------

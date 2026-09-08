@@ -25,6 +25,10 @@ jobs:
 
       - run: npm ci
 
+      # Cheap and decisive: a half-applied version bump must never reach a
+      # release, and this is the same script the release workflow runs.
+      - run: node scripts/check-versions.mjs
+
       - run: npm run typecheck
 
       - run: npm run bridge:check

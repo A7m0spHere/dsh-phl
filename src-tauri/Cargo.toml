@@ -1,6 +1,6 @@
 [package]
 name = "dsh-phl"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 description = "PHL — DSH Instance & Runtime Manager"
 authors = ["dsh-phl"]
 edition = "2021"

@@ -979,7 +979,7 @@ export function SettingsPage() {
                     DSH Instance &amp; Runtime Manager
                   </div>
                   <div className="num mt-1.5 flex items-center gap-2 text-sm text-ink-faint">
-                    <span>0.1.0</span>
+                    <span>{__PHL_VERSION__}</span>
                     <span className="text-ink-faint/50">·</span>
                     <span>核心链路已真实接入（含启动）</span>
                   </div>

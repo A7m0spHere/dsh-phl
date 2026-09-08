@@ -33,8 +33,42 @@ const CLOSE_REQUESTED: &str = "phl://close-requested";
 /// The frontend calls this once React has mounted and the theme is applied.
 #[tauri::command]
 fn app_ready(window: tauri::Window) {
+    if let Some(main) = window.get_webview_window("main") {
+        reveal(&main);
+    }
+}
+
+/// Make the window actually visible *and reachable*: `show()` alone does not
+/// undo a minimized or off-screen placement, and both have been observed in
+/// dev relaunches — the app is then fully alive behind a window parked at
+/// (-32000,-32000), indistinguishable from "it never opened". Un-minimize,
+/// show, focus, and if the restored frame lies outside every monitor, pull it
+/// back to the primary display. This is the "never invisible" promise from
+/// AGENTS.md applied to placement, not just visibility.
+fn reveal(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+        let on_any = window
+            .available_monitors()
+            .map(|mons| {
+                mons.iter().any(|m| {
+                    let mp = m.position();
+                    let ms = m.size();
+                    // The window's centre must fall inside some monitor's
+                    // rect; anything else and the title bar is unreachable.
+                    pos.x + size.width as i32 / 2 >= mp.x
+                        && pos.x < mp.x + ms.width as i32
+                        && pos.y + size.height as i32 / 2 >= mp.y
+                        && pos.y < mp.y + ms.height as i32
+                })
+            })
+            .unwrap_or(true);
+        if !on_any {
+            let _ = window.center();
+        }
+    }
 }
 
 /// Called by the frontend after the user confirms the exit dialog.
@@ -262,9 +296,12 @@ pub fn run() {
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(4));
                 if let Some(window) = handle.get_webview_window("main") {
-                    if !window.is_visible().unwrap_or(true) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                    // Either never shown (frontend crash) or shown-but-parked:
+                    // a minimized/off-screen window is just as unreachable.
+                    let hidden = !window.is_visible().unwrap_or(true);
+                    let parked = window.is_minimized().unwrap_or(false);
+                    if hidden || parked {
+                        reveal(&window);
                     }
                 }
             });
