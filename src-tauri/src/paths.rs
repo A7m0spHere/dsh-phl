@@ -116,7 +116,27 @@ pub struct PhlState {
 impl PhlState {
     /// Loads the state at app start. Never fails: an unreadable pointer just
     /// means the default root is used until the handshake runs.
+    ///
+    /// `PHL_ROOT` wins over everything, for isolated runs (acceptance
+    /// scripts, desktop smoke, CI): the root comes from the environment, the
+    /// pointer file is never read — and with no pointer, nothing the session
+    /// persists (root choice, processes.json, migration journals) can touch
+    /// the real user's state. An invalid value aborts loudly instead of
+    /// silently falling back onto the default root.
     pub fn load() -> Self {
+        if let Some(raw) = std::env::var_os("PHL_ROOT") {
+            let text = raw.to_string_lossy().into_owned();
+            match validate_root(&text) {
+                Ok(root) => {
+                    return Self {
+                        root: RwLock::new(root),
+                        pointer: None,
+                        provisional: AtomicBool::new(false),
+                    }
+                }
+                Err(e) => panic!("PHL_ROOT 无效: {e}"),
+            }
+        }
         Self::with_pointer(dirs::config_dir().map(|d| d.join("PHL").join("root.json")))
     }
 
@@ -387,6 +407,30 @@ mod tests {
         assert_eq!(state.root(), default_root(), "root unchanged after failure");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phl_root_env_overrides_and_persists_nothing() {
+        // The alpha/desktop smoke contract: PHL_ROOT relocates the whole
+        // session into a scratch root, and because the pointer is gone, no
+        // handshake or root change can write back to the real config dir.
+        // Single env-touching test on purpose: process env is shared state.
+        let dir = temp_root("phl-root-env");
+        std::env::set_var("PHL_ROOT", &dir);
+        let state = PhlState::load();
+        assert_eq!(state.root(), dir, "env root wins");
+        assert!(state.pointer.is_none());
+        assert!(
+            state.sibling_file("processes.json").is_none(),
+            "no pointer → run-state files cannot land next to the real one"
+        );
+        let adopted = state.adopt(Some("C:\\should-not-persist")).unwrap();
+        assert_eq!(
+            adopted, dir,
+            "provisional adoption cannot re-point an env root"
+        );
+        std::env::remove_var("PHL_ROOT");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(windows)]

@@ -114,6 +114,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const toggle = useInstanceStore((s) => s.toggle)
   const launch = useInstanceStore((s) => s.launch)
   const dismissError = useInstanceStore((s) => s.dismissError)
+  const setFocus = useInstanceStore((s) => s.setFocus)
   const update = useInstanceStore((s) => s.updateInstance)
   const restoreSnapshot = useInstanceStore((s) => s.restoreSnapshot)
   const deleteSnapshot = useInstanceStore((s) => s.deleteSnapshot)
@@ -127,6 +128,12 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const { t, stagger, riseItem } = useMotion()
   const actions = useInstanceActions(instance)
   const uptime = useUptime(state.status === 'running' ? state.startedAt : undefined)
+
+  // Viewing an instance *is* aiming the launcher at it: the dock below the
+  // list page and the cards' focus ring always agree with this route.
+  useEffect(() => {
+    setFocus(id)
+  }, [id, setFocus])
 
   // History-conversation count is read from disk, not stored on the record —
   // it changes as the user talks to DSH. `null` = measuring, and a failure
@@ -271,6 +278,13 @@ export function InstanceDetailPage({ id }: { id: string }) {
             <div className="flex items-center gap-2.5">
               <span className="truncate">{instance.name}</span>
               <StatusPill status={status} startedAt={state.startedAt} />
+              {state.lastExit && (
+                <Tooltip
+                  content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
+                >
+                  <Badge tone="danger">上次退出 {state.lastExit.code ?? '?'}</Badge>
+                </Tooltip>
+              )}
               {instance?.managementMode === 'external' && (
                 <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。">
                   <Badge tone="warn">原地接入</Badge>

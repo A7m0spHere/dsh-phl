@@ -35,13 +35,19 @@ pub struct PackBuilder {
     integrity: BTreeMap<String, String>,
 }
 
-/// What a whole-tree add did: how many files went in, and which archive paths
-/// were withheld because their names carry secrets (§12). The withheld list is
-/// archive-relative (forward slashes) so the host can report it verbatim.
+/// What a whole-tree add did: how many files went in, which archive paths
+/// were withheld because their names carry secrets (§12), and which links
+/// were skipped. The withheld list is archive-relative (forward slashes) so
+/// the host can report it verbatim; the skipped-links list exists for the
+/// same reason — a pack is a data container and never carries a link
+/// (machine-local absolute paths have no meaning at the far end), but
+/// "silently excluded ~N entries" is exactly the kind of thing the user is
+/// owed a line about rather than discovering as a missing file later.
 #[derive(Debug, Default)]
 pub struct TreeAdd {
     pub added: usize,
     pub withheld_secrets: Vec<String>,
+    pub skipped_links: Vec<String>,
 }
 
 /// Filename-level secret detection for tree packing (development spec §12).
@@ -194,6 +200,7 @@ impl PackBuilder {
     ) -> Result<TreeAdd, String> {
         let mut added = 0;
         let mut secrets: Vec<String> = Vec::new();
+        let mut links: Vec<String> = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         let prefix = archive_prefix.trim_end_matches('/');
         while let Some(current) = stack.pop() {
@@ -204,16 +211,26 @@ impl PackBuilder {
             {
                 ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
                 let path = entry.path();
-                let meta = entry
-                    .metadata()
-                    .map_err(|e| format!("读取属性失败 {path:?}: {e}"))?;
                 if path
                     .symlink_metadata()
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
                 {
+                    // Skipped by design (a pack carries bytes, not machine
+                    // paths) but reported: silently dropping entries from a
+                    // distribution artifact is how "works on my machine" is
+                    // born. The caller decides whether the user needs a word.
+                    if let Ok(rel) = path.strip_prefix(dir) {
+                        links.push(format!(
+                            "{prefix}/{}",
+                            rel.to_string_lossy().replace('\\', "/")
+                        ));
+                    }
                     continue;
                 }
+                let meta = entry
+                    .metadata()
+                    .map_err(|e| format!("读取属性失败 {path:?}: {e}"))?;
                 if meta.is_dir() {
                     stack.push(path);
                     continue;
@@ -235,6 +252,7 @@ impl PackBuilder {
         Ok(TreeAdd {
             added,
             withheld_secrets: secrets,
+            skipped_links: links,
         })
     }
 
@@ -277,11 +295,13 @@ impl PackBuilder {
 /// per-tree add does — a pack is a data container — and withholding
 /// secret-bearing filenames into `withheld` (the same §12 hygiene
 /// `add_tree` applies, so CLI-built packs carry no `.env`/keys either).
+/// Skipped links are reported into `links` for the caller's warning surface.
 fn collect_tree_files(
     dir: &Path,
     prefix: &str,
     out: &mut Vec<(String, PathBuf)>,
     withheld: &mut Vec<String>,
+    links: &mut Vec<String>,
     cancel: &impl Fn() -> bool,
 ) -> Result<(), PackError> {
     ensure_not_cancelled(cancel)?;
@@ -298,6 +318,12 @@ fn collect_tree_files(
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            links.push(if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            });
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -307,7 +333,7 @@ fn collect_tree_files(
             } else {
                 format!("{prefix}/{name}")
             };
-            collect_tree_files(&path, &next, out, withheld, cancel)?;
+            collect_tree_files(&path, &next, out, withheld, links, cancel)?;
         } else {
             if is_secret_entry_name(&name) {
                 let rel = if prefix.is_empty() {
@@ -343,18 +369,21 @@ fn collect_tree_files(
 /// a `.env`/`id_rsa`/`token.json` in the *staging* directory is withheld from
 /// the archive and reported through `withheld_secrets` so the caller can warn
 /// the user "staging contained secret-shaped files; they were not packed".
+/// Links are likewise never packed and surface through `skipped_links`.
 pub fn build_pack_from_dir(
     src_dir: &Path,
     out: &Path,
     withheld_secrets: &mut Vec<String>,
+    skipped_links: &mut Vec<String>,
 ) -> Result<ValidatedPack, PackError> {
-    build_pack_from_dir_with_cancel(src_dir, out, withheld_secrets, &|| false)
+    build_pack_from_dir_with_cancel(src_dir, out, withheld_secrets, skipped_links, &|| false)
 }
 
 pub fn build_pack_from_dir_with_cancel<F: Fn() -> bool>(
     src_dir: &Path,
     out: &Path,
     withheld_secrets: &mut Vec<String>,
+    skipped_links: &mut Vec<String>,
     cancel: &F,
 ) -> Result<ValidatedPack, PackError> {
     ensure_not_cancelled(cancel)?;
@@ -366,7 +395,14 @@ pub fn build_pack_from_dir_with_cancel<F: Fn() -> bool>(
     crate::validate_manifest_schema(&manifest)?;
 
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_tree_files(src_dir, "", &mut files, withheld_secrets, cancel)?;
+    collect_tree_files(
+        src_dir,
+        "",
+        &mut files,
+        withheld_secrets,
+        skipped_links,
+        cancel,
+    )?;
     files.retain(|(rel, _)| rel != MANIFEST_NAME);
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -532,8 +568,9 @@ mod tests {
 
         let out = dir.join("made.phlpack");
         let mut withheld = Vec::new();
-        let pack =
-            build_pack_from_dir(&src, &out, &mut withheld).expect("layout builds a valid pack");
+        let mut links = Vec::new();
+        let pack = build_pack_from_dir(&src, &out, &mut withheld, &mut links)
+            .expect("layout builds a valid pack");
         assert!(withheld.is_empty(), "clean layout withholds nothing");
         assert_eq!(pack.embedded_plugins, vec!["mine".to_string()]);
         assert!(pack.has_sessions);
@@ -552,8 +589,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("embedded/plugins/mine")).unwrap();
         let mut withheld = Vec::new();
-        let err = build_pack_from_dir(&dir, &dir.join("x.phlpack"), &mut withheld).unwrap_err();
+        let err = build_pack_from_dir(&dir, &dir.join("x.phlpack"), &mut withheld, &mut Vec::new())
+            .unwrap_err();
         assert_eq!(err, PackError::MissingManifest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory link of the shape npm lays out: a junction on Windows
+    /// (no privilege needed), a plain symlink elsewhere.
+    fn dir_link(target: &std::path::Path, link: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "mklink failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn build_from_dir_never_packs_links_but_reports_them() {
+        // A pack is a data container: machine-local link paths are meaningless
+        // at the far end, so they are skipped — but an *unannounced* skip is
+        // how half-installed plugins are born, so the walker lists them.
+        let dir = std::env::temp_dir().join(format!("phl-packlinks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("layout");
+        std::fs::create_dir_all(src.join("embedded/plugins/mine")).unwrap();
+        std::fs::write(
+            src.join("embedded/plugins/mine/package.json"),
+            b"{\"name\":\"mine\"}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("shared-dep")).unwrap();
+        std::fs::write(src.join("shared-dep/index.js"), b"shared").unwrap();
+        dir_link(
+            &src.join("shared-dep"),
+            &src.join("embedded")
+                .join("plugins")
+                .join("mine")
+                .join("node_modules-linked"),
+        );
+        std::fs::write(
+            src.join("phlpack.json"),
+            serde_json::to_vec(&json!({
+                "formatVersion": 1,
+                "pack": {"id":"lnk","name":"Lnk","version":"1.0.0"},
+                "dsh": {"version":"0.1.2"},
+                "runtime": {"kind":"node","nodeVersion":"22"},
+                "plugins": [{"id":"mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}],
+                "content": {"sessionsIncluded": false, "secretsExcluded": true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut withheld = Vec::new();
+        let mut links = Vec::new();
+        let pack = build_pack_from_dir(&src, &dir.join("l.phlpack"), &mut withheld, &mut links)
+            .expect("links do not fail the build");
+        assert_eq!(
+            links,
+            vec!["embedded/plugins/mine/node_modules-linked".to_string()],
+            "the skipped link is named exactly"
+        );
+        for entry in &pack.entries {
+            assert!(
+                !entry.contains("node_modules-linked"),
+                "the link's name never rides into the archive: {entry}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -606,8 +720,9 @@ mod tests {
         .unwrap();
 
         let mut withheld = Vec::new();
-        let pack = build_pack_from_dir(&src, &dir.join("s.phlpack"), &mut withheld)
-            .expect("the pack still builds");
+        let pack =
+            build_pack_from_dir(&src, &dir.join("s.phlpack"), &mut withheld, &mut Vec::new())
+                .expect("the pack still builds");
         assert!(withheld.contains(&"embedded/plugins/mine/.env".to_string()));
         assert!(withheld.contains(&"sessions/id_rsa".to_string()));
         assert!(

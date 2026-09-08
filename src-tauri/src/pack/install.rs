@@ -404,7 +404,18 @@ async fn install_inner(
                     let credential_envs = credential_env_names(root).await;
                     let (env, creds) =
                         partition_imported_env(bundle.instance.env.clone(), &credential_envs);
-                    credential_names = creds;
+                    // The pack's own credential ledger is authoritative: an
+                    // install root without a global config cannot recognize
+                    // any name locally, and reporting [] here would silently
+                    // hide the "reconfigure these keys" prompt the frontend
+                    // builds from `credential_names`. Union, then dedupe.
+                    let mut names = bundle.credentials.clone();
+                    for c in creds {
+                        if !names.contains(&c) {
+                            names.push(c);
+                        }
+                    }
+                    credential_names = names;
                     manifest.env = env;
                     manifest.args = bundle.instance.args.clone();
                 }

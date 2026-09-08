@@ -636,6 +636,10 @@ async fn run_launch(
         if let Some(registry) = watcher_app.try_state::<Registry>() {
             registry.forget_pid(&watcher_id, pid);
         }
+        // A dead instance must not keep its embedded WebUI window open:
+        // closing the window never stops the process, but the process
+        // exiting always closes the window (see `crate::webui`).
+        crate::webui::close_for_instance(&watcher_app, &watcher_id);
         let code = status.ok().and_then(|s| s.code());
         let _ = watcher_app.emit(
             INSTANCE_EXITED,
@@ -904,5 +908,33 @@ mod tests {
         assert!(!dir.join("launch-2026-09-06T00-00-00.log").exists());
         assert!(dir.join("other.log").exists(), "only launch-*.log is swept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_pid_never_removes_the_fresh_process_entry() {
+        // The relaunch race, pinned: stop + instant re-launch puts a new pid
+        // in the map; the old watcher's delayed removal must not forget it
+        // (that would orphan the live process from PHL's bookkeeping).
+        let processes = Processes::default();
+        processes.set(
+            "inst",
+            ProcessEntry {
+                pid: 111,
+                port: 3080,
+            },
+        );
+        processes.remove_if_pid("inst", 999); // unrelated stale pid
+        assert_eq!(
+            processes.entry_of("inst").unwrap().pid,
+            111,
+            "stale removal refused"
+        );
+        processes.remove_if_pid("inst", 111);
+        assert!(
+            processes.entry_of("inst").is_none(),
+            "the owning pid still removes"
+        );
+        // Removal after disappearance is inert, not a panic.
+        processes.remove_if_pid("inst", 111);
     }
 }

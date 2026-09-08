@@ -19,6 +19,10 @@ mod sessions;
 mod storage;
 mod verify;
 mod versions;
+mod webui;
+
+#[cfg(test)]
+mod ipc_contract;
 
 /// Emitted when the OS (or the custom title bar) asks the window to close.
 /// The frontend answers with its own confirmation dialog instead of letting
@@ -118,29 +122,17 @@ fn reveal_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("model-metadata")
-                .invoke_handler(tauri::generate_handler![
-                    api_config::catalog::enrich_model_metadata
-                ])
-                .build(),
-        )
-        .plugin(tauri_plugin_dialog::init())
-        .manage(versions::Transfers::default())
-        .manage(resources::ResourceLocks::default())
-        .manage(resources::Tasks::default())
-        .manage(launch::Launches::default())
-        .manage(launch::Processes::default())
-        .manage(launch::registry::Registry::default())
-        .manage(paths::PhlState::load())
-        .manage(credentials::Creds::platform_default())
-        .invoke_handler(tauri::generate_handler![
-            app_ready,
+/// Every command that does not need the concrete Wry runtime, listed once.
+///
+/// `generate_handler!` is a proc macro and cannot expand a nested
+/// `macro_rules!` itself, so this wrapper inlines the list for both callers:
+/// `run()` appends the Wry-bound commands (window and app handles), while
+/// `build_app` registers exactly this set so `tests/ipc_contract.rs` drives the
+/// same wiring the desktop build uses.
+macro_rules! phl_command_handler {
+    ($($extra:path),* $(,)?) => {
+        tauri::generate_handler![
             resources::list_tasks,
-            exit_app,
             open_external,
             reveal_path,
             paths::init_phl_root,
@@ -192,7 +184,6 @@ pub fn run() {
             runtimes::download_node_runtime,
             runtimes::remove_runtime_dir,
             runtimes::runtimes_disk_usage,
-            launch::launch_instance,
             launch::stop_instance,
             launch::cancel_launch,
             launch::adopt_processes,
@@ -212,6 +203,50 @@ pub fn run() {
             verify::verify_instance,
             diagnostics::run_diagnostics,
             diagnostics::clear_download_cache,
+            $($extra),*
+        ]
+    };
+}
+
+/// Plugins and managed state — everything a command needs to exist, for both
+/// the desktop entry point and the contract tests.
+fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
+        .plugin(
+            tauri::plugin::Builder::<R, ()>::new("model-metadata")
+                .invoke_handler(tauri::generate_handler![
+                    api_config::catalog::enrich_model_metadata
+                ])
+                .build(),
+        )
+        .plugin(tauri_plugin_dialog::init())
+        .manage(versions::Transfers::default())
+        .manage(resources::ResourceLocks::default())
+        .manage(resources::Tasks::default())
+        .manage(launch::Launches::default())
+        .manage(launch::Processes::default())
+        .manage(launch::registry::Registry::default())
+        .manage(paths::PhlState::load())
+        .manage(credentials::Creds::platform_default())
+}
+
+/// The runtime-agnostic command surface, for `tests/ipc_contract.rs`.
+pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    configure(builder).invoke_handler(phl_command_handler!())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    configure(tauri::Builder::default())
+        .invoke_handler(phl_command_handler![
+            // Wry-bound: these take a `Window`/`AppHandle` of the concrete
+            // runtime, so they cannot join the shared list.
+            app_ready,
+            exit_app,
+            launch::launch_instance,
+            webui::open_or_focus_webui,
+            webui::close_webui_window,
+            webui::list_open_webui_windows,
         ])
         .setup(|app| {
             // Bind the process registry before any command can see it: the
@@ -239,9 +274,15 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.emit(CLOSE_REQUESTED, ());
+            // The close-confirm flow is the *app's* lifecycle, owned by the
+            // main window. Embedded WebUI windows (`webui` module) close
+            // normally — closing one must never prompt "quit PHL?" — and the
+            // instance keeps running behind it by design.
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.emit(CLOSE_REQUESTED, ());
+                }
             }
         })
         .run(tauri::generate_context!())

@@ -127,3 +127,30 @@ export async function onInstanceExited(
     (event) => handler(event.payload),
   )
 }
+
+/* ------------------------------ embedded WebUI ------------------------------ */
+
+/**
+ * Open (or focus) the embedded WebUI window for one instance. Windows are
+ * one-per-instance and labelled by id, so a second call on a running instance
+ * focuses the existing window instead of spawning another.
+ *
+ * Closing the window never stops the instance — but the process exiting
+ * always closes the window (Rust: `webui` module + the launch watcher).
+ *
+ * Fallbacks are part of the contract: the browser build has no window API so
+ * it opens a new tab; on desktop, if the backend refuses the request (a
+ * rejected non-loopback URL, a window-creation failure) we open the system
+ * browser instead, so "打开 WebUI" always reaches a live DSH.
+ */
+export async function openDshWebUi(instanceId: string, url: string, title?: string): Promise<void> {
+  if (!isDesktop) {
+    window.open(url, '_blank', 'noopener')
+    return
+  }
+  try {
+    await invoke('open_or_focus_webui', { instanceId, url, title: title ?? null })
+  } catch {
+    await invoke('open_external', { url })
+  }
+}

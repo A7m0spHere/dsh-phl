@@ -280,6 +280,151 @@
 - [ ] **R2 GitHub Windows CI / Release**：先收口本地与远端分支，再触发 Windows runner，确认三 crate
       测试与短路径环境通过；之后做受控 tag 演练。未获明确授权前不提交、不推送、不创建 PR/tag。
 
+## 16. 统一启动焦点与内嵌 WebUI 窗口（2026-09-08）
+
+前置：`npm run app:dev` 真实桌面模式；至少两个已创建实例；真实 DSH 数据目录可启动。
+
+### 焦点模型（launcher 点击语义）
+
+- [x] 单击实例卡片 = 设为启动目标：卡片出现 accent 焦点环 + 色条点亮 + 「启动/详情」常驻；**不**跳转详情
+- [x] dock target 与卡片焦点始终一致；启动/详情页切换实例时 dock 跟随（`InstanceDetailPage` 进入即 `setFocus`）
+- [x] 双击卡片 = 启动（启动中再双击 = 停止；失败态双击 = 清错重试）
+- [x] 卡片 hover/焦点态出现「详情」按钮（↗）进入详情页
+- [x] 运行中的实例在列表自动置顶（原有排序规则保持）
+
+### 内嵌 WebUI 窗口（`src-tauri/src/webui.rs`）
+
+- [x] 启动成功自动打开内嵌窗口，直达带 token 的 `dsh web` URL（非登录页/白屏）
+- [x] 关闭 WebUI 窗口**不停止实例**：dock 仍显示运行中，「打开 WebUI」重建同 label 窗口
+- [x] 窗口已开时再点「打开 WebUI」= 仅聚焦，不新建（按 label 幂等）
+- [x] 双实例双窗口并存互不串（11/22 各开一窗，标题为实例名）
+- [x] 停止实例 → 对应窗口自动关闭，其他实例窗口不受影响（watcher 联动）
+- [x] 非 loopback / 带凭据 / 非法 scheme 的 URL 被 `ensure_loopback` 拒绝（单测 ×3）
+- [x] WebUI 窗口 × 正常关闭，不触发 PHL 退出确认（`CloseRequested` 仅 main 拦截）
+- [ ] 进程崩溃（外部 kill node）→ 窗口随 watcher 关闭 + 崩溃 toast（机制同 stop 路径，未单独真机复验）
+- [ ] 浏览器模式（`npm run dev`）回归：无内嵌窗口能力，「打开 WebUI」降级新标签页，不弹错误
+
+### 回归结果登记（2026-09-08 真机）
+
+- Windows 11 / dev 构建 / 实例 11（0.1.2-rc.1）+ 22（0.1.2-alpha.5），焦点、双击启动、自动开窗、
+  关窗存活性、重建、停止联动关窗、双窗口隔离全部通过；`cargo test --lib webui` 3/3、vitest 75/75、typecheck 通过。
+- **实现约束（tauri#3597）**：Windows 上创建 webview 窗口的 command 必须是 `async`——
+  同步 command 会与事件循环死锁，表现为「窗口出现但永久白屏、devtools 也打不开」。新增窗口类 command 时注意。
+
+## 17. Alpha 自动验收体系（2026-09-08）
+
+### 命令
+
+- `npm run test:alpha` — 确定性 gate：typecheck · bridge:check · vitest · cargo fmt/clippy(-D)/workspace tests。
+  一次跑完全部步骤并汇总 PASS/FAIL（fail 不中断 sweep）。CI 可完全复用。
+- `npm run test:desktop` — GUI 层：以 `PHL_ROOT=<temp>/phl-alpha-desktop-<ts>` 隔离 root 启动 `tauri dev`，
+  场景清单见 `scripts/alpha-desktop-scenarios.json`，结果用 `scripts/alpha-desktop-record.mjs` 落
+  report JSON（随 root 一起生成；KEEP 用 `PHL_ALPHA_KEEP=1`）。**真实 `root.json` 指针全程不被触碰**
+  （paths.rs：`PHL_ROOT` 优先且无 pointer → 一切持久化文件都进不了 `%APPDATA%\PHL`）。
+
+### 层一新增链测试（本次补齐的缺口）
+
+| 链 | 测试 | 位置 |
+|---|---|---|
+| Root 隔离 | `phl_root_env_overrides_and_persists_nothing` | `src-tauri/src/paths.rs` |
+| A 克隆字节不变量 | `clone_diverges_from_source_at_the_byte_level`（tree fingerprint 全链） | `instances/mod.rs` |
+| B 运行守卫 | `snapshot_operations_refuse_a_running_instance`（三入口 + 非粘滞） | `instances/mod.rs` |
+| C external 写保护 | `external_instances_survive_every_gated_write_attempt_untouched`（home+instance 双字节一致） | `instances/mod.rs` |
+| D 插件 id 白名单 | `registry_ids_are_whitelisted_not_normalized` | `plugins/resolve.rs` |
+| E pack 全链 e2e | `export_scan_install_roundtrip_keeps_secrets_out_and_residue_clean`（整包解包逐文件扫 secret 值 + B root 安装 + 半包损坏零残留） | `pack/install/tests.rs` |
+| G 启动 drift | `launch_observes_managed_drift_without_touching_settings`（三态：无 drift/drift/短路） | `api_config/tests.rs` |
+| H 陈旧 watcher | `a_stale_pid_never_removes_the_fresh_process_entry` | `launch/mod.rs` |
+
+### 本次修复（发现→回归测试→最小修复→重验）
+
+1. **pack 安装凭据台账丢失**（`pack/install.rs`）：install 只按目标 root 的全局 config 识别凭据名，
+   新机安装报 `credential_names: []`，前端「需重新配置密钥」提示消失。修复：union pack 自带
+   `bundle.credentials`。回归 = E e2e 断言。
+2. **崩溃零留痕**（`instanceStore` + `InstanceCard` + `InstanceDetailPage`）：ready 后进程退出只有一条
+   会过期的 toast，UI 无声回到「已停止」。修复：runtime state 记 `lastExit{code,at,ranFor}`，卡片与
+   详情页常驻「上次退出 N」badge，下次启动自动清除。回归 = vitest ×2；真机（desktop alpha pass）验证
+   badge 在 fs-ext 崩溃后正确出现。
+3. **克隆失败全静默**（`instanceStore.cloneInstance`）：后端拒绝时错误以 unhandled rejection 蒸发，
+   列表数字不变、无任何提示（桌面 alpha pass 实锤）。修复：catch + error toast 透传后端原因。
+   回归 = vitest clone-failure 用例。
+
+### 开放缺陷（需产品决策，未在本次擅自改）
+
+- ~~**#4 符号链接结构性缺口**~~ **已修复（2026-09-08 收口轮）**：
+  - 调查（实测）：链接由版本安装的 npm/pnpm 布局产生（PHL 自身从不创建）；Windows 上是
+    **Junction**、绝对路径、指向 `<root>/versions/<v>/node_modules/*`（真实实例 966/483 条）；
+    Rust 对 junction 的 `is_symlink()` 三入口均为 true，检测无漏。
+  - 修复：`instances/copy.rs` 引入 `LinkPolicy`（`Preserve` / `Rewrite { new_root, match_on }`），
+    managed 判据 = 目标落在 `<root>/versions/` 内（copy 路径 canonicalize，迁移撤销读原始文本）；
+    逃逸、跨实例、断链一律拒绝。clone / snapshot create / restore / relocation 四个调用点分别接
+    Preserve·Rewrite。同盘迁移 rename 快速路径原样平移会留下悬空绝对链接——补
+    `repoint_managed_links` 翻译 + 失败回滚（本轮 e2e 新发现的第二个真实缺陷，一并修复）。
+  - 整合包 / Bundle：pack 是字节容器，链接一律不打包且现在**可见**（`TreeAdd.skipped_links`
+    → 导出报告 `linksSkipped` → 导出完成 toast；CLI build 同样打印）。managed 依赖链接由目标机
+    安装时重建，语义正确。
+  - 回归：copy.rs ×6（managed 重建 + 断链消息 / 逃逸拒绝 / rewrite 翻译 / junction 树整体复制 /
+    拒绝时零改写 / 原始文本匹配翻译悬空目标）、instances ×2（真实 junction 走
+    run_clone + snapshot create + restore 全链；删除不穿透链接）、
+    storage ×3（同盘迁移重写 / 逃逸链接拒绝零改写 / 撤销把链接译回源根）、pack-core ×1（不打包且报告）。
+- **#5 名称长度不拦截（低，观察项）**：创建/克隆的实例名超 64 字符 UI 无提示（id slug 已安全截断，
+  无路径风险）。行为安全，但「超长名称」的用户预期是可见拒绝还是静默截断，需要定义。
+
+### 收口轮（同日第二阶段）：#4 落地 + 新发现
+
+1. **#4 修复落地**：`LinkPolicy`（Preserve / Rewrite）接管 copy engine；
+   clone/snapshot/restore 用 Preserve，relocation 用 Rewrite；`dir_size` 对链接计零字节
+   （快照/克隆不再复制共享版本树，staging 校验两侧口径一致）。
+2. **新缺陷（同轮修复）——同盘迁移 rename 绕过链接策略**：rename 原样平移绝对 junction，
+   源根删除后全部悬空。新增 `repoint_managed_links`（迁移后遍历翻译，非 managed 链接
+   拒绝并把 rename 回滚、journal 置回 Pending）；e2e ×2（重写成功 + 逃逸拒绝零残留）。
+3. **删除爆炸半径已验证**：带 junction 的实例删除不会跟进共享 `versions/`
+   （`deleting_an_instance_never_reaches_through_its_links`）——MSYS `rm -rf` 会跟进，
+   人工清理测试目录必须用 `rd /s /q`。
+4. **pack 链接可见性**：`TreeAdd.skipped_links` → 导出报告 `linksSkipped` → 导出完成
+   info toast；CLI build 打印跳过清单。整合包从不携带链接（目标机安装时重建）。
+5. **观察（P2，未改）**：`recreate_link` 每个 junction 起一次 `cmd /C mklink /J`，
+   497 链接的快照/克隆/恢复耗时数十秒；批量或原生 API 可优化。
+6. **验收发现的第三个真实缺陷（本轮修复）——repoint 不是原子的**：`repoint_managed_links`
+   边遍历边改写，遇到逃逸链接返回 Err 时，**已改写的链接不回滚**，而 `storage.rs` 的失败回滚
+   只把目录 rename 回去 → 源树恢复后链接指向 `to/versions`，而 `versions` 按 `DATA_DIRS` 顺序
+   后搬、此刻不存在 → 悬空环境。修复：两阶段（先全量分类，全部通过再改）+ 阶段二自带还原；
+   分类统一走 `LinkPolicy::Rewrite`（此前 repoint 另写了一份判据，与 `action` 的 canonical 语义
+   不一致，正是 e2e 失败的原因）。回归：`refusing_a_link_leaves_every_earlier_link_untouched`
+   （copy 层）+ `a_same_drive_move_refuses_escaping_links_and_leaves_the_source_whole` 加 managed 链接
+   （迁移层，改前必失败）。
+7. **验收发现的第四个缺陷（本轮修复）——撤销不翻译链接**：`undo_migration` 只把目录 rename 回源根，
+   链接仍指向 `to/versions`（可能从未存在）。修复：撤销后按 `LinkMatch::Raw` 译回源根
+   （原始文本匹配，因为 `to/versions` 不存在、canonicalize 无法分类）；失败则把目录放回目标根并报错。
+   回归：`raw_matching_translates_a_link_whose_target_does_not_exist_yet`（copy 层）+
+   `undo_translates_managed_links_back_to_the_source_root`（storage 层）。
+
+### 手测覆盖映射（§3/§7/§11/§13 压缩结果）
+
+| 原手测项 | 自动覆盖（deterministic） | Desktop 覆盖 | 仍需人工 | 最近结果 |
+|---|---|---|---|---|
+| §3 创建实例 | Rust `instance_lifecycle_on_disk` 等 | 本轮 GUI-1 | 否 | PASS |
+| §3 克隆（含隔离） | `clone_diverges_from_source_at_the_byte_level`、`clone_and_snapshot_survive_a_managed_node_modules_link` | 本轮 GUI-2（真实 497 junction） | 否 | PASS |
+| §5 启动/停止/接管 | launch/registry 12+7 tests + webui 3 | 上一轮 §16 + 本轮崩溃链 | 冷启动安装包（§15 清单保留） | PASS |
+| §6 Bundle | 8 项 roundtrip tests | — | 否 | PASS |
+| §7 快照/回滚 | `snapshot_create_restore_roundtrip`、running 守卫、链接回环 | 本轮 GUI-2 create→rollback | 否 | PASS |
+| §11 外部实例写保护 | `external_instances_survive_every_gated_write_attempt_untouched`（字节级） | 否（需真实外部 home 语义） | 接入向导体验项 | PASS（自动化） |
+| §13 Pack 导出/安装/secret | pack-core 32 + desktop `export_scan_install_roundtrip…`（含整包扫描） | 上轮冒烟 + 链接可见性本轮新增 | 否 | PASS |
+| §16 焦点/WebUI 窗口 | vitest 77 + webui tests | 上一轮 §16 全项 | 否 | PASS |
+| §15 R1/R3/R7 冷启动/加载 | 无法自动化（真机安装包 + 真实插件加载） | 部分 | **是** | OPEN |
+
+### 桌面验收结果（2026-09-08 收口轮，Computer Use · 全新隔离 root）
+
+**8 PASS / 1 SKIP / 0 FAIL**（fresh report，`.scratch/alpha-20260908/fresh-report.json`）。
+SKIP：pack 导出 GUI 未驱动（层一 e2e 已全链覆盖，本轮聚焦 #4）。旧报告的 3 fail 对应项
+本轮全部转 PASS（崩溃留痕、克隆静默、符号链接阻断）。
+
+
+7 pass / 5 skip / 3 fail（3 个 fail 全部对应上面已修复或已登记的缺陷）。报告存档
+`.scratch/alpha-20260908/desktop-report.json`。要点：空名内联拒绝、创建→后台自动装版本→
+校验→事务提交全链正常、停止时 WebUI 菜单项正确禁用、AX 元素路径可后台驱动 Tauri 窗口。
+工具链注意：computer-use 对 React 受控输入框走 AX set_value 会假成功（fail-open receipt），
+需 event 策略键入——记录于 report TOOLING，属验收工具问题非产品问题。
+
 ## 已知的刻意外
 
 - Bundle 不携带插件**文件**（只带记录，重装走插件页）——设计如此

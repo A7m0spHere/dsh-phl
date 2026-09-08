@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "PHL 使用自绘标题栏，因此需要窗口拖拽与最小化 / 最大化 / 关闭的权限。",
-  "windows": ["main"],
+  "description": "PHL 使用自绘标题栏，因此需要窗口拖拽与最小化 / 最大化 / 关闭的权限。dsh-web-* 是内嵌 DSH WebUI 窗口：主窗口需要 show/focus/close/unminimize 来管理它们；这些窗口加载远程页面且无 remote 授权条目，因此没有 IPC 面。",
+  "windows": ["main", "dsh-web-*"],
   "permissions": [
     "core:default",
     "model-metadata:allow-enrich-model-metadata",
@@ -14,6 +14,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-unminimize",
     "core:window:allow-close",
     "dialog:allow-open",
     "dialog:allow-save"

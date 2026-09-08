@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::instances::{copy_tree_with_progress, dir_size, SkipRule};
+use crate::instances::{copy_tree_with_progress, dir_size, LinkMatch, LinkPolicy, SkipRule};
 use crate::paths::PhlState;
 use crate::versions::Transfers;
 
@@ -289,6 +289,20 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
                 tokio::fs::rename(&src, &back).await.map_err(|err| {
                     format!("无法把 {} 搬回 {}: {err}", src.display(), back.display())
                 })?;
+                // The forward pass re-pointed every managed link at `to`, so
+                // rolling the move back has to translate them again — the
+                // restored tree would otherwise reference a root that is being
+                // emptied. `Raw` matching, because `to/versions` may never have
+                // moved and therefore cannot be canonicalized.
+                if let Err(err) =
+                    crate::instances::repoint_managed_links(&back, &to, &from, LinkMatch::Raw)
+                {
+                    let _ = tokio::fs::rename(&back, &src).await;
+                    return Err(format!(
+                        "无法还原 {} 中的链接: {err}（该目录已放回目标根）",
+                        back.display()
+                    ));
+                }
             }
             returned.push(e.kind.clone());
             bytes += e.bytes;
@@ -527,6 +541,20 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         // `moving`, so an interrupt here is recovered the same way as a
         // half-finished copy.
         if tokio::fs::rename(&src, &dst).await.is_ok() {
+            // Rename preserves links verbatim — including absolute targets
+            // into the OLD root that the deletion step will erase. Re-point
+            // them before declaring the kind moved (and refuse + roll the
+            // rename back on anything the copy path would refuse).
+            if let Err(e) =
+                crate::instances::repoint_managed_links(&dst, &from, &to, LinkMatch::Canonical)
+            {
+                let _ = tokio::fs::rename(&dst, &src).await;
+                journal.set(kind, EntryState::Pending, 0);
+                if let Some(p) = journal_path {
+                    let _ = journal.save(p);
+                }
+                return Err(e);
+            }
             moved.push(kind.into());
             bytes_moved += bytes;
             journal.set(kind, EntryState::Moved, bytes);
@@ -557,6 +585,14 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             stage.clone(),
             Arc::clone(flag),
             SkipRule::Nothing,
+            // `versions/` moves with the root, so a link is re-pointed at the
+            // same relative location under the destination instead of at the
+            // old absolute prefix, which dangles once the source is deleted.
+            LinkPolicy::Rewrite {
+                new_root: to.clone(),
+                match_on: LinkMatch::Canonical,
+            },
+            from.clone(),
             &|p| {
                 on_progress(MoveProgress {
                     kind: kind.into(),
@@ -742,6 +778,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_migration_repoints_managed_links_at_the_new_root() {
+        // Defect #4's relocation half: instances move before versions, so the
+        // link must be *translated* to the new root — kept as a live link
+        // (not materialized gigabytes, not refused, and never left pointing
+        // at the old absolute prefix the deletion step is about to erase).
+        use crate::instances::copy::recreate_link;
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        let dep = from
+            .join("versions")
+            .join("v1")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join("index.js"), b"shared-module").unwrap();
+        let nm = from
+            .join("instances")
+            .join("a")
+            .join("dsh-home")
+            .join("profiles");
+        std::fs::create_dir_all(&nm).unwrap();
+        recreate_link(
+            &nm.join("node_modules"),
+            &from.join("versions").join("v1").join("node_modules"),
+            true,
+        )
+        .unwrap();
+        let summary = move_with_journal(&no_cancel(), &root.0.join(JOURNAL_NAME), &from, &to)
+            .await
+            .unwrap();
+        assert!(summary.moved.contains(&"instances".to_string()));
+
+        // The migrated link resolves through to the *migrated* content.
+        let migrated_link = to
+            .join("instances")
+            .join("a")
+            .join("dsh-home")
+            .join("profiles")
+            .join("node_modules");
+        assert!(
+            std::fs::symlink_metadata(&migrated_link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "the link survived as a link — nothing materialized"
+        );
+        assert_eq!(
+            std::fs::read(migrated_link.join("dep").join("index.js")).unwrap(),
+            b"shared-module",
+            "reads resolve through the translated link into the new versions/"
+        );
+        // The junction's raw target must name the NEW root's versions/ dir —
+        // exactly the translation repoint performs (not the old absolute path
+        // the rename carried along, which the deletion step would orphan).
+        let raw_target = crate::paths::strip_verbatim(&std::fs::read_link(&migrated_link).unwrap());
+        let expected = crate::paths::strip_verbatim(&std::fs::canonicalize(&to).unwrap())
+            .join("versions")
+            .join("v1")
+            .join("node_modules");
+        assert_eq!(
+            raw_target, expected,
+            "the link was translated to the new root"
+        );
+        assert!(
+            !from.join("instances").exists(),
+            "the source went as always"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_drive_move_refuses_escaping_links_and_leaves_the_source_whole() {
+        // The fast path must not be the soft spot: a link that the copy path
+        // would refuse (here, one into a non-versions directory) aborts the
+        // move with the source exactly where it started.
+        use crate::instances::copy::recreate_link;
+        let root = TestRoot::new();
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        let inst = from.join("instances").join("a");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::write(inst.join("file"), b"keep").unwrap();
+        // A managed link that classifies FIRST (name order), so the refusal
+        // below happens after it was already classified: a one-phase rewrite
+        // would have moved it into `to/versions`, which does not exist yet.
+        let shared = from.join("versions").join("v1").join("node_modules");
+        std::fs::create_dir_all(shared.join("dep")).unwrap();
+        std::fs::write(shared.join("dep").join("index.js"), b"shared-gold").unwrap();
+        recreate_link(&inst.join("a-deps"), &shared, true).unwrap();
+        let elsewhere = from.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        recreate_link(&inst.join("z-borrowed"), &elsewhere, true).unwrap();
+
+        let err = move_with_journal(&no_cancel(), &root.0.join(JOURNAL_NAME), &from, &to)
+            .await
+            .unwrap_err();
+        assert!(err.contains("受管版本之外"), "got: {err}");
+        // Rolled back: the source tree stands with its links, the destination
+        // holds nothing that would mislead the next run.
+        assert!(from.join("instances").join("a").join("file").exists());
+        assert!(
+            std::fs::symlink_metadata(from.join("instances").join("a").join("z-borrowed"))
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        );
+        assert_eq!(
+            crate::paths::strip_verbatim(&std::fs::read_link(inst.join("a-deps")).unwrap()),
+            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
+                .join("versions")
+                .join("v1")
+                .join("node_modules"),
+            "the already-classified managed link was NOT re-pointed by the aborted move"
+        );
+        assert_eq!(
+            std::fs::read(inst.join("a-deps").join("dep").join("index.js")).unwrap(),
+            b"shared-gold",
+            "and it still resolves"
+        );
+        assert!(!to.join("instances").exists(), "no stranded half-move");
+    }
+
+    #[tokio::test]
     async fn dotdot_alias_cannot_move_a_root_into_itself() {
         let root = TestRoot::new();
         let from = root.0.join("old");
@@ -905,6 +1062,74 @@ mod tests {
         assert_eq!(summary.moved, vec!["instances"]);
         assert!(from.join("instances/a.txt").exists(), "data walks back");
         assert!(!to.join("instances").exists());
+        assert!(read_journal(&journal).unwrap().is_none(), "journal cleared");
+    }
+
+    #[tokio::test]
+    async fn undo_translates_managed_links_back_to_the_source_root() {
+        // The forward pass re-points every managed link at `to`, so undoing the
+        // move has to translate them again. The state is fabricated rather than
+        // raced for: `instances` arrived and was re-pointed, `versions` never
+        // moved — so the link's target does not exist, and canonical matching
+        // cannot even read it (the `Raw` mode is what makes undo possible).
+        let root = TestRoot::new();
+        let journal = root.0.join(JOURNAL_NAME);
+        let from = root.0.join("old");
+        let to = root.0.join("new");
+        let dep = from
+            .join("versions")
+            .join("v1")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join("index.js"), b"shared-gold").unwrap();
+
+        // What the rename + repoint left behind in the destination root.
+        let migrated = to
+            .join("instances")
+            .join("a")
+            .join("dsh-home")
+            .join("profiles");
+        std::fs::create_dir_all(&migrated).unwrap();
+        crate::instances::copy::recreate_link(
+            &migrated.join("node_modules"),
+            &to.join("versions").join("v1").join("node_modules"),
+            true,
+        )
+        .unwrap();
+        assert!(
+            std::fs::metadata(to.join("versions")).is_err(),
+            "the new versions tree never arrived"
+        );
+
+        let mut open = MigrationJournal::fresh(&from, &to);
+        open.set("instances", EntryState::Moved, 0);
+        open.save(&journal).unwrap();
+
+        let summary = undo_migration(&journal, &read_journal(&journal).unwrap().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(summary.moved, vec!["instances"]);
+
+        let restored = from
+            .join("instances")
+            .join("a")
+            .join("dsh-home")
+            .join("profiles")
+            .join("node_modules");
+        assert_eq!(
+            crate::paths::strip_verbatim(&std::fs::read_link(&restored).unwrap()),
+            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
+                .join("versions")
+                .join("v1")
+                .join("node_modules"),
+            "the restored link points at the source root, not the emptied one"
+        );
+        assert_eq!(
+            std::fs::read(restored.join("dep").join("index.js")).unwrap(),
+            b"shared-gold",
+            "and it resolves to the real content again"
+        );
         assert!(read_journal(&journal).unwrap().is_none(), "journal cleared");
     }
 

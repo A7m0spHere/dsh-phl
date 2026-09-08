@@ -200,8 +200,10 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败: {e}"))?;
     }
     let mut withheld = Vec::new();
-    let validated = phl_pack_core::write::build_pack_from_dir(&src, &out, &mut withheld)
-        .map_err(|e| e.detail())?;
+    let mut skipped_links = Vec::new();
+    let validated =
+        phl_pack_core::write::build_pack_from_dir(&src, &out, &mut withheld, &mut skipped_links)
+            .map_err(|e| e.detail())?;
     println!(
         "已生成 {}: {} v{} · {} 个条目（已通过完整校验）",
         out.display(),
@@ -209,6 +211,15 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         validated.manifest.pack.version,
         validated.entries.len()
     );
+    if !skipped_links.is_empty() {
+        skipped_links.sort();
+        skipped_links.dedup();
+        println!(
+            "ℹ 未打包 {} 个文件系统链接（整合包只携带字节，不携带机器本地路径）：{}",
+            skipped_links.len(),
+            skipped_links.join("、")
+        );
+    }
     if !withheld.is_empty() {
         withheld.sort();
         withheld.dedup();

@@ -24,12 +24,25 @@ for (const file of bridgeFiles) {
 }
 
 const rust = fs.readFileSync(path.join(root, 'src-tauri', 'src', 'lib.rs'), 'utf8')
-const handlerBlocks = [...rust.matchAll(/\.invoke_handler\s*\(\s*tauri::generate_handler!\s*\[([\s\S]*?)\]\s*\)/g)]
+// Registrations live in two shapes: the shared `phl_command_handler!` macro
+// body (the runtime-agnostic list both `run()` and `build_app` use) and the
+// `phl_command_handler![...]` invocation in `run()` that appends the Wry-bound
+// commands. Both are real registrations, so both are collected.
+const handlerBlocks = [
+  ...rust.matchAll(/generate_handler!\s*\[([\s\S]*?)\]/g),
+  ...rust.matchAll(/phl_command_handler!\s*\[([\s\S]*?)\]/g),
+]
 if (handlerBlocks.length === 0) throw new Error('No Tauri generate_handler! block found')
 
 const registered = new Map()
 for (const block of handlerBlocks) {
-  for (const match of block[1].matchAll(/(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)/g)) {
+  // Strip comments (the lists are documented inline) and the macro's
+  // `$($extra),*` placeholder — neither is a command name.
+  const body = block[1]
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\$\([^)]*\)[^,]*/g, '')
+  for (const match of body.matchAll(/(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)/g)) {
     const command = match[1]
     registered.set(command, (registered.get(command) ?? 0) + 1)
   }

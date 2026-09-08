@@ -162,6 +162,7 @@ export {
   stopInstance,
   cancelLaunch,
   onInstanceExited,
+  openDshWebUi,
 } from './desktopLaunch'
 export type {
   LaunchEventMsg,

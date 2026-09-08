@@ -82,6 +82,10 @@ export interface RemotePackExportReport {
   credentialNames: string[]
   /** Secret-named files the core tree-walker withheld (empty for a clean pack). */
   secretFilesWithheld: string[]
+  /** Filesystem links the walker skipped (a pack carries bytes, never machine
+   * paths). Managed `versions/` links rebuild themselves on the target at
+   * install; the list is informational transparency, not an error. */
+  linksSkipped: string[]
 }
 
 export async function previewInstancePackExport(id: string): Promise<RemotePackExportPlan> {

@@ -13,6 +13,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
+    "test:alpha": "node scripts/alpha-gate.mjs",
+    "test:desktop": "node scripts/alpha-desktop.mjs",
     "bridge:check": "node scripts/check-tauri-bridge.mjs",
     "icon": "node scripts/make-icon.mjs && tauri icon src-tauri/icons/source.png"
   },
