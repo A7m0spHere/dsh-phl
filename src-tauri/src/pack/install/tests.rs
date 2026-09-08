@@ -319,3 +319,214 @@ async fn resolver_classifies_embedded_and_registry_dependencies() {
     assert!(deps.iter().any(|d| d.kind == "dsh" && d.note.is_some()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The §E full chain against real exporter bytes, in two scratch roots that
+/// never touch the developer's PHL data:
+/// export → whole-archive secret scan → install into a fresh root →
+/// listing agrees → corrupted archive refuses with zero residue.
+#[tokio::test]
+async fn export_scan_install_roundtrip_keeps_secrets_out_and_residue_clean() {
+    use crate::pack::export::{export_pack_inner, PackExportOptions};
+    use crate::resources::{TaskInfo, Tasks};
+    use std::sync::atomic::AtomicBool;
+    use tauri::ipc::Channel;
+
+    const SECRET: &str = "PHL_TEST_SECRET_9F8A7B";
+
+    fn env_manifest(id: &str) -> InstanceManifest {
+        let mut env = HashMap::new();
+        env.insert("PHL_TEST_KEY".to_string(), SECRET.to_string());
+        env.insert("APP_MODE".to_string(), "prod".to_string());
+        InstanceManifest {
+            schema_version: 2,
+            id: id.into(),
+            name: "Packable".into(),
+            note: None,
+            kind: "sandbox".into(),
+            hue: 0,
+            version_id: "0.1.2-rc.1".into(),
+            runtime_id: "node-22".into(),
+            port: 8080,
+            auto_port: false,
+            profile: "web".into(),
+            created_at: "now".into(),
+            last_run_at: None,
+            total_runtime: 0,
+            favorite: false,
+            env,
+            args: Vec::new(),
+            api: None,
+            management_mode: ManagementMode::ManagedCopy,
+            source: InstanceSource::Created,
+            external_home: None,
+            adopted_from: None,
+        }
+    }
+
+    fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_files(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+
+    let a = root("e2e-a");
+    let b = root("e2e-b");
+    std::fs::create_dir_all(a.join("instances")).unwrap();
+    std::fs::create_dir_all(b.join("instances")).unwrap();
+    let src = a.join("instances").join("exp-a1");
+    std::fs::create_dir_all(
+        src.join("dsh-home")
+            .join("profiles")
+            .join("web")
+            .join("node_modules"),
+    )
+    .unwrap();
+    write_manifest(&src, &env_manifest("exp-a1")).await.unwrap();
+    let dest = a.join("out.phlpack");
+
+    export_pack_inner(
+        &a,
+        "exp-a1".into(),
+        dest.to_string_lossy().into_owned(),
+        PackExportOptions {
+            embed_registry_ids: vec![],
+            include_sessions: false,
+            sessions_privacy_ack: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Whole-archive scan: unpack EVERY payload byte plus the manifest text
+    // and refuse the secret value anywhere (names may travel, values may not).
+    let scan = root("e2e-scan");
+    let pack = crate::pack::read_pack_from_path(&dest).unwrap();
+    crate::pack::unpack::unpack_entries_to(&dest, |rel| {
+        let p = scan.join(rel);
+        Some((p, scan.clone()))
+    })
+    .unwrap();
+    let mut files = Vec::new();
+    collect_files(&scan, &mut files);
+    assert!(
+        !files.is_empty(),
+        "the archive carries payload entries to scan"
+    );
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        assert!(
+            !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+            "secret value leaked into {}",
+            f.display()
+        );
+    }
+    assert!(
+        !serde_json::to_string(&pack.manifest)
+            .unwrap()
+            .contains(SECRET),
+        "secret value leaked into the manifest"
+    );
+    let _ = std::fs::remove_dir_all(&scan);
+
+    // Install into the fresh root B.
+    let tasks = Tasks::default();
+    let flag = Arc::new(AtomicBool::new(false));
+    let task = tasks
+        .begin(
+            TaskInfo::new("e2e-install".into(), "pack-install", "e2e".into(), &[]),
+            Some(flag.clone()),
+        )
+        .unwrap();
+    let outcome = install_inner(
+        &b,
+        task,
+        &dest.to_string_lossy(),
+        PackInstallRequest {
+            manifest: env_manifest("imp-b1"),
+            allow_missing: false,
+        },
+        &Channel::new(|_| Ok(())),
+        flag,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.credential_names, vec!["PHL_TEST_KEY".to_string()]);
+    assert_eq!(outcome.record.manifest.version_id, "0.1.2-rc.1");
+    assert_eq!(
+        outcome
+            .record
+            .manifest
+            .env
+            .get("APP_MODE")
+            .map(String::as_str),
+        Some("prod")
+    );
+    assert!(
+        !outcome.record.manifest.env.contains_key("PHL_TEST_KEY"),
+        "the credential value must not survive into the installed env"
+    );
+    assert_eq!(
+        outcome.record.manifest.management_mode,
+        ManagementMode::PackInstalled
+    );
+
+    let listed = crate::instances::list_instances_inner(&b).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].manifest.id, "imp-b1");
+    // Persisted bytes must also be clean, not just the in-memory record.
+    let on_disk = std::fs::read(b.join("instances").join("imp-b1").join("instance.json")).unwrap();
+    assert!(!on_disk
+        .windows(SECRET.len())
+        .any(|w| w == SECRET.as_bytes()));
+
+    // A corrupted archive refuses before staging exists, with zero residue.
+    let bad = b.join("corrupt.phlpack");
+    let good = std::fs::read(&dest).unwrap();
+    std::fs::write(&bad, &good[..good.len() / 2]).unwrap();
+    let tasks = Tasks::default();
+    let flag2 = Arc::new(AtomicBool::new(false));
+    let task2 = tasks
+        .begin(
+            TaskInfo::new("e2e-bad".into(), "pack-install", "bad".into(), &[]),
+            Some(flag2.clone()),
+        )
+        .unwrap();
+    let err = install_inner(
+        &b,
+        task2,
+        &bad.to_string_lossy(),
+        PackInstallRequest {
+            manifest: env_manifest("imp-bad"),
+            allow_missing: false,
+        },
+        &Channel::new(|_| Ok(())),
+        flag2,
+    )
+    .await
+    .unwrap_err();
+    assert!(!err.is_empty());
+    assert!(!b.join("instances").join("imp-bad").exists());
+    assert_eq!(
+        crate::instances::list_instances_inner(&b)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "only the good install remains"
+    );
+    assert!(
+        !std::fs::read_dir(b.join("instances"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(".phl")),
+        "no staging residue from the refused install"
+    );
+
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}

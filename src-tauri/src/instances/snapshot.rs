@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use super::copy::SkipRule;
-use super::copy::{copy_tree_sync, copy_tree_with_progress};
+use super::copy::{copy_tree_with_progress, LinkPolicy};
 use super::{
     build_record, home_of, instance_dir, instances_root, load_manifest, profile_root_of,
     reject_external_write, sanitize_segment, scan_plugins, CloneProgress, InstanceRecord,
@@ -160,6 +160,10 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         dest,
         Arc::clone(flag),
         SkipRule::RunStateAtRoot,
+        // The home's `node_modules` is junctions into the shared version
+        // tree; a snapshot keeps them as links (see `LinkPolicy`).
+        LinkPolicy::Preserve,
+        root.to_path_buf(),
         on_progress,
     )
     .await;
@@ -274,7 +278,22 @@ pub(crate) async fn restore_snapshot_inner(
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| e.to_string())?;
-    if let Err(e) = copy_tree_sync(&snap_home, &staging.join("dsh-home")) {
+    // Same guarded copier as create: it runs on a blocking thread (the old
+    // `copy_tree_sync` blocked the async runtime for the whole restore),
+    // classifies links instead of following them, and reports the worker's
+    // real result rather than a half-finished tree.
+    let restore_flag = Arc::new(AtomicBool::new(false));
+    if let Err(e) = copy_tree_with_progress(
+        snap_home.clone(),
+        staging.join("dsh-home"),
+        Arc::clone(&restore_flag),
+        SkipRule::Nothing,
+        LinkPolicy::Preserve,
+        root.to_path_buf(),
+        &|_| {},
+    )
+    .await
+    {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(format!("还原快照失败: {e}"));
     }

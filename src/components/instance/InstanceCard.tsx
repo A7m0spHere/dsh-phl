@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
+import { ArrowUpRight, MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { formatRelative } from '@/lib/format'
 import { hueTone } from '@/lib/hue'
@@ -22,12 +22,19 @@ interface Props {
  * environment, status — and it only reveals controls once the pointer is on
  * it, so a page of ten instances reads as ten facts rather than thirty
  * buttons.
+ *
+ * Click semantics are the launcher's: single click *selects the launch
+ * target* (the dock below always follows this focus), double click starts
+ * (or stops) the instance, and the detail page is reached through the
+ * explicit 详情 affordance — never as a side effect of aiming.
  */
 export const InstanceCard = memo(function InstanceCard({ instance, layout = 'grid' }: Props) {
   const state = useInstanceStore((s) => s.states[instance.id]) ?? { status: 'stopped' as const }
   const toggle = useInstanceStore((s) => s.toggle)
   const launch = useInstanceStore((s) => s.launch)
   const dismissError = useInstanceStore((s) => s.dismissError)
+  const focused = useInstanceStore((s) => s.focusId === instance.id)
+  const setFocus = useInstanceStore((s) => s.setFocus)
   const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance.runtimeId))
   const push = useUIStore((s) => s.push)
@@ -45,7 +52,8 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   const primaryLabel = running ? '停止' : busy ? '取消' : failed ? '重试' : '启动'
   const PrimaryIcon = running ? Square : busy ? X : failed ? RotateCcw : Play
 
-  const open = () => push({ name: 'instance', id: instance.id })
+  const openDetail = () => push({ name: 'instance', id: instance.id })
+  const primaryAction = () => (failed ? (dismissError(instance.id), launch(instance.id)) : toggle(instance.id))
 
   return (
     <motion.article
@@ -53,20 +61,25 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
       exit="out"
       layout={scale === 0 ? false : 'position'}
       transition={t(0.26)}
-      onClick={open}
+      onClick={() => setFocus(instance.id)}
+      onDoubleClick={primaryAction}
       whileHover={scale === 0 ? undefined : { y: -2 }}
       className={cn(
         'group/card relative cursor-pointer overflow-hidden rounded-lg bg-surface ring-1 ring-inset transition-[box-shadow,background-color] duration-200 ease-out',
         'hover:shadow-lift',
-        failed ? 'ring-danger/25' : 'ring-line hover:ring-line-strong/70',
+        failed
+          ? 'ring-danger/25'
+          : focused
+            ? 'ring-accent/45'
+            : 'ring-line hover:ring-line-strong/70',
         layout === 'grid' ? 'p-2.5' : 'px-2.5 py-1.5',
       )}
     >
-      {/* identity edge — grows in on hover, and stays lit while running */}
+      {/* identity edge — grows in on hover, and stays lit while running or focused */}
       <span
         aria-hidden
         className="absolute inset-y-0 left-0 w-[2.5px] origin-center scale-y-0 rounded-r-full transition-transform duration-300 ease-out group-hover/card:scale-y-100"
-        style={{ background: tone.solid, transform: running ? 'scaleY(1)' : undefined }}
+        style={{ background: tone.solid, transform: running || focused ? 'scaleY(1)' : undefined }}
       />
 
       <div className={cn('flex gap-2.5', layout === 'grid' ? 'items-start' : 'items-center')}>
@@ -149,24 +162,56 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           </div>
         )}
 
-        <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="flex shrink-0 items-center gap-1"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
           <StatusPill status={status} startedAt={state.startedAt} showClock={layout === 'list'} />
+
+          {/* A crash's toast is gone in seconds; the fact should outlive it
+              until the next launch replaces the runtime state. */}
+          {state.lastExit && (
+            <Tooltip
+              content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
+            >
+              <span className="num shrink-0 rounded-xs border border-danger/40 px-1.5 py-0.5 text-2xs text-danger">
+                上次退出 {state.lastExit.code ?? '?'}
+              </span>
+            </Tooltip>
+          )}
 
           <Button
             size="sm"
             variant={running ? 'secondary' : failed ? 'secondary' : 'primary'}
-            onClick={() => (failed ? (dismissError(instance.id), launch(instance.id)) : toggle(instance.id))}
+            onClick={primaryAction}
             className={cn(
               'group/sheen w-[54px] transition-opacity duration-200',
-              // Controls stay out of the way until the card is engaged, but a
-              // running instance always keeps its stop button reachable.
-              !running && !busy && !failed && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
+              // Controls stay out of the way until the card is engaged — but a
+              // running, failed, or *focused* card always keeps its primary
+              // reachable: focus means "this is what the dock aims at".
+              !running && !busy && !failed && !focused && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
             )}
             sheen={!running && !busy}
           >
             <PrimaryIcon size={10} className={cn(!running && !busy && !failed && 'fill-current')} />
             {primaryLabel}
           </Button>
+
+          <Tooltip content="查看详情" side="top">
+            <IconButton
+              label="查看详情"
+              size="sm"
+              variant="ghost"
+              onClick={openDetail}
+              className={cn(
+                'transition-opacity duration-200',
+                !focused && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
+              )}
+            >
+              <ArrowUpRight size={14} />
+            </IconButton>
+          </Tooltip>
 
           <Menu
             items={menuItems}

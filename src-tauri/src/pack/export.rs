@@ -106,6 +106,11 @@ pub struct PackExportReport {
     /// the user learns exactly what was dropped rather than discovering a
     /// half-configured plugin at the far end.
     pub secret_files_withheld: Vec<String>,
+    /// Filesystem links the tree-walker refused to pack. A pack carries bytes,
+    /// never machine-local paths (a junction into `versions/` is meaningless on
+    /// another machine), so links are skipped by design — but the user learns
+    /// how many and which, exactly like the §12 secret withholdings.
+    pub links_skipped: Vec<String>,
 }
 
 /// The user's confirmed export selection.
@@ -488,7 +493,7 @@ async fn export_pack_inner_with_cancel(
     let plugin_count = plan.plugins.len();
     let credential_names = partition.credentials;
     let pack_path = build.dest.clone();
-    let (embedded_count, sessions_included, withheld) =
+    let (embedded_count, sessions_included, withheld, links_skipped) =
         tokio::task::spawn_blocking(move || write_pack_archive(build, cancel))
             .await
             .map_err(|e| format!("导出任务调度失败: {e}"))??;
@@ -500,6 +505,7 @@ async fn export_pack_inner_with_cancel(
         sessions_included,
         credential_names,
         secret_files_withheld: withheld,
+        links_skipped,
     })
 }
 
@@ -524,7 +530,7 @@ struct PackBuild {
 fn write_pack_archive(
     build: PackBuild,
     cancel_flag: Arc<AtomicBool>,
-) -> Result<(usize, bool, Vec<String>), String> {
+) -> Result<(usize, bool, Vec<String>, Vec<String>), String> {
     let PackBuild {
         dest,
         id,
@@ -548,6 +554,7 @@ fn write_pack_archive(
     // §12 file-layer strip: the core tree-walker withholds secret-named files
     // and reports them here so the pack's `secretsExcluded: true` is honest.
     let mut withheld: Vec<String> = Vec::new();
+    let mut links_skipped: Vec<String> = Vec::new();
     let cancelled = || cancel_flag.load(Ordering::SeqCst);
     // On any error after the file is created, drop the partial archive: a failed
     // export must not leave a truncated `.phlpack` for the user to share (§R6).
@@ -571,9 +578,9 @@ fn write_pack_archive(
                         format!("无法打包插件目录：{}", p.registry_id),
                     ));
                 }
-                builder
-                    .add_tree_with_cancel(&from, &pack_dir, &cancelled)
-                    .map(|report| withheld.extend(report.withheld_secrets))?;
+                let report = builder.add_tree_with_cancel(&from, &pack_dir, &cancelled)?;
+                withheld.extend(report.withheld_secrets);
+                links_skipped.extend(report.skipped_links);
                 embedded_count += 1;
                 PluginSource::Embedded { path: pack_dir }
             } else {
@@ -604,9 +611,9 @@ fn write_pack_archive(
         if options.include_sessions && session_count > 0 {
             let sessions = sessions_home.join("sessions");
             if sessions.is_dir() {
-                builder
-                    .add_tree_with_cancel(&sessions, "sessions", &cancelled)
-                    .map(|report| withheld.extend(report.withheld_secrets))?;
+                let report = builder.add_tree_with_cancel(&sessions, "sessions", &cancelled)?;
+                withheld.extend(report.withheld_secrets);
+                links_skipped.extend(report.skipped_links);
                 sessions_included = true;
             }
         }
@@ -665,7 +672,9 @@ fn write_pack_archive(
     let (embedded_count, sessions_included) = result?;
     withheld.sort();
     withheld.dedup();
-    Ok((embedded_count, sessions_included, withheld))
+    links_skipped.sort();
+    links_skipped.dedup();
+    Ok((embedded_count, sessions_included, withheld, links_skipped))
 }
 
 /// Turn a registry id (`@scope/name`, or any npm name) into a single safe pack

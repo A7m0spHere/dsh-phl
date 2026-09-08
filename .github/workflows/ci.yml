@@ -31,6 +31,8 @@ jobs:
 
       - run: npm test
 
+      - run: node --test scripts/test-alpha-desktop.mjs
+
       # The build doubles as the `dist/` the Rust job needs: tauri's
       # `generate_context!` reads ../dist at compile time.
       - run: npm run build

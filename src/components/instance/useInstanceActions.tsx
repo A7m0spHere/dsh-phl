@@ -9,6 +9,7 @@ import {
   Square,
   Camera,
   Download,
+  Globe,
   Star,
   Trash2,
   ExternalLink,
@@ -17,6 +18,7 @@ import type { MenuItem } from '@/components/ui'
 import {
   chooseSaveFile,
   exportInstanceBundle,
+  openDshWebUi,
   openExternal,
   previewInstanceExport,
   revealPath,
@@ -136,7 +138,15 @@ export function useInstanceActions(instance: Instance | undefined) {
     return state.webUrl ?? `http://localhost:${instance!.port}`
   }
 
+  /** The single "打开 WebUI" entry: embedded window per instance (browser
+   * build and backend refusal fall back to a system browser — see
+   * `openDshWebUi`). Menus that need the browser specifically say so. */
   const openWebUI = useCallback(() => {
+    if (!instance) return
+    void openDshWebUi(instance.id, webUrl(), instance.name)
+  }, [instance])
+
+  const openWebUIInBrowser = useCallback(() => {
     if (!instance) return
     void openExternal(webUrl())
   }, [instance])
@@ -209,6 +219,13 @@ export function useInstanceActions(instance: Instance | undefined) {
         onSelect: openWebUI,
       },
       {
+        id: 'open-browser',
+        label: '在浏览器中打开',
+        icon: <Globe size={13} />,
+        disabled: !running,
+        onSelect: openWebUIInBrowser,
+      },
+      {
         id: 'favorite',
         label: instance.favorite ? '取消置顶' : '置顶',
         icon: <Star size={13} />,
@@ -253,7 +270,18 @@ export function useInstanceActions(instance: Instance | undefined) {
         onSelect: remove,
       },
     ]
-  }, [instance, id, store, rename, clone, snapshot, remove, revealFolder, openWebUI])
+  }, [instance, id, store, rename, clone, snapshot, remove, revealFolder, openWebUI, openWebUIInBrowser])
 
-  return { clone, rename, remove, snapshot, copyPort, revealFolder, openWebUI, exportBundle, menuItems }
+  return {
+    clone,
+    rename,
+    remove,
+    snapshot,
+    copyPort,
+    revealFolder,
+    openWebUI,
+    openWebUIInBrowser,
+    exportBundle,
+    menuItems,
+  }
 }

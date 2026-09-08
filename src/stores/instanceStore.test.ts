@@ -3,6 +3,7 @@ import type { Instance, InstanceRuntimeState } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   stop: vi.fn(), launch: vi.fn(), saveInstance: vi.fn(), toast: vi.fn(), listInstances: vi.fn(),
+  cloneInstance: vi.fn(),
   onExit: null as null | ((event: { instanceId: string; pid: number; code: number | null }) => void),
 }))
 vi.mock('@/services', async () => ({
@@ -10,7 +11,8 @@ vi.mock('@/services', async () => ({
   repository: mocks,
 }))
 vi.mock('@/lib/desktop', () => ({
-  isDesktop: true, openExternal: vi.fn(),
+  isDesktop: true,
+  openDshWebUi: vi.fn().mockResolvedValue(undefined),
   onInstanceExited: async (handler: typeof mocks.onExit) => { mocks.onExit = handler; return () => {} },
 }))
 vi.mock('./catalogStore', () => ({ useCatalogStore: { getState: () => ({
@@ -89,5 +91,38 @@ describe('instance lifecycle', () => {
     await useInstanceStore.getState().launch('test')
     expect(useInstanceStore.getState().stateOf('test').status).toBe('error')
     expect(mocks.toast).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+  })
+
+  it('keeps a durable abnormal-exit mark so a crash outlives its toast', () => {
+    // Found in the 2026-09-08 desktop alpha pass: a process that reaches
+    // ready and then dies folded the state back to stopped with only a
+    // transient toast — the card claimed a healthy 已停止. The runtime state
+    // must retain the exit facts until the next launch clears them.
+    mocks.onExit!({ instanceId: 'test', pid: 123, code: 1 })
+    const after = useInstanceStore.getState().stateOf('test')
+    expect(after.status).toBe('stopped')
+    expect(after.lastExit).toEqual(
+      expect.objectContaining({ code: 1, ranFor: expect.any(Number) }),
+    )
+  })
+
+  it('a clean exit leaves no abnormal mark', () => {
+    mocks.onExit!({ instanceId: 'test', pid: 123, code: 0 })
+    expect(useInstanceStore.getState().stateOf('test').lastExit).toBeUndefined()
+  })
+
+  it('a failed clone raises an error toast instead of swallowing the rejection', async () => {
+    // Found in the 2026-09-08 desktop alpha pass: the backend refuses to
+    // clone a tree containing symlinks, the store let the rejection escape
+    // unhandled, and the UI silently kept showing the old count.
+    mocks.cloneInstance?.mockRejectedValue(new Error('复制源包含符号链接'))
+    const clone = await useInstanceStore.getState().cloneInstance('test', 'Test 2')
+    expect(clone).toBeNull()
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'error', message: expect.stringContaining('符号链接') }),
+    )
+    expect(mocks.toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'success' }),
+    )
   })
 })

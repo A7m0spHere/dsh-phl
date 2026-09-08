@@ -759,3 +759,90 @@ async fn provider_models_probe() {
         Err(e) => println!("probe reported: {e}"),
     }
 }
+
+fn launch_manifest(id: &str, api: Option<ApiBinding>) -> crate::instances::InstanceManifest {
+    crate::instances::InstanceManifest {
+        schema_version: 0,
+        id: id.into(),
+        name: id.into(),
+        note: None,
+        kind: "sandbox".into(),
+        hue: 0,
+        version_id: "dsh-0.1.0".into(),
+        runtime_id: "node-22".into(),
+        port: 8080,
+        auto_port: true,
+        profile: "default".into(),
+        created_at: String::new(),
+        last_run_at: None,
+        total_runtime: 0,
+        favorite: false,
+        env: std::collections::HashMap::new(),
+        args: Vec::new(),
+        api,
+        management_mode: Default::default(),
+        source: Default::default(),
+        external_home: None,
+        adopted_from: None,
+    }
+}
+
+#[tokio::test]
+async fn launch_observes_managed_drift_without_touching_settings() {
+    // The §G promise in one chain: a synced instance whose settings.yaml the
+    // user later edits must survive launch byte-for-byte. note_launch_drift
+    // computes what a re-sync WOULD write — it must never write it.
+    let (root, dir) = temp_root_with_instance("launch-drift");
+    let c = config();
+    std::fs::create_dir_all(api_config_path(&root).parent().unwrap()).unwrap();
+    std::fs::write(api_config_path(&root), serde_json::to_vec(&c).unwrap()).unwrap();
+    let binding = sync_inner(&dir, &ApiBinding::default(), &c).await.unwrap();
+    assert!(binding.synced_hash.is_some(), "fixture is a synced binding");
+    let path = settings_path(&dir);
+
+    // (a) no drift: the merge is identity; still nothing is written.
+    let synced_bytes = std::fs::read(&path).unwrap();
+    note_launch_drift(
+        &root,
+        &dir,
+        &launch_manifest("launch-drift", Some(binding.clone())),
+    )
+    .await;
+    assert_eq!(std::fs::read(&path).unwrap(), synced_bytes);
+
+    // (b) drift: a local edit inside the managed section. The merge would
+    // rewrite it — the file must come out of note_launch_drift untouched.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let edited = raw.replace("deepseek-v4", "my-local-pick");
+    assert_ne!(edited, raw, "fixture edit must land in the managed section");
+    std::fs::write(&path, &edited).unwrap();
+    let drifted_bytes = std::fs::read(&path).unwrap();
+    note_launch_drift(
+        &root,
+        &dir,
+        &launch_manifest("launch-drift", Some(binding.clone())),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        drifted_bytes,
+        "the local edit survives launch observation"
+    );
+
+    // (c) short-circuits: unbound and explicitly un-managed bindings.
+    for manifest in [
+        launch_manifest("launch-drift", None),
+        launch_manifest(
+            "launch-drift",
+            Some(ApiBinding {
+                inheritance: "none".into(),
+                ..Default::default()
+            }),
+        ),
+    ] {
+        note_launch_drift(&root, &dir, &manifest).await;
+        assert_eq!(std::fs::read(&path).unwrap(), drifted_bytes);
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}

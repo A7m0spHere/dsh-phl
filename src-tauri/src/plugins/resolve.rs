@@ -173,3 +173,41 @@ pub(crate) fn sanitize_pkg_path(name: &str) -> Result<String, String> {
         Err(format!("非法的插件标识: {name}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_pkg_path;
+
+    #[test]
+    fn registry_ids_are_whitelisted_not_normalized() {
+        // The ids reach `node_modules/<id>` paths directly; anything that is
+        // not a plain (optionally scoped) package name is refused outright.
+        assert_eq!(sanitize_pkg_path("plain-plugin").unwrap(), "plain-plugin");
+        assert_eq!(
+            sanitize_pkg_path("@scope/pkg-name").unwrap(),
+            "@scope/pkg-name"
+        );
+        assert_eq!(sanitize_pkg_path("a.b-c_d").unwrap(), "a.b-c_d");
+        // Documented boundary of the current gate: a bare "@scope" is not a
+        // valid npm name, but it is path-harmless inside node_modules, so
+        // the whitelist (which defends *paths*) accepts it on purpose.
+        assert!(sanitize_pkg_path("@scope").is_ok());
+
+        for evil in [
+            "",
+            "..",
+            "a/..",
+            "a/../b",
+            "./pkg",
+            "pkg/",
+            "/pkg",
+            "a//b",
+            "C:\\evil",
+            "a\\b",
+            "pkg;rm -rf",
+            "x".repeat(129).as_str(),
+        ] {
+            assert!(sanitize_pkg_path(evil).is_err(), "must refuse {evil:?}");
+        }
+    }
+}

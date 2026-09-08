@@ -1,7 +1,7 @@
 import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
-import { adoptProcesses, isDesktop, onInstanceExited, openExternal } from '@/lib/desktop'
+import { adoptProcesses, isDesktop, onInstanceExited, openDshWebUi } from '@/lib/desktop'
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
 import { useCatalogStore } from './catalogStore'
@@ -119,7 +119,14 @@ function bindExitListener(
     }
     const crashed = code !== 0
     const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
-    set({ states: { ...get().states, [instanceId]: STOPPED } })
+    set({
+      states: {
+        ...get().states,
+        [instanceId]: crashed
+          ? { status: 'stopped', lastExit: { code: code ?? null, at: Date.now(), ranFor } }
+          : STOPPED,
+      },
+    })
     const instance = get().byId(instanceId)
     if (instance && ranFor > 0) {
       get().updateInstance(instanceId, {
@@ -276,11 +283,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       // bare host:port just says "authentication required", so every link
       // prefers the captured URL and only falls back when the log had none.
       const webTarget = outcome.webUrl ?? `http://localhost:${outcome.port}`
+      // A launcher's delivered promise: getting to the running app must not
+      // cost an extra click. Desktop opens (or focuses) the instance's
+      // embedded WebUI window; the browser mock build keeps the manual
+      // action instead of spawning unasked tabs on every mock launch.
+      if (isDesktop) void openDshWebUi(id, webTarget, instance.name)
       ui.toast({
         kind: 'success',
         title: `${instance.name} 已就绪`,
-        message: `WebUI 运行在 localhost:${outcome.port}`,
-        action: { label: '打开', run: () => void openExternal(webTarget) },
+        message: isDesktop ? 'WebUI 已在独立窗口打开' : `WebUI 运行在 localhost:${outcome.port}`,
+        action: { label: '打开', run: () => void openDshWebUi(id, webTarget, instance.name) },
       })
     } catch (err) {
       if (err instanceof Cancelled) {
@@ -506,7 +518,21 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   async cloneInstance(id, name) {
     const source = get().byId(id)
     if (!source) return null
-    const clone = await repository.cloneInstance(source, name, get().suggestPort())
+    // A failed clone used to surface nowhere: the throw escaped as an
+    // unhandled rejection and the list kept showing the old count. Report it
+    // like every other destructive-write failure does.
+    let clone: Instance
+    try {
+      clone = await repository.cloneInstance(source, name, get().suggestPort())
+    } catch (err) {
+      const e = parseThrownError(err)
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: `克隆「${source.name}」失败`,
+        message: e.message,
+      })
+      return null
+    }
     set({
       instances: [...get().instances, clone],
       states: { ...get().states, [clone.id]: STOPPED },

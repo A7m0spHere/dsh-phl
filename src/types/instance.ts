@@ -51,6 +51,12 @@ export interface InstanceRuntimeState {
   /** Authenticated `dsh web` URL captured at launch; WebUI links prefer it. */
   webUrl?: string
   error?: { title: string; detail: string; hint?: string }
+  /**
+   * The process died with a non-zero code while we believed it was running.
+   * The crash toast is transient; the fact is not — this stays on the card
+   * until the next launch replaces the runtime state.
+   */
+  lastExit?: { code: number | null; at: number; ranFor: number }
 }
 
 export type InstanceKind = 'production' | 'development' | 'test' | 'sandbox'

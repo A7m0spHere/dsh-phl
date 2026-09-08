@@ -39,7 +39,9 @@ pub(crate) mod env_policy;
 pub(crate) mod manifest;
 pub(crate) mod snapshot;
 
-pub(crate) use copy::{copy_tree_with_progress, dir_size, SkipRule};
+pub(crate) use copy::{
+    copy_tree_with_progress, dir_size, repoint_managed_links, LinkMatch, LinkPolicy, SkipRule,
+};
 use manifest::{classify_manifest, write_manifest, ManifestRead};
 pub(crate) use manifest::{
     home_of, load_manifest, profile_root_of, read_manifest, AdoptedFrom, InstanceManifest,
@@ -759,6 +761,13 @@ async fn run_clone(
         staging.clone(),
         Arc::clone(flag),
         SkipRule::RunStateAtRoot,
+        // A real instance's `node_modules` is ~1000 junctions into the shared,
+        // immutable `versions/` tree. Recreate them pointing at the same
+        // target: materializing would duplicate gigabytes, and refusing (the
+        // old blanket rule) made every instance that ever ran install-deps
+        // uncloneable. Links that leave the managed tree are still refused.
+        LinkPolicy::Preserve,
+        root.to_path_buf(),
         &|progress| {
             let _ = on_progress.send(progress);
         },
@@ -800,7 +809,7 @@ mod tests {
     use super::manifest::MANIFEST_SCHEMA_VERSION;
     use super::*;
     use bundle::{export_instance_bundle_inner, read_bundle_inner};
-    use copy::{copy_tree, skipped};
+    use copy::{copy_tree, skipped, CopyCtx};
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
 
@@ -812,6 +821,8 @@ mod tests {
             root.join("target"),
             Arc::new(AtomicBool::new(false)),
             SkipRule::Nothing,
+            LinkPolicy::Preserve,
+            root.clone(),
             &|_| {},
         )
         .await;
@@ -834,6 +845,8 @@ mod tests {
             target.clone(),
             Arc::clone(&flag),
             SkipRule::Nothing,
+            LinkPolicy::Preserve,
+            root.clone(),
             &|_| {
                 flag.store(true, Ordering::SeqCst);
             },
@@ -1370,19 +1383,19 @@ mod tests {
         // thread — exactly as `run_clone` does in production.
         let src = from.clone();
         let dst = to.clone();
+        let root_for_policy = root.clone();
         let worker = std::thread::spawn(move || {
             let flag = AtomicBool::new(false);
             let mut done = 0u64;
-            copy_tree(
-                &src,
-                &dst,
-                &flag,
-                &mut done,
-                512,
-                &tx,
-                SkipRule::RunStateAtRoot,
-            )
-            .map(|()| done)
+            let ctx = CopyCtx {
+                flag: &flag,
+                total: 512,
+                tx: &tx,
+                skip: SkipRule::RunStateAtRoot,
+                links: &LinkPolicy::Preserve,
+                data_root: &root_for_policy,
+            };
+            copy_tree(&src, &dst, &mut done, &ctx).map(|()| done)
         });
 
         let mut events = 0;
@@ -1800,6 +1813,427 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scan_snapshots(&dir).await.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Recursively fingerprint a tree as (relative path, bytes) pairs —
+    /// the byte-level identity check the lifecycle chains assert against.
+    fn tree_fingerprint(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, base, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn clone_diverges_from_source_at_the_byte_level() {
+        // The isolation promise, tested as one chain: clone a populated
+        // source, mutate the clone, and the source must not move — while
+        // reload, rename and delete all keep listing and disk consistent.
+        let root = temp_root("clone-chain");
+        create_instance_inner(root.as_path(), manifest("src-a1aa", "Source"))
+            .await
+            .unwrap();
+        let src = root.join("instances").join("src-a1aa");
+        std::fs::write(src.join("dsh-home/config-app.json"), b"original").unwrap();
+        std::fs::create_dir_all(src.join("dsh-home/nested")).unwrap();
+        std::fs::write(src.join("dsh-home/nested/deep.txt"), b"deep").unwrap();
+        let before = tree_fingerprint(&src.join("dsh-home"));
+        assert!(!before.is_empty(), "seed content exists to compare");
+
+        let cloned = run_clone(
+            &Arc::new(AtomicBool::new(false)),
+            &root,
+            "src-a1aa",
+            manifest("cln-b2bb", "Clone"),
+            &Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cloned.manifest.id, "cln-b2bb");
+        assert!(cloned.manifest.last_run_at.is_none());
+        assert!(!cloned.manifest.favorite, "a clone starts un-favorited");
+        let cln = root.join("instances").join("cln-b2bb");
+        assert_eq!(
+            tree_fingerprint(&cln.join("dsh-home")),
+            before,
+            "the clone begins as an exact copy of the home"
+        );
+
+        // Mutate the clone two ways: overwrite and extend.
+        std::fs::write(cln.join("dsh-home/config-app.json"), b"diverged").unwrap();
+        std::fs::write(cln.join("dsh-home/nested/clone-only.txt"), b"new").unwrap();
+        assert_eq!(
+            tree_fingerprint(&src.join("dsh-home")),
+            before,
+            "source home is byte-identical after the clone diverges"
+        );
+
+        // Reload: both instances persist independently; rename the clone.
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        let mut renamed = listed
+            .iter()
+            .find(|r| r.manifest.id == "cln-b2bb")
+            .unwrap()
+            .manifest
+            .clone();
+        renamed.name = "Renamed Clone".into();
+        save_instance_inner(root.as_path(), renamed).await.unwrap();
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|r| r.manifest.id == "cln-b2bb")
+                .unwrap()
+                .manifest
+                .name,
+            "Renamed Clone"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .find(|r| r.manifest.id == "src-a1aa")
+                .unwrap()
+                .manifest
+                .name,
+            "Source",
+            "renaming the clone never touches the source"
+        );
+
+        // Delete the clone: the source tree and its bytes are untouched,
+        // and no staging directory survived the lifecycle.
+        delete_instance_inner(root.as_path(), "cln-b2bb", &Processes::default())
+            .await
+            .unwrap();
+        assert!(!cln.exists());
+        assert_eq!(tree_fingerprint(&src.join("dsh-home")), before);
+        assert_eq!(list_instances_inner(root.as_path()).await.unwrap().len(), 1);
+        assert!(
+            !std::fs::read_dir(root.join("instances"))
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(".phl-new-")),
+            "no clone staging residue"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn clone_and_snapshot_survive_a_managed_node_modules_link() {
+        // Defect #4 regression on the production paths. A dependency install
+        // leaves `<dsh-home>/profiles/<profile>/node_modules` as ~1000
+        // junctions into the shared `versions/` tree; the old blanket
+        // "refuse every link" rule made every such instance uncloneable and
+        // unsnapshottable, with a message the user could not act on.
+        let root = temp_root("clone-links");
+        create_instance_inner(root.as_path(), manifest("src-a1aa", "Source"))
+            .await
+            .unwrap();
+        let src = root.join("instances").join("src-a1aa");
+        let home = src.join("dsh-home");
+
+        let versions_nm = root.join("versions").join("v1").join("node_modules");
+        std::fs::create_dir_all(versions_nm.join("dep")).unwrap();
+        std::fs::write(versions_nm.join("dep").join("index.js"), b"module").unwrap();
+        let link = home.join("profiles").join("default").join("node_modules");
+        // The instance skeleton already created `node_modules` as a real
+        // directory; `install-deps` is what replaces it with junctions.
+        let _ = std::fs::remove_dir_all(&link);
+        copy::recreate_link(&link, &versions_nm, true).unwrap();
+
+        let cloned = run_clone(
+            &Arc::new(AtomicBool::new(false)),
+            &root,
+            "src-a1aa",
+            manifest("cln-b2bb", "Clone"),
+            &Channel::new(|_| Ok(())),
+        )
+        .await
+        .expect("an instance with managed links must be cloneable");
+        assert_eq!(cloned.manifest.id, "cln-b2bb");
+        let cloned_link = root
+            .join("instances")
+            .join("cln-b2bb")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default")
+            .join("node_modules");
+        assert!(
+            std::fs::symlink_metadata(&cloned_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the clone keeps a link, it does not materialize 282 MB"
+        );
+        assert!(
+            cloned_link.join("dep").join("index.js").exists(),
+            "the recreated link still resolves"
+        );
+
+        // Snapshot create walks the same engine over the same home.
+        let snap = snapshot::run_snapshot_create(
+            &Arc::new(AtomicBool::new(false)),
+            &Processes::default(),
+            &root,
+            "src-a1aa",
+            &|_| {},
+        )
+        .await
+        .expect("an instance with managed links must be snapshottable");
+        let snap_link = src
+            .join("snapshots")
+            .join(&snap.id)
+            .join("dsh-home")
+            .join("profiles")
+            .join("default")
+            .join("node_modules");
+        assert!(
+            std::fs::symlink_metadata(&snap_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the snapshot keeps the link too"
+        );
+
+        // Restore copies the link-bearing snapshot back over the live home:
+        // the same engine, the same guarantee — the tree comes back wired.
+        std::fs::write(
+            home.join("profiles").join("default").join("marker.txt"),
+            b"x",
+        )
+        .unwrap();
+        snapshot::restore_snapshot_inner(&root, "src-a1aa", &snap.id, &Processes::default())
+            .await
+            .expect("restoring a link-bearing snapshot must succeed");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "restore recreates the link rather than refusing or materializing it"
+        );
+        assert!(
+            link.join("dep").join("index.js").exists(),
+            "the restored home resolves through the recreated link"
+        );
+        assert!(
+            !home
+                .join("profiles")
+                .join("default")
+                .join("marker.txt")
+                .exists(),
+            "post-snapshot changes are gone, as restore promises"
+        );
+
+        // The source link is untouched: nothing rewrote or replaced it.
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_instance_never_reaches_through_its_links() {
+        // The blast-radius test for the junction era: a real instance's tree
+        // is hundreds of links into the shared `versions/` install. If a
+        // recursive delete followed them, deleting one instance would erase
+        // the version every other instance boots from. The desktop alpha
+        // pass's cleanup proved the question is live (MSYS `rm -rf` does
+        // follow junctions) — PHL's delete must not.
+        let root = temp_root("delete-blast");
+        let versions_dep = root
+            .join("versions")
+            .join("v1")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&versions_dep).unwrap();
+        std::fs::write(versions_dep.join("index.js"), b"shared-gold").unwrap();
+        create_instance_inner(root.as_path(), manifest("dlt-a1aa", "Doomed"))
+            .await
+            .unwrap();
+        let nm = root
+            .join("instances")
+            .join("dlt-a1aa")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default")
+            .join("node_modules");
+        std::fs::create_dir_all(&nm).unwrap();
+        copy::recreate_link(&nm.join("dep"), &versions_dep, true).unwrap();
+
+        delete_instance_inner(root.as_path(), "dlt-a1aa", &Processes::default())
+            .await
+            .unwrap();
+
+        assert!(!root.join("instances").join("dlt-a1aa").exists());
+        assert_eq!(
+            std::fs::read(versions_dep.join("index.js")).unwrap(),
+            b"shared-gold",
+            "the shared version content SURVIVED the instance delete"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_operations_refuse_a_running_instance() {
+        // create → restore → delete are all mutating or reading a live tree;
+        // the same `ensure_not_running` gate must hold every entry, and
+        // releasing the process must re-open them (no sticky refusal).
+        let root = temp_root("snap-running");
+        create_instance_inner(root.as_path(), manifest("run-a1aa", "Runner"))
+            .await
+            .unwrap();
+        let dir = root.join("instances").join("run-a1aa");
+        std::fs::write(dir.join("dsh-home/state.txt"), b"a").unwrap();
+
+        let processes = Processes::default();
+        let snap = run_snapshot_create(
+            &Arc::new(AtomicBool::new(false)),
+            &processes,
+            root.as_path(),
+            "run-a1aa",
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+        processes.set(
+            "run-a1aa",
+            crate::launch::ProcessEntry {
+                pid: 777,
+                port: 3080,
+            },
+        );
+        let err = run_snapshot_create(
+            &Arc::new(AtomicBool::new(false)),
+            &processes,
+            root.as_path(),
+            "run-a1aa",
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("正在运行"), "got: {err}");
+        assert!(
+            restore_snapshot_inner(root.as_path(), "run-a1aa", &snap.id, &processes)
+                .await
+                .unwrap_err()
+                .contains("正在运行")
+        );
+        assert!(
+            delete_snapshot_inner(root.as_path(), "run-a1aa", &snap.id, &processes)
+                .await
+                .unwrap_err()
+                .contains("正在运行")
+        );
+        assert_eq!(
+            scan_snapshots(&dir).await.len(),
+            1,
+            "refused operations changed nothing, and left no staging behind"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("dsh-home/state.txt")).unwrap(),
+            b"a",
+            "the live tree is untouched by refused restore"
+        );
+
+        processes.remove_if_pid("run-a1aa", 777);
+        run_snapshot_create(
+            &Arc::new(AtomicBool::new(false)),
+            &processes,
+            root.as_path(),
+            "run-a1aa",
+            &|_| {},
+        )
+        .await
+        .expect("operations resume once the process is gone");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn external_instances_survive_every_gated_write_attempt_untouched() {
+        // Spec §3.1: an in-place (external) DSH_HOME belongs to the user.
+        // Every mutation command must refuse it AND leave zero side effects
+        // — the byte-identity of the home tree after the attempts is the
+        // invariant under test, not merely the error strings.
+        // `writable_profile_dir` is the single gate the plugin install /
+        // enable / disable / uninstall commands pass through first; the
+        // snapshot restore path checks inline. One test per gate point.
+        let root = temp_root("ext-write");
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        let user_home = root.join("someone-elses-dsh");
+        std::fs::create_dir_all(user_home.join("sessions")).unwrap();
+        std::fs::write(user_home.join("settings.yaml"), b"provider: mine\n").unwrap();
+        std::fs::write(user_home.join("sessions/s1.jsonl"), b"{\"a\":1}\n").unwrap();
+
+        let dir = root.join("instances").join("ext-w1aa");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = manifest("ext-w1aa", "External");
+        m.management_mode = ManagementMode::External;
+        m.external_home = Some(user_home.to_string_lossy().into_owned());
+        manifest::write_manifest(&dir, &m).await.unwrap();
+
+        let home_before = tree_fingerprint(&user_home);
+        let inst_before = tree_fingerprint(&dir);
+
+        // Plugin-write gate: refuses before the profile path is even returned.
+        let err = writable_profile_dir(root.as_path(), "ext-w1aa", "安装插件到")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("原地接入") && err.contains("安装插件到"),
+            "got: {err}"
+        );
+
+        // Snapshot restore: refuses an external instance outright.
+        let err = restore_snapshot_inner(
+            root.as_path(),
+            "ext-w1aa",
+            "snap-anything",
+            &Processes::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("原地接入"), "got: {err}");
+
+        // The user's directory never changed, and neither did the instance.
+        assert_eq!(
+            tree_fingerprint(&user_home),
+            home_before,
+            "external home byte-identical"
+        );
+        assert_eq!(
+            tree_fingerprint(&dir),
+            inst_before,
+            "instance tree byte-identical"
+        );
+
+        // The gate keys off management_mode only: a sandbox instance with the
+        // same shape passes, so the refusal is not an artifact of the fixture.
+        let mut m2 = m.clone();
+        m2.management_mode = ManagementMode::default();
+        assert!(reject_external_write(&m2, "ext-w1aa", "测试").is_ok());
+        assert!(reject_external_write(&m, "ext-w1aa", "测试").is_err());
 
         let _ = std::fs::remove_dir_all(&root);
     }

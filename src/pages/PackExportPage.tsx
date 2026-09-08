@@ -88,6 +88,16 @@ export function PackExportPage({ id }: { id: string }) {
           message: `以下内容按规格 §12 未打包（对方安装后需重新配置）：${report.secretFilesWithheld.join('、')}`,
         })
       }
+      // Links never ride in a pack (machine paths are meaningless on another
+      // machine); version-managed ones rebuild on install, so this is an
+      // info line, not a warning — but the count belongs to the user.
+      if (report.linksSkipped.length > 0) {
+        toast({
+          kind: 'info',
+          title: `未打包 ${report.linksSkipped.length} 个文件系统链接`,
+          message: '整合包只携带文件本体；受管的依赖链接会在对方安装时自动重建。',
+        })
+      }
       toast({
         kind: 'success',
         title: '整合包已导出',

@@ -32,6 +32,9 @@ serde_json = "1"
 # 实例 dsh-home/settings.yaml 的读-合并-写（api_config）
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip"] }
+# `WebviewUrl::External` speaks `url::Url`; the crate is already in the graph
+# via reqwest, this just makes it a direct dependency of the webui module.
+url = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
 futures-util = "0.3"
 tar = "0.4"
