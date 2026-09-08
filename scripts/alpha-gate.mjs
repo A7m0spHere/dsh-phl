@@ -24,6 +24,7 @@ const steps = [
   { name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
   { name: 'bridge check', cmd: 'npm', args: ['run', 'bridge:check'] },
   { name: 'frontend tests', cmd: 'npm', args: ['test'] },
+  { name: 'desktop runner tests', cmd: 'node', args: ['--test', 'scripts/test-alpha-desktop.mjs'] },
   { name: 'rust fmt', cmd: 'cargo', args: ['fmt', '--check', '--all'], dir: 'src-tauri' },
   { name: 'rust clippy', cmd: 'cargo', args: ['clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'], dir: 'src-tauri' },
   { name: 'rust tests (workspace)', cmd: 'cargo', args: ['test', '--workspace'], dir: 'src-tauri' },

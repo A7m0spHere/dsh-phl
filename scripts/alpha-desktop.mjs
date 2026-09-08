@@ -7,7 +7,8 @@
  * Sets PHL_ROOT to a fresh scratch directory under %TEMP% before launching
  * `tauri dev`, so the acceptance session (root.json pointer, processes.json,
  * migration journals, every instance/version/plugin byte) can never touch the
- * developer's real PHL data or DSH_HOME. On exit the scratch root is removed.
+ * developer's real PHL data or DSH_HOME. A supplied PHL_ALPHA_ROOT is used
+ * verbatim and retained. Only a root allocated here is removed on normal exit.
  *
  * The scenario JSON is a machine-readable checklist of the GUI scenarios
  * (create / clone+snapshot / pack / exploratory). Drive it with the
@@ -19,7 +20,7 @@
  *   PHL_ALPHA_KEEP=1  keep the scratch root after exit (for post-mortems)
  *   PHL_ALPHA_ROOT=C:\\path  use an explicit root instead of a new temp dir
  */
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -28,16 +29,21 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-const scratch =
-  process.env.PHL_ALPHA_ROOT || path.join(os.tmpdir(), `phl-alpha-desktop-${new Date().toISOString().replace(/[:.]/g, '-')}`)
-fs.mkdirSync(scratch, { recursive: true })
-
 const scenario = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(repoRoot, 'scripts', 'alpha-desktop-scenarios.json')
 const scenarios = JSON.parse(fs.readFileSync(scenario, 'utf8'))
 
-const reportPath = path.join(scratch, 'alpha-desktop-report.json')
+// Only a fresh directory allocated by this process belongs to the runner.
+// A caller-supplied root may contain valuable data and is never auto-deleted.
+const suppliedRoot = process.env.PHL_ALPHA_ROOT?.trim()
+const scratch = suppliedRoot
+  ? path.resolve(suppliedRoot)
+  : fs.mkdtempSync(path.join(os.tmpdir(), 'phl-alpha-desktop-'))
+fs.mkdirSync(scratch, { recursive: true })
+
+// Evidence must survive scratch cleanup; each run also keeps its own report.
+const reportPath = path.join(path.dirname(scratch), `${path.basename(scratch)}-${Date.now()}-report.json`)
 fs.writeFileSync(
   reportPath,
   JSON.stringify({ startedAt: new Date().toISOString(), root: scratch, scenarios }, null, 2),
@@ -58,11 +64,12 @@ const child = spawn('npm', ['run', 'app:dev'], {
 })
 
 let cleaning = false
+let interrupted = false
 const cleanup = () => {
   if (cleaning) return
   cleaning = true
-  if (process.env.PHL_ALPHA_KEEP) {
-    process.stdout.write(`\nKeeping scratch root per PHL_ALPHA_KEEP: ${scratch}\n`)
+  if (suppliedRoot || process.env.PHL_ALPHA_KEEP || interrupted) {
+    process.stdout.write(`\nKeeping supplied, requested, or interrupted root: ${scratch}\n`)
     return
   }
   try {
@@ -72,10 +79,24 @@ const cleanup = () => {
     process.stdout.write(`\nScratch root left behind (${e.message}); delete ${scratch}\n`)
   }
 }
-process.on('exit', cleanup)
-process.on('SIGINT', () => { child.kill(); })
-process.on('SIGTERM', () => { child.kill(); })
-child.on('exit', (code) => {
+const interrupt = () => {
+  if (interrupted) return
+  interrupted = true
+  if (process.platform === 'win32' && child.pid) {
+    execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, (error) => {
+      if (error) process.stderr.write(`Unable to stop desktop process tree: ${error.message}\n`)
+    })
+  } else {
+    child.kill('SIGTERM')
+  }
+}
+process.on('SIGINT', interrupt)
+process.on('SIGTERM', interrupt)
+child.on('error', (error) => {
+  process.stderr.write(`Unable to launch desktop: ${error.message}\n`)
+  process.exitCode = 1
+})
+child.on('close', (code) => {
   cleanup()
-  process.exit(code ?? 0)
+  process.exit(process.exitCode || code || (interrupted || code === null ? 1 : 0))
 })

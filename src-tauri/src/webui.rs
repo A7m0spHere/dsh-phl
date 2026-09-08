@@ -47,11 +47,11 @@ fn ensure_loopback(raw: &str) -> Result<Url, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("WebUI 地址不允许携带凭据".into());
     }
-    let ok = match url.host_str() {
-        // The whole 127.0.0.0/8 block is loopback on every OS we ship on;
-        // `url` serializes IPv6 hosts bracketed, so accept both spellings.
-        Some("localhost" | "::1" | "[::1]") => true,
-        Some(h) => h == "127.0.0.1" || (h.starts_with("127.") && h.len() <= 15),
+    let ok = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(_)) => false,
         None => false,
     };
     if ok {
@@ -156,6 +156,8 @@ mod tests {
 
         assert!(ensure_loopback("http://192.168.1.7:3080/").is_err());
         assert!(ensure_loopback("http://dsh.example.com/").is_err());
+        assert!(ensure_loopback("http://127.example.com/").is_err());
+        assert!(ensure_loopback("http://127.attacker.io/").is_err());
         assert!(ensure_loopback("file:///C:/etc/passwd").is_err());
         assert!(ensure_loopback("javascript:alert(1)").is_err());
         assert!(ensure_loopback("not a url").is_err());
