@@ -135,7 +135,7 @@ pub fn list_open_webui_windows(app: AppHandle) -> Vec<String> {
 /// Process-exit hook (stop / crash / clean shutdown, from the launch
 /// watcher): an instance that is no longer running must not keep a window
 /// where its UI pretends to be live.
-pub(crate) fn close_for_instance(app: &AppHandle, instance_id: &str) {
+pub(crate) fn close_for_instance<R: tauri::Runtime>(app: &AppHandle<R>, instance_id: &str) {
     if let Some(window) = app.get_webview_window(&label_of(instance_id)) {
         let _ = window.close();
     }

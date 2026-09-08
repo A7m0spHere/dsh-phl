@@ -100,6 +100,19 @@ impl Processes {
         }
     }
 
+    /// True when `pid` is still the instance's current process, or when no
+    /// process is registered at all. A watcher uses this to decide whether it
+    /// may close the instance's WebUI window: a *newer* launch must not lose
+    /// its window to the previous process's exit, while a plain stop (which
+    /// removes the entry itself) still must.
+    pub(crate) fn is_current_or_empty(&self, instance_id: &str, pid: u32) -> bool {
+        self.0
+            .lock()
+            .expect("processes lock")
+            .get(instance_id)
+            .map_or(true, |entry| entry.pid == pid)
+    }
+
     pub(crate) fn entry_of(&self, instance_id: &str) -> Option<ProcessEntry> {
         self.0
             .lock()
@@ -262,7 +275,8 @@ pub struct AdoptReport {
 /// exists in this root is dropped likewise (its directory may have been
 /// deleted while PHL was away).
 #[tauri::command]
-pub async fn adopt_processes(
+pub async fn adopt_processes<R: tauri::Runtime>(
+    app: AppHandle<R>,
     processes: State<'_, Processes>,
     registry: State<'_, Registry>,
     phl: State<'_, PhlState>,
@@ -306,11 +320,15 @@ pub async fn adopt_processes(
                     None => None,
                 };
                 report.adopted.push(AdoptedProcess {
-                    instance_id: rec.instance_id,
+                    instance_id: rec.instance_id.clone(),
                     pid: rec.pid,
                     port: rec.port,
                     web_url,
                 });
+                // Adopted must not mean unobserved: without this, an adopted
+                // DSH that crashes after the PHL restart keeps its entry, its
+                // registry row and its WebUI window forever.
+                watch_adopted_process(app.clone(), rec);
             }
             Adoption::Forget {
                 reason,
@@ -327,6 +345,46 @@ pub async fn adopt_processes(
         }
     }
     Ok(report)
+}
+
+/// An adopted process is not this PHL's child, so there is no `wait()` to
+/// await. Poll the same identity gate that adopted it instead: while
+/// `decide` still says Adopt the process is ours and alive; the moment it
+/// says otherwise (gone, or the pid handed to a stranger) run the launch
+/// watcher's cleanup, so an adopted DSH clears its state and its window
+/// exactly like one launched in this session.
+fn watch_adopted_process<R: tauri::Runtime>(app: AppHandle<R>, rec: PersistedProcess) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if matches!(decide(&rec, &probe_process(rec.pid)), Adoption::Adopt) {
+                continue;
+            }
+            let instance_id = rec.instance_id.clone();
+            let ours = app
+                .try_state::<Processes>()
+                .map(|processes| processes.is_current_or_empty(&instance_id, rec.pid))
+                .unwrap_or(false);
+            if let Some(processes) = app.try_state::<Processes>() {
+                processes.remove_if_pid(&instance_id, rec.pid);
+            }
+            if let Some(registry) = app.try_state::<Registry>() {
+                registry.forget_pid(&instance_id, rec.pid);
+            }
+            if ours {
+                crate::webui::close_for_instance(&app, &instance_id);
+            }
+            let _ = app.emit(
+                INSTANCE_EXITED,
+                serde_json::json!({
+                    "instanceId": instance_id,
+                    "pid": rec.pid,
+                    "code": serde_json::Value::Null,
+                }),
+            );
+            return;
+        }
+    });
 }
 
 /* ------------------------------- launch ------------------------------- */
@@ -630,6 +688,12 @@ async fn run_launch(
     let watcher_id = instance_id.clone();
     tokio::spawn(async move {
         let status = child.wait().await;
+        // Decide before the entry is removed: a fast restart has already
+        // registered the new pid, and this exit must not take that window down.
+        let ours = watcher_app
+            .try_state::<Processes>()
+            .map(|processes| processes.is_current_or_empty(&watcher_id, pid))
+            .unwrap_or(false);
         if let Some(processes) = watcher_app.try_state::<Processes>() {
             processes.remove_if_pid(&watcher_id, pid);
         }
@@ -639,7 +703,9 @@ async fn run_launch(
         // A dead instance must not keep its embedded WebUI window open:
         // closing the window never stops the process, but the process
         // exiting always closes the window (see `crate::webui`).
-        crate::webui::close_for_instance(&watcher_app, &watcher_id);
+        if ours {
+            crate::webui::close_for_instance(&watcher_app, &watcher_id);
+        }
         let code = status.ok().and_then(|s| s.code());
         let _ = watcher_app.emit(
             INSTANCE_EXITED,
@@ -936,5 +1002,40 @@ mod tests {
         );
         // Removal after disappearance is inert, not a panic.
         processes.remove_if_pid("inst", 111);
+    }
+
+    #[test]
+    fn a_watcher_only_closes_the_window_of_its_own_process() {
+        // The other half of the relaunch race: the old watcher must not close
+        // the WebUI window that belongs to the new process, while a plain stop
+        // (which removes the entry itself) still has to close it.
+        let processes = Processes::default();
+        processes.set(
+            "inst",
+            ProcessEntry {
+                pid: 111,
+                port: 3080,
+            },
+        );
+        assert!(processes.is_current_or_empty("inst", 111), "its own pid");
+
+        // A relaunch registered the new pid before the old watcher woke up.
+        processes.set(
+            "inst",
+            ProcessEntry {
+                pid: 222,
+                port: 3081,
+            },
+        );
+        assert!(
+            !processes.is_current_or_empty("inst", 111),
+            "the stale watcher must leave the new window alone"
+        );
+        assert!(processes.is_current_or_empty("inst", 222));
+
+        // Stop removes the entry itself; "nothing registered" is not "newer".
+        processes.remove_if_pid("inst", 222);
+        assert!(processes.is_current_or_empty("inst", 222));
+        assert!(processes.is_current_or_empty("never-seen", 1));
     }
 }
