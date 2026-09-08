@@ -3,6 +3,7 @@
 //! cordis.patch.yml. Plus the enable/uninstall lifecycle commands.
 
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -279,7 +280,12 @@ async fn run_plugin_install(
 /// plugin: the on-disk record, the cordis registration, and the enabled
 /// flag. Any step failing aborts the commit — the caller rolls back to the
 /// backup so the instance never sees a half-installed plugin.
-async fn commit_install(
+///
+/// Exposed to the crate because pack install reuses *this* primitive (not a
+/// second protocol) to turn an embedded plugin that unpack dropped into
+/// `node_modules/` into a fully registered one (§R3): writing the PHL install
+/// marker and the Cordis registration have exactly one implementation.
+pub(crate) async fn commit_install(
     dest: &Path,
     marker: &serde_json::Value,
     instance_root: &Path,
@@ -288,6 +294,10 @@ async fn commit_install(
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
         .await
         .map_err(|e| format!("无法写入安装记录: {e}"))?;
+
+    install_plugin_dependencies(dest)
+        .await
+        .map_err(|e| format!("安装插件依赖失败: {e}"))?;
 
     register_cordis_patch(instance_root, registry_id, None)
         .await
@@ -302,6 +312,96 @@ async fn commit_install(
         .map_err(|e| format!("更新 cordis.patch.yml 失败: {e}"))?;
 
     Ok(())
+}
+
+/// A dependency install must complete before the package swap can commit.
+const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Keep the dependency closure inside the package being committed. A profile-
+/// level `pnpm add` rewrites shared dependencies and package.json outside the
+/// install rollback boundary. Ignoring the enclosing workspace also prevents
+/// pnpm from mutating sibling plugins. Lifecycle scripts follow the same
+/// disabled-by-default policy as the DSH version installer.
+async fn install_plugin_dependencies(dest: &Path) -> Result<(), String> {
+    if dependency_specs(dest).await?.is_empty() {
+        return Ok(());
+    }
+    let bin = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .current_dir(dest)
+        .args([
+            "install",
+            "--ignore-workspace",
+            "--prod",
+            "--ignore-scripts",
+            "--no-lockfile",
+        ])
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let child = command
+        .spawn()
+        .map_err(|e| format!("无法运行 pnpm 安装依赖，请先安装 pnpm 或 corepack：{e}"))?;
+    let pid = child.id();
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    let output = match tokio::time::timeout(DEPENDENCY_INSTALL_TIMEOUT, &mut output).await {
+        Ok(result) => result.map_err(|e| format!("读取 pnpm 结果失败：{e}"))?,
+        Err(_) => {
+            if let Some(pid) = pid {
+                crate::launch::kill_tree(pid).await?;
+            }
+            // Reap the stopped child before callers restore or delete its files.
+            let _ = output.await;
+            return Err("安装依赖超时（pnpm）".into());
+        }
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "pnpm 安装依赖失败: {}",
+            stderr_tail(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// `name@range` specs for the plugin's own `dependencies`, read from its
+/// extracted `package.json`. Empty for a dependency-free plugin.
+async fn dependency_specs(dest: &Path) -> Result<Vec<String>, String> {
+    let text = match tokio::fs::read_to_string(dest.join("package.json")).await {
+        Ok(t) => t,
+        Err(e) => return Err(format!("无法读取插件 package.json: {e}")),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("插件 package.json 解析失败: {e}"))?;
+    let mut specs = value
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|deps| {
+            deps.iter()
+                .filter_map(|(name, range)| range.as_str().map(|r| format!("{name}@{r}")))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    specs.sort();
+    Ok(specs)
+}
+
+/// The last few lines of pnpm's stderr, for a failure the user can act on.
+fn stderr_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Undo the swap and the patch file after a failed commit, so the previous
@@ -390,6 +490,14 @@ mod tests {
     #[tokio::test]
     async fn commit_writes_record_registration_and_enabled_state() {
         let f = fixture("commit", false);
+        // A real npm package ships package.json; the commit now installs its
+        // dependency closure, so give the fixture one with no deps (the
+        // self-contained skip path).
+        std::fs::write(
+            f["dest"].join("package.json"),
+            r#"{"name":"dsh-foo","version":"1.2.3"}"#,
+        )
+        .unwrap();
         let marker = serde_json::json!({"version": "1.2.3"});
         commit_install(&f["dest"], &marker, &f["instance"], "dsh-foo")
             .await
@@ -495,5 +603,90 @@ mod tests {
         // dest holds the new copy again (rename aside -> rename backup fails
         // -> rename aside back), nothing is silently deleted.
         assert!(f["dest"].join("new.js").exists());
+    }
+
+    #[tokio::test]
+    async fn dependency_specs_are_sorted_and_ranged() {
+        let dir = temp_root("dep-specs");
+        let dest = dir.join("node_modules").join("dsh-foo");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(
+            dest.join("package.json"),
+            r#"{"dependencies":{"ws":"^8.0.0","schemastery":"^3.0.0","react":"18.3.1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            dependency_specs(&dest).await.unwrap(),
+            vec!["react@18.3.1", "schemastery@^3.0.0", "ws@^8.0.0"],
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pnpm and Node on PATH; uses only a local fixture dependency"]
+    async fn dependencies_stay_inside_the_plugin_and_scripts_do_not_run() {
+        let root = temp_root("dep-isolation");
+        let profile = root.join("profile");
+        let dest = profile.join("node_modules/dsh-local");
+        let dependency = root.join("local-dep");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"phl-fixture-dep","version":"1.0.0","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(dependency.join("index.js"), "module.exports = 42").unwrap();
+        let package = serde_json::json!({
+            "name": "dsh-local", "version": "1.0.0",
+            "dependencies": {"phl-fixture-dep": format!("file:{}", dependency.to_string_lossy().replace('\\', "/"))},
+            "scripts": {"postinstall": "node -e \"require('fs').writeFileSync('script-ran', 'bad')\""}
+        });
+        std::fs::write(dest.join("package.json"), package.to_string()).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            "{\"name\":\"profile\",\"private\":true}",
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("pnpm-workspace.yaml"),
+            "packages:\n  - node_modules/*\n",
+        )
+        .unwrap();
+        let before = std::fs::read(profile.join("package.json")).unwrap();
+        install_plugin_dependencies(&dest).await.unwrap();
+        assert_eq!(std::fs::read(profile.join("package.json")).unwrap(), before);
+        assert!(!profile.join("pnpm-lock.yaml").exists());
+        assert!(!profile.join("node_modules/phl-fixture-dep").exists());
+        assert!(!dest.join("script-ran").exists());
+        let output = tokio::process::Command::new("node")
+            .current_dir(&dest)
+            .args([
+                "-e",
+                "if (require('phl-fixture-dep') !== 42) process.exit(1)",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn self_contained_plugin_has_no_dependency_specs() {
+        let dir = temp_root("dep-none");
+        let dest = dir.join("node_modules").join("dsh-bar");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("package.json"), r#"{"name":"dsh-bar"}"#).unwrap();
+        assert!(dependency_specs(&dest).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_few_lines_in_order() {
+        let bytes = b"line1\nline2\nline3\n".to_vec();
+        assert_eq!(stderr_tail(&bytes), "line1\nline2\nline3");
     }
 }

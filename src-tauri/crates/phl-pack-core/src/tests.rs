@@ -273,3 +273,18 @@ fn normalize_entry_accepts_dirs_and_rejects_escapes() {
         PathBuf::from("embedded/plugins/m")
     );
 }
+
+#[test]
+fn integrity_hash_observes_cancel_inside_one_large_reader() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut reader = std::io::Cursor::new(vec![0xabu8; 1024 * 1024]);
+    let calls = AtomicUsize::new(0);
+    let cancel = || calls.fetch_add(1, Ordering::SeqCst) >= 2;
+    let err = sha256_of_reader_with_cancel(&mut reader, MAX_SINGLE_ENTRY, &cancel).unwrap_err();
+    assert_eq!(err, PackError::Cancelled);
+    assert!(
+        reader.position() < 1024 * 1024,
+        "hash read the entire file after cancellation"
+    );
+}

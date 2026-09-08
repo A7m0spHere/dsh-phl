@@ -53,6 +53,24 @@ async fn seed_instance(r: &Path, id: &str) {
         b"export default 1",
     )
     .unwrap();
+    // R1 fixtures for the whole-tree secret strip: a root `.env`, a nested
+    // two-level `config/.env` and `auth/token.json` (all must be withheld by
+    // basename), plus `.env.example` (documentation, travels) and
+    // `config/tokenizer.js` (an ordinary payload that must NOT be dropped by a
+    // careless substring match). The desktop export path packs this folder via
+    // `add_tree`, so the preview and the archive must agree about all five.
+    let mine = profile.join("node_modules").join("mine");
+    std::fs::create_dir_all(mine.join("config")).unwrap();
+    std::fs::create_dir_all(mine.join("auth")).unwrap();
+    std::fs::write(mine.join(".env"), b"DEEPSEEK_API_KEY=sk-secret-123").unwrap();
+    std::fs::write(mine.join("config").join(".env"), b"NESTED=secret").unwrap();
+    std::fs::write(mine.join("auth").join("token.json"), b"{\"t\":\"secret\"}").unwrap();
+    std::fs::write(mine.join(".env.example"), b"# docs").unwrap();
+    std::fs::write(
+        mine.join("config").join("tokenizer.js"),
+        b"export const tok = 1",
+    )
+    .unwrap();
     // The plugin list also needs the profile to be discoverable: a package.json
     // + patch so `scan_plugins` sees them as installed (markers already do).
     let mut env = HashMap::new();
@@ -121,6 +139,28 @@ async fn plan_classifies_remote_local_strips_secrets_and_flags_license() {
     assert!(plan
         .credential_names
         .contains(&"DEEPSEEK_API_KEY".to_string()));
+    // R1 preview: nested secret-bearing files are reported (plugin-relative),
+    // and ordinary / example payloads are not. Before the basename fix a
+    // `config/.env` slipped past the preview while still landing in the archive.
+    assert!(plan.secret_files.contains(&"mine/.env".to_string()));
+    assert!(plan.secret_files.contains(&"mine/config/.env".to_string()));
+    assert!(plan
+        .secret_files
+        .contains(&"mine/auth/token.json".to_string()));
+    assert!(
+        !plan
+            .secret_files
+            .iter()
+            .any(|f| f.ends_with(".env.example")),
+        "an example template is not a secret"
+    );
+    assert!(
+        !plan
+            .secret_files
+            .iter()
+            .any(|f| f.ends_with("tokenizer.js")),
+        "an ordinary payload is not a secret"
+    );
     assert!(plan.warnings.iter().any(|w| w.contains("许可证")));
     let _ = std::fs::remove_dir_all(&r);
 }
@@ -156,20 +196,57 @@ async fn export_roundtrips_strips_secrets_embeds_and_is_validator_clean() {
     let integrity = pack.manifest.integrity.unwrap();
     assert!(integrity.keys().any(|k| k.starts_with("embedded/plugins/")));
 
-    // The secret value must not appear anywhere in the archive bytes.
-    let bytes = std::fs::read(&dest).unwrap();
+    // R1: verify against the ARCHIVE, not raw compressed bytes (searching a
+    // deflate stream for a plaintext value proves nothing — the bytes of a
+    // `.env` that *did* leak would be compressed too). The packing walker
+    // withholds the nested secrets and reports the exact archive paths, the
+    // manifest lists no secret-named entry, and the ordinary / example files
+    // are present and intact.
+    let withheld = &report.secret_files_withheld;
+    assert!(withheld.contains(&"embedded/plugins/mine/.env".to_string()));
+    assert!(withheld.contains(&"embedded/plugins/mine/config/.env".to_string()));
+    assert!(withheld.contains(&"embedded/plugins/mine/auth/token.json".to_string()));
     assert!(
-        !bytes
-            .windows(b"sk-secret-123".len())
-            .any(|w| w == b"sk-secret-123"),
-        "an exported pack must never carry a credential value"
+        !withheld.iter().any(|f| f.ends_with(".env.example")),
+        "the example was withheld from the pack — over-broad filtering"
     );
-    // The env section still carries the non-secret variable.
+    for entry in &pack.entries {
+        assert!(
+            !crate::pack::is_secret_entry_name(entry),
+            "archive carries a secret-named entry: {entry}"
+        );
+    }
+    assert!(pack
+        .entries
+        .iter()
+        .any(|e| e.ends_with("embedded/plugins/mine/config/tokenizer.js")));
+    assert!(pack
+        .entries
+        .iter()
+        .any(|e| e.ends_with("embedded/plugins/mine/.env.example")));
+
+    // The credential VALUE must be gone from the *unzipped* environment
+    // section (stripped by the env partition) — checked against the decoded
+    // manifest, not the zip bytes. The credential *name* legitimately survives
+    // in the value-less `credentials` list (the pack tells the user what to
+    // reconfigure), so the precise promise is: no secret VALUE anywhere, and the
+    // name is not a key in the env map — while the non-secret variable stays.
     let env = pack.manifest.environment.unwrap().0;
-    let app_mode = env
-        .pointer("/instance/env/APP_MODE")
-        .and_then(|v| v.as_str());
-    assert_eq!(app_mode, Some("prod"));
+    let env_json = env.to_string();
+    assert!(
+        !env_json.contains("sk-secret-123"),
+        "the credential value leaked into the manifest env"
+    );
+    assert!(
+        env.pointer("/instance/env/DEEPSEEK_API_KEY").is_none(),
+        "the credential name must not survive as an env *value*"
+    );
+    assert!(
+        env.pointer("/instance/env/APP_MODE")
+            .and_then(|v| v.as_str())
+            == Some("prod"),
+        "non-secret variables must travel"
+    );
     let _ = std::fs::remove_dir_all(&r);
 }
 

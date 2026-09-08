@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import * as desktop from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { InstalledPlugin, Instance, Plugin } from '@/types'
@@ -71,7 +72,7 @@ async function listPlugins(): Promise<PluginCatalog> {
     // do not exist on npm — so offering it here would give the user a list
     // of entries whose 安装 button can only ever 404. An empty catalog with
     // the real reason and a retry is the honest failure.
-    const error = err instanceof Error ? err.message : String(err)
+    const error = parseThrownError(err).message
     console.warn('[phl] plugin catalog unavailable:', error)
     return { plugins: [], offline: true, error }
   }

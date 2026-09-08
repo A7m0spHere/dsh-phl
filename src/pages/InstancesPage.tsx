@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
@@ -173,7 +174,7 @@ export function InstancesPage() {
       ui.toast({
         kind: 'error',
         title: '无法读取 Bundle',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return
     }
@@ -236,7 +237,7 @@ export function InstancesPage() {
       ui.toast({
         kind: 'error',
         title: '导入 Bundle 失败',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   }
@@ -377,7 +378,13 @@ export function InstancesPage() {
                 layout === 'grid' ? 'grid grid-cols-1 gap-2.5 lg:grid-cols-2' : 'flex flex-col gap-1.5'
               }
             >
-              <AnimatePresence mode="popLayout">
+              {/* `sync`, not `popLayout`: popLayout lifts an exiting card out of
+                  flow (position:absolute) while it animates out, and an
+                  interrupted exit — e.g. tab-switching mid-animation — strands
+                  that full-size ghost over the grid, swallowing every click on
+                  the instances page. sync cross-fades in flow with no floating
+                  node. */}
+              <AnimatePresence mode="sync">
                 {visible.map((instance) => (
                   <InstanceCard key={instance.id} instance={instance} layout={layout} />
                 ))}

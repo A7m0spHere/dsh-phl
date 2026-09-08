@@ -67,7 +67,9 @@ jobs:
       - run: npm run build
         shell: bash
 
-      - run: cargo test
+      # Match the CI Rust gate's scope: `--workspace` so the release build
+      # exercises Pack Core and the CLI too, not just the root crate (§R2).
+      - run: cargo test --workspace
         shell: bash
         working-directory: src-tauri
 

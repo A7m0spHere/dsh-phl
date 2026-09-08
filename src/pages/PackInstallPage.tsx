@@ -245,6 +245,7 @@ function ProgressStep() {
   const installing = usePackStore((s) => s.installing)
   const installError = usePackStore((s) => s.installError)
   const back = usePackStore((s) => s.back)
+  const cancelInstall = usePackStore((s) => s.cancelInstall)
   const push = useUIStore((s) => s.push)
   const reset = usePackStore((s) => s.reset)
 
@@ -278,6 +279,13 @@ function ProgressStep() {
       <div className="mt-4">
         <ProgressBar value={installing ? 0.6 : 1} active={installing} />
       </div>
+      {installing && (
+        <div className="mt-4 flex justify-end">
+          <Button variant="secondary" onClick={cancelInstall}>
+            取消安装
+          </Button>
+        </div>
+      )}
     </Card>
   )
 }

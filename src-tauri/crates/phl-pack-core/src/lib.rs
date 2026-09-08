@@ -37,7 +37,7 @@ pub mod format;
 pub mod unpack;
 pub mod write;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -65,6 +65,8 @@ pub const MANIFEST_NAME: &str = "phlpack.json";
 /// validator runs entirely before extraction, spec §21–22).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackError {
+    /// The host requested cancellation while a streaming operation was active.
+    Cancelled,
     /// The archive cannot be opened as a zip at all.
     Unreadable(String),
     /// `phlpack.json` is absent.
@@ -105,6 +107,7 @@ impl PackError {
             | PackError::TooLarge(s)
             | PackError::Consistency(s) => s.clone(),
             PackError::MissingManifest => "包内缺少 phlpack.json".to_string(),
+            PackError::Cancelled => "cancelled".to_string(),
             PackError::UnsupportedVersion { found, supported } => {
                 format!("整合包格式版本 {found} 超出当前支持的 {supported}，请升级 PHL")
             }
@@ -176,6 +179,22 @@ pub fn read_pack<R: Read + std::io::Seek + Send>(
     reader: R,
     total_bytes: u64,
 ) -> Result<ValidatedPack, PackError> {
+    read_pack_with_cancel(reader, total_bytes, &|| false)
+}
+
+/// Cancellable form of [`read_pack`]. The callback is polled between archive
+/// entries and for every fixed-size chunk hashed from an integrity-covered
+/// payload, so a host can stop validation in the middle of a single large file.
+pub fn read_pack_with_cancel<R, F>(
+    reader: R,
+    total_bytes: u64,
+    cancel: &F,
+) -> Result<ValidatedPack, PackError>
+where
+    R: Read + std::io::Seek + Send,
+    F: Fn() -> bool + ?Sized,
+{
+    ensure_not_cancelled(cancel)?;
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|e| PackError::Unreadable(e.to_string()))?;
     let len = archive.len();
@@ -194,6 +213,7 @@ pub fn read_pack<R: Read + std::io::Seek + Send>(
     let mut manifest_bytes: Option<Vec<u8>> = None;
 
     for index in 0..len {
+        ensure_not_cancelled(cancel)?;
         let mut entry = archive
             .by_index(index)
             .map_err(|e| PackError::Unreadable(e.to_string()))?;
@@ -275,7 +295,7 @@ pub fn read_pack<R: Read + std::io::Seek + Send>(
         }
     }
     if let Some(integrity) = &manifest.integrity {
-        verify_integrity(&mut archive, integrity)?;
+        verify_integrity(&mut archive, integrity, cancel)?;
     }
 
     Ok(ValidatedPack {
@@ -292,28 +312,37 @@ pub fn read_pack<R: Read + std::io::Seek + Send>(
 /// mismatch is a corrupted/lying pack — refused before any byte is installed.
 /// The manifest document itself and `phlpack.json` are not integrity-covered
 /// (they are the signed-by-nobody header; the map is keyed by payload paths).
-fn verify_integrity<R: Read + std::io::Seek>(
+fn verify_integrity<R: Read + std::io::Seek, F: Fn() -> bool + ?Sized>(
     archive: &mut zip::ZipArchive<R>,
     integrity: &PackIntegrity,
+    cancel: &F,
 ) -> Result<(), PackError> {
+    // Build normalized-name → index ONCE. The previous version re-scanned all
+    // `archive.len()` indices for every integrity key — O(entries²) on a fully
+    // covered pack, which is exactly the common case (§R6). Later integrity keys
+    // that don't resolve still error identically, just in O(1) per lookup.
+    let mut index_of: HashMap<PathBuf, usize> = HashMap::new();
+    for i in 0..archive.len() {
+        ensure_not_cancelled(cancel)?;
+        if let Ok(entry) = archive.by_index(i) {
+            if let Ok(norm) = normalize_entry(entry.name()) {
+                index_of.insert(norm, i);
+            }
+        }
+    }
     for (name, want) in integrity {
+        ensure_not_cancelled(cancel)?;
         let norm = normalize_entry(name).map_err(|_| PackError::Consistency(name.clone()))?;
-        // Integrity keys use the same forward-slash spelling as entry names.
-        let found = (0..archive.len())
-            .filter_map(|i| archive.by_index(i).ok().map(|e| (e.name().to_string(), i)))
-            .find(|(n, _)| normalize_entry(n).map(|p| p == norm).unwrap_or(false))
-            .map(|(_, i)| i);
-        let index = found.ok_or_else(|| {
+        let index = *index_of.get(&norm).ok_or_else(|| {
             PackError::Consistency(format!("完整性校验引用了包内不存在的文件 {name}"))
         })?;
         let mut entry = archive
             .by_index(index)
             .map_err(|e| PackError::Consistency(e.to_string()))?;
-        let mut buf = Vec::new();
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| PackError::Consistency(e.to_string()))?;
-        let got = sha256_hex(&buf);
+        // Stream-hash in fixed buffers (no whole-entry `Vec`), capped by the
+        // single-entry limit so a mis-declared size can't force a huge
+        // allocation (§R6 memory peak).
+        let got = sha256_of_reader_with_cancel(&mut entry, MAX_SINGLE_ENTRY, cancel)?;
         let want_clean = want.strip_prefix("sha256:").unwrap_or(want);
         if !got.eq_ignore_ascii_case(want_clean.trim()) {
             return Err(PackError::Consistency(format!(
@@ -322,6 +351,42 @@ fn verify_integrity<R: Read + std::io::Seek>(
         }
     }
     Ok(())
+}
+
+/// Streaming SHA-256 over any `Read` (a `zip::ZipFile` qualifies), capped at
+/// `max` actual bytes so an archive that under-declares an entry's size cannot
+/// force an unbounded allocation. Replaces the previous "read the whole entry
+/// into a `Vec`, then hash it" path in `verify_integrity` (§R6).
+pub(crate) fn sha256_of_reader_with_cancel<R, F>(
+    reader: &mut R,
+    max: u64,
+    cancel: &F,
+) -> Result<String, PackError>
+where
+    R: Read,
+    F: Fn() -> bool + ?Sized,
+{
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65_536];
+    let mut total = 0u64;
+    loop {
+        ensure_not_cancelled(cancel)?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| PackError::Unreadable(format!("校验读取失败: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > max {
+            return Err(PackError::TooLarge(
+                "条目解压后超过上限，校验中止".to_string(),
+            ));
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// sha256-hex of arbitrary bytes — the primitive the export side records into
@@ -377,10 +442,26 @@ pub(crate) fn embedded_plugin_under(path: &Path) -> Option<String> {
 /// Convenience: validate a pack sitting at `path` on disk (opens the file, reads
 /// only the central directory). Returns the on-disk size too, for progress.
 pub fn read_pack_from_path(path: &Path) -> Result<ValidatedPack, PackError> {
+    read_pack_from_path_with_cancel(path, &|| false)
+}
+
+/// Cancellable on-disk validation; see [`read_pack_with_cancel`].
+pub fn read_pack_from_path_with_cancel<F: Fn() -> bool + ?Sized>(
+    path: &Path,
+    cancel: &F,
+) -> Result<ValidatedPack, PackError> {
     let file =
         std::fs::File::open(path).map_err(|e| PackError::Unreadable(format!("{path:?}: {e}")))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    read_pack(file, size)
+    read_pack_with_cancel(file, size, cancel)
+}
+
+pub(crate) fn ensure_not_cancelled<F: Fn() -> bool + ?Sized>(cancel: &F) -> Result<(), PackError> {
+    if cancel() {
+        Err(PackError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

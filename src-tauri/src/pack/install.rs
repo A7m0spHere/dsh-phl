@@ -23,12 +23,14 @@
 //! which keeps "PHL 始终是配置源" and never entangles two transactions.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use super::{PluginSource, ValidatedPack};
+use super::{PackPlugin, PluginSource, ValidatedPack};
 use crate::api_config::credential_env_names;
 use crate::errors;
 use crate::instances::bundle::InstanceBundle;
@@ -39,7 +41,11 @@ use crate::instances::{
     InstanceRecord, InstanceSource, ManagementMode,
 };
 use crate::paths::{sanitize_segment, PhlState};
-use crate::versions::now_iso;
+use crate::plugins::install::commit_install;
+use crate::plugins::resolve::sanitize_pkg_path;
+use crate::versions::{now_iso, Transfers};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// A resolver verdict per dependency (spec §18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -243,25 +249,29 @@ pub async fn preview_pack(state: State<'_, PhlState>, path: String) -> Result<Pa
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn install_pack(
+    transfers: State<'_, Transfers>,
     locks: State<'_, crate::resources::ResourceLocks>,
     tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
+    transfer_id: String,
     path: String,
     req: PackInstallRequest,
     on_progress: Channel<CloneProgress>,
 ) -> Result<PackInstallOutcome, String> {
     let id = req.manifest.id.clone();
-    crate::resources::guarded(
-        crate::resources::next_task_id("pack-install"),
+    let flag = transfers.take(&transfer_id);
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
         "pack-install",
         format!("安装整合包 → 实例 {id}"),
         vec![crate::resources::Resource::Instance(id.clone())],
-        None,
+        Some(flag.clone()),
         &locks,
         &tasks,
         move |task| async move {
-            let r = install_inner(&state.root(), task, &path, req, &on_progress).await;
+            let r = install_inner(&state.root(), task, &path, req, &on_progress, flag).await;
             if r.is_ok() {
                 if let Ok(dir) = instance_dir(&state.root(), &id) {
                     crate::instances::invalidate_disk_usage(&dir);
@@ -270,7 +280,9 @@ pub async fn install_pack(
             r
         },
     )
-    .await
+    .await;
+    transfers.release(&transfer_id);
+    result
 }
 
 async fn install_inner(
@@ -279,11 +291,14 @@ async fn install_inner(
     path: &str,
     req: PackInstallRequest,
     on_progress: &Channel<CloneProgress>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<PackInstallOutcome, String> {
     // Re-validate at commit time: the bytes on disk are attacker-supplied and
     // may have changed since the preview (TOCTOU on the archive is closed by
     // re-running the whole P1-2 validation here).
-    let pack = super::read_pack_from_path(Path::new(path)).map_err(super::pack_error)?;
+    let is_cancelled = || cancel.load(Ordering::SeqCst);
+    let pack = super::read_pack_from_path_with_cancel(Path::new(path), &is_cancelled)
+        .map_err(super::pack_error)?;
     let (_deps, blocked) = resolve_dependencies(root, &pack).await;
     if blocked && !req.allow_missing {
         let missing: Vec<String> = pack
@@ -349,7 +364,37 @@ async fn install_inner(
             }
 
             task.set_phase("解包整合包");
-            let extracted = unpack_pack(path, &profile, &home)?;
+            // §R7: decompression + writing is the heaviest synchronous phase of
+            // an install, so it runs on the blocking pool — the async worker
+            // (and other instances' transfers) stay responsive during a big
+            // unpack. Cancellation is re-checked at the phase boundary right
+            // after, before any further staging work, so a cancel observed
+            // during the unpack aborts into the existing staging cleanup.
+            let extracted = {
+                let pack_path = path.to_string();
+                let profile_c = profile.clone();
+                let home_c = home.clone();
+                let unpack_cancel = cancel.clone();
+                tokio::task::spawn_blocking(move || {
+                    unpack_pack_with_cancel(&pack_path, &profile_c, &home_c, &|| {
+                        unpack_cancel.load(Ordering::SeqCst)
+                    })
+                })
+                .await
+                .map_err(|e| format!("解包任务调度失败: {e}"))??
+            };
+            if task.cancel_observed() {
+                return Err("cancelled".into());
+            }
+
+            // §R3: unpack only dropped the embedded plugins' files into
+            // `node_modules/`; they are not "installed" until each carries a
+            // PHL marker and a Cordis registration. Registering inside STAGING
+            // (before the manifest write + rename) means a failure here aborts
+            // into the existing `remove_dir_all(&staging)` cleanup — no half-
+            // committed instance ever lands.
+            task.set_phase("登记内置插件");
+            register_embedded_plugins(&pack.manifest.plugins, &profile).await?;
 
             task.set_phase("应用环境");
             let mut credential_names = Vec::new();
@@ -411,25 +456,39 @@ struct Extracted {
 /// function only decides *where* each section lands. The archive is re-opened
 /// and re-validated by the caller before this runs, so entry names are
 /// already proven traversal-/symlink-free.
+#[cfg(test)]
 fn unpack_pack(path: &str, profile: &Path, home: &Path) -> Result<Extracted, String> {
+    unpack_pack_with_cancel(path, profile, home, &|| false)
+}
+
+fn unpack_pack_with_cancel<F: Fn() -> bool + ?Sized>(
+    path: &str,
+    profile: &Path,
+    home: &Path,
+    cancel: &F,
+) -> Result<Extracted, String> {
     let plugins_root = profile.join("node_modules");
     let sessions_root = home.join("sessions");
     let overrides_root = home.to_path_buf();
-    let written = super::unpack::unpack_entries_to(Path::new(path), |rel| {
-        // `rel` is the core-normalised (forward-slash, traversal-free)
-        // relative entry name. Anything outside the three payload sections
-        // (`phlpack.json`, `assets/…`) is metadata — mapped to nothing.
-        if let Ok(rest) = rel.strip_prefix("embedded/plugins") {
-            return Some((plugins_root.join(rest), plugins_root.clone()));
-        }
-        if let Ok(rest) = rel.strip_prefix("sessions") {
-            return Some((sessions_root.join(rest), sessions_root.clone()));
-        }
-        if let Ok(rest) = rel.strip_prefix("overrides") {
-            return Some((overrides_root.join(rest), overrides_root.clone()));
-        }
-        None
-    })
+    let written = super::unpack::unpack_entries_to_with_cancel(
+        Path::new(path),
+        |rel| {
+            // `rel` is the core-normalised (forward-slash, traversal-free)
+            // relative entry name. Anything outside the three payload sections
+            // (`phlpack.json`, `assets/…`) is metadata — mapped to nothing.
+            if let Ok(rest) = rel.strip_prefix("embedded/plugins") {
+                return Some((plugins_root.join(rest), plugins_root.clone()));
+            }
+            if let Ok(rest) = rel.strip_prefix("sessions") {
+                return Some((sessions_root.join(rest), sessions_root.clone()));
+            }
+            if let Ok(rest) = rel.strip_prefix("overrides") {
+                return Some((overrides_root.join(rest), overrides_root.clone()));
+            }
+            None
+        },
+        cancel,
+    )
     .map_err(super::pack_error)?;
     let sessions = written
         .iter()
@@ -437,6 +496,113 @@ fn unpack_pack(path: &str, profile: &Path, home: &Path) -> Result<Extracted, Str
         .filter(|f| f.archive_name.ends_with(".jsonl") || f.archive_name.ends_with(".jsonl.zstd"))
         .count();
     Ok(Extracted { sessions })
+}
+
+/// §R3 — turn the embedded plugins that [`unpack_pack`] dropped into
+/// `node_modules/` into fully registered installs, reusing the plugin
+/// installer's own [`commit_install`] (marker write + Cordis registration +
+/// enable), so there is exactly one install protocol in the codebase.
+///
+/// Identity is taken from **what actually landed on disk here**, not from the
+/// pack's claims or a carried-over marker: a CLI-built pack ships only a
+/// `package.json` + sources (no PHL marker at all), and a desktop export may
+/// carry a *stale* `phl-plugin.json` / trust flag from the source machine —
+/// neither is trusted blindly (spec §12 honesty). The folder's `package.json`
+/// `name` gives the registry id (correct for `@scope/name` packages, whose
+/// unpacked folder is two path segments), and the manifest's `id` is recorded
+/// as `pluginId` (the catalog id the instance plugin list is keyed by). Trust
+/// reflects this import's facts: an embedded plugin came inside a pack from a
+/// peer machine, with nothing registry-pinned to re-verify against, so it is
+/// honestly `unverified`.
+///
+/// Returns the number of plugins registered. A declared embedded payload that
+/// has no `package.json`, a missing name, an illegal package name, or an
+/// install folder outside the store is a hard error — the staging caller then
+/// rolls back rather than committing an instance whose plugins DSH would not
+/// load. No enable/disable state is carried inside a pack, so plugins land
+/// **enabled** (the documented default of `commit_install`), not a fabricated
+/// "was it on before" guess.
+async fn register_embedded_plugins(
+    plugins: &[PackPlugin],
+    profile: &Path,
+) -> Result<usize, String> {
+    let plugins_root = profile.join("node_modules");
+    // Two manifest ids can share one unpacked folder; register each folder once.
+    let mut folder_ids: HashMap<PathBuf, String> = HashMap::new();
+    for p in plugins {
+        let PluginSource::Embedded { path } = &p.source else {
+            continue;
+        };
+        // The pack dir is `embedded/plugins/<folder>`; [`unpack_pack`] maps that
+        // to `node_modules/<folder>`. Skip any path not under that section.
+        let Some(folder) = path.strip_prefix("embedded/plugins/") else {
+            continue;
+        };
+        let joined = plugins_root.join(folder.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Defence in depth: the target must still sit inside the store. The core
+        // validator already forbids traversal, but a mis-mapped name must not be
+        // able to write a marker elsewhere.
+        let dest = match joined.canonicalize() {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(errors::coded(
+                    errors::ErrCode::NotFound,
+                    format!("整合包声明的内置插件目录未随包解出：{path}"),
+                ))
+            }
+        };
+        let store_root = plugins_root
+            .canonicalize()
+            .map_err(|e| format!("无法定位插件目录 {plugins_root:?}: {e}"))?;
+        if !dest.starts_with(&store_root) {
+            return Err(errors::coded(
+                errors::ErrCode::State,
+                format!("内置插件安装目录越界，已拒绝登记：{path}"),
+            ));
+        }
+        folder_ids.entry(dest).or_insert_with(|| p.id.clone());
+    }
+
+    let mut count = 0;
+    for (dir, plugin_id) in folder_ids {
+        let raw = tokio::fs::read_to_string(dir.join("package.json"))
+            .await
+            .map_err(|e| {
+                errors::coded(
+                    errors::ErrCode::NotFound,
+                    format!("内置插件缺少 package.json，无法登记：{dir:?}（{e}）"),
+                )
+            })?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("解析内置插件 package.json 失败: {e}"))?;
+        let name = value
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| format!("内置插件 package.json 缺少 name：{dir:?}"))?;
+        let registry_id = sanitize_pkg_path(name)
+            .map_err(|e| format!("内置插件包名 {name:?} 非法，无法登记：{e}"))?;
+        let version = value
+            .get("version")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+        let marker = serde_json::json!({
+            "installedAt": now_iso(),
+            "pluginId": plugin_id,
+            "version": version,
+            "kind": "embedded",
+            "registryId": registry_id,
+            "trust": "unverified",
+            "source": { "type": "pack-embedded" },
+        });
+        commit_install(&dir, &marker, profile, &registry_id)
+            .await
+            .map_err(|e| format!("登记内置插件 {registry_id} 失败：{e}"))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

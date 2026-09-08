@@ -19,7 +19,9 @@
 //!   is re-opened through the validator so we never emit something our own
 //!   installer would refuse.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::State;
@@ -34,7 +36,7 @@ use crate::instances::{
     profile_root_of, scan_plugins, InstanceManifest,
 };
 use crate::paths::PhlState;
-use crate::versions::now_iso;
+use crate::versions::{now_iso, Transfers};
 
 /// One plugin as the export plan presents it: everything the UI needs to let
 /// the user decide remote-vs-embedded, and to warn about redistribution.
@@ -83,6 +85,8 @@ pub struct PackExportPlan {
     pub secret_files: Vec<String>,
     pub warnings: Vec<String>,
 }
+
+type PayloadScan = (u64, Vec<String>, Vec<String>);
 
 /// The export command's result (mirrors BundleExportReport's shape + the pack
 /// path so the UI can reveal it).
@@ -168,60 +172,126 @@ fn plugin_license(node_modules: &Path, registry_id: &str) -> (Option<String>, bo
     (None, true)
 }
 
-fn estimate_dir_size(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries.flatten().fold(0u64, |acc, e| {
-        let Ok(m) = e.metadata() else { return acc };
-        if m.is_dir() {
-            acc + estimate_dir_size(&e.path())
-        } else {
-            acc + m.len()
+/// One pass over a plugin's directory yields BOTH the uncompressed size
+/// estimate and the §12 secret-bearing files (§R7: the preview used to run two
+/// separate recursive walks — `estimate_dir_size` + `collect_secret_files` —
+/// over the same tree, and they disagreed on symlinks: the size walker followed
+/// them while the secret walker skipped them, so the reported byte estimate and
+/// the reported exclusions didn't describe the same set of files).
+///
+/// Now both are computed from a single walk that *skips symlinks* — matching
+/// what `add_tree` actually packs (a pack is a data container; links are
+/// excluded) — so "estimated N bytes" and "these files excluded" describe the
+/// identical payload set. Scan errors are surfaced, not swallowed: a directory
+/// we couldn't read contributes no bytes and reports an error, rather than
+/// silently reading as "zero bytes, no secrets".
+///
+/// Returns `(total_regular_bytes, secret_paths_relative_to_dir, scan_errors)`.
+fn scan_payload_dir(
+    dir: &Path,
+    cancel: &(impl Fn() -> bool + ?Sized),
+) -> Result<(u64, Vec<String>, Vec<String>), String> {
+    let mut bytes = 0u64;
+    let mut secrets = Vec::new();
+    let mut errors = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if cancel() {
+            return Err("cancelled".into());
         }
-    })
-}
-
-/// Recursively collect paths (relative to `base`, forward-slash) of files
-/// whose *names* match the §12 secret families. Same rule the core
-/// tree-walker applies at pack time, run here at preview so the plan can warn
-/// before a byte is written. Symlinks are not followed (never packed anyway).
-pub(crate) fn collect_secret_files(base: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            errors.push(format!("{}", current.display()));
             continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
-            collect_secret_files(base, &path, out);
-        } else if super::is_secret_entry_name(&name) {
-            if let Ok(rel) = path.strip_prefix(base) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
+        };
+        for entry in entries.flatten() {
+            if cancel() {
+                return Err("cancelled".into());
+            }
+            let path = entry.path();
+            // Skip symlinks (never packed), exactly as the core tree-walker does.
+            if path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            match path.metadata() {
+                Ok(m) if m.is_dir() => stack.push(path),
+                Ok(m) => {
+                    bytes += m.len();
+                    // `is_secret_entry_name` judges the basename, so passing the
+                    // file name is enough — but a nested `config/.env` must count
+                    // too, which the shared rule already guarantees.
+                    if super::is_secret_entry_name(&name) {
+                        if let Ok(rel) = path.strip_prefix(dir) {
+                            secrets.push(rel.to_string_lossy().replace('\\', "/"));
+                        }
+                    }
+                }
+                Err(_) => errors.push(format!("{}", path.display())),
             }
         }
     }
+    Ok((bytes, secrets, errors))
 }
 
 /// Build the export plan (no files written). Read-only over the instance.
 pub(crate) async fn build_plan(root: &Path, id: &str) -> Result<PackExportPlan, String> {
+    build_plan_with_cancel(root, id, Arc::new(AtomicBool::new(false))).await
+}
+
+async fn build_plan_with_cancel(
+    root: &Path,
+    id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<PackExportPlan, String> {
     let inst = resolve(root, id).await?;
     let credential_envs = credential_env_names(root).await;
     let partition = partition_env(inst.manifest.env.clone(), &credential_envs);
     let plugins = scan_plugins(&inst.profile_root).await;
     let node_modules = inst.profile_root.join("node_modules");
+    // §R7: the whole-tree filesystem scan (size + secrets together) runs in ONE
+    // walk per plugin, off the async worker, so a large `node_modules` never
+    // stalls the event loop and no plugin tree is recursored twice. Aligned 1:1
+    // with `plugins` by index.
+    let registry_ids: Vec<String> = plugins.iter().map(|p| p.registry_id.clone()).collect();
+    let scan_root = node_modules.clone();
+    let scan_cancel = cancel.clone();
+    let scans = tokio::task::spawn_blocking(move || -> Result<Vec<PayloadScan>, String> {
+        registry_ids
+            .into_iter()
+            .map(|rid| {
+                if scan_cancel.load(Ordering::SeqCst) {
+                    return Err("cancelled".into());
+                }
+                if rid.trim().is_empty() {
+                    return Ok((0u64, Vec::new(), Vec::new()));
+                }
+                let dir = scan_root.join(&rid);
+                if !dir.is_dir() {
+                    return Ok((0u64, Vec::new(), Vec::new()));
+                }
+                let (bytes, secrets, errors) =
+                    scan_payload_dir(&dir, &|| scan_cancel.load(Ordering::SeqCst))?;
+                let namespaced = secrets
+                    .into_iter()
+                    // Namespace by plugin so the user knows WHICH plugin carries it.
+                    .map(|rel| format!("{rid}/{rel}"))
+                    .collect();
+                Ok((bytes, namespaced, errors))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("导出预览扫描失败: {e}"))??;
+
     let mut plugin_plans = Vec::new();
     let mut estimated = 0u64;
     let mut warnings = Vec::new();
     let mut secret_files = Vec::new();
-    for p in &plugins {
+    for (p, (bytes, secrets, errors)) in plugins.iter().zip(scans) {
         let (license, license_unknown) = plugin_license(&node_modules, &p.registry_id);
         if license_unknown {
             warnings.push(format!(
@@ -237,17 +307,14 @@ pub(crate) async fn build_plan(root: &Path, id: &str) -> Result<PackExportPlan, 
         let trusted = matches!(p.trust.as_str(), "verified" | "pinned");
         let registry_available = !p.registry_id.trim().is_empty() && trusted;
         let embed_recommended = !registry_available;
-        let dir = node_modules.join(&p.registry_id);
-        if !p.registry_id.trim().is_empty() && dir.is_dir() {
-            estimated += estimate_dir_size(&dir);
-            // Namespace by plugin so the user knows WHICH plugin carries it.
-            let mut found = Vec::new();
-            collect_secret_files(&dir, &dir, &mut found);
-            secret_files.extend(
-                found
-                    .into_iter()
-                    .map(|rel| format!("{}/{rel}", p.registry_id)),
-            );
+        estimated += bytes;
+        secret_files.extend(secrets);
+        if !errors.is_empty() {
+            warnings.push(format!(
+                "插件 {} 有 {} 处文件预览时无法读取；导出会跳过读不到的内容，估算未计入这些",
+                p.plugin_id,
+                errors.len()
+            ));
         }
         plugin_plans.push(ExportPluginPlan {
             plugin_id: p.plugin_id.clone(),
@@ -314,27 +381,59 @@ pub async fn preview_instance_pack_export(
 /// the root — same rule as the bundle export: confinement governs what we READ,
 /// the destination file is the user's choice.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_instance_pack(
+    transfers: State<'_, Transfers>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
+    transfer_id: String,
     id: String,
     dest: String,
     options: PackExportOptions,
 ) -> Result<PackExportReport, String> {
     let root = state.root();
-    export_pack_inner(&root, id, dest, options).await
+    let flag = transfers.take(&transfer_id);
+    let result =
+        crate::resources::guarded(
+            transfer_id.clone(),
+            "pack-export",
+            format!("导出实例 {id} 的整合包"),
+            vec![crate::resources::Resource::Instance(id.clone())],
+            Some(flag.clone()),
+            &locks,
+            &tasks,
+            move |_task| async move {
+                export_pack_inner_with_cancel(&root, id, dest, options, flag).await
+            },
+        )
+        .await;
+    transfers.release(&transfer_id);
+    result
 }
 
 /// The testable core: everything the command does, over an explicit root.
+#[cfg(test)]
 pub(crate) async fn export_pack_inner(
     root: &Path,
     id: String,
     dest: String,
     options: PackExportOptions,
 ) -> Result<PackExportReport, String> {
+    export_pack_inner_with_cancel(root, id, dest, options, Arc::new(AtomicBool::new(false))).await
+}
+
+async fn export_pack_inner_with_cancel(
+    root: &Path,
+    id: String,
+    dest: String,
+    options: PackExportOptions,
+    cancel: Arc<AtomicBool>,
+) -> Result<PackExportReport, String> {
     let inst = resolve(root, &id).await?;
     // Guard the only genuinely unsafe default: shipping sessions without the
     // explicit privacy acknowledgement the spec requires (part 11).
-    let plan = build_plan(root, &id).await?;
+    let plan = build_plan_with_cancel(root, &id, cancel.clone()).await?;
     if options.include_sessions && !options.sessions_privacy_ack {
         return Err(errors::coded(
             errors::ErrCode::State,
@@ -369,8 +468,76 @@ pub(crate) async fn export_pack_inner(
         credentials: partition.credentials.clone(),
     };
 
+    // §R7: compress + hash + self-verify is pure synchronous disk/CPU work. It
+    // runs in `spawn_blocking` (via `write_pack_archive`) so a large export can't
+    // stall the async worker, while other tasks stay responsive. Every failure
+    // path (a missing plugin dir, an un-embeddable plugin, a seal/verify error)
+    // surfaces through the `?` here, and `write_pack_archive` deletes the
+    // partial archive it created before returning the error.
+    let build = PackBuild {
+        dest,
+        id,
+        manifest: inst.manifest.clone(),
+        sessions_home: inst.home.clone(),
+        profile_root: inst.profile_root.clone(),
+        plugin_plans: plan.plugins.clone(),
+        session_count: plan.session_count,
+        options,
+        bundle,
+    };
+    let plugin_count = plan.plugins.len();
+    let credential_names = partition.credentials;
+    let pack_path = build.dest.clone();
+    let (embedded_count, sessions_included, withheld) =
+        tokio::task::spawn_blocking(move || write_pack_archive(build, cancel))
+            .await
+            .map_err(|e| format!("导出任务调度失败: {e}"))??;
+
+    Ok(PackExportReport {
+        pack_path,
+        plugin_count,
+        embedded_count,
+        sessions_included,
+        credential_names,
+        secret_files_withheld: withheld,
+    })
+}
+
+/// Owned inputs for [`write_pack_archive`], bundled so the blocking call takes
+/// one `Send + 'static` argument (no borrow of the async scope) and stays under
+/// clippy's arity limit (§R7).
+struct PackBuild {
+    dest: String,
+    id: String,
+    manifest: InstanceManifest,
+    sessions_home: PathBuf,
+    profile_root: PathBuf,
+    plugin_plans: Vec<ExportPluginPlan>,
+    session_count: usize,
+    options: PackExportOptions,
+    bundle: InstanceBundle,
+}
+
+/// Synchronously write a `.phlpack` and re-open it through the validator. The
+/// whole body is blocking filesystem/CPU work and is called inside
+/// `spawn_blocking` (§R7). Takes owned inputs so it can move onto the pool.
+fn write_pack_archive(
+    build: PackBuild,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<(usize, bool, Vec<String>), String> {
+    let PackBuild {
+        dest,
+        id,
+        manifest: inst_manifest,
+        sessions_home,
+        profile_root,
+        plugin_plans,
+        session_count,
+        options,
+        bundle,
+    } = build;
     let mut builder = PackBuilder::create(Path::new(&dest))?;
-    let node_modules = inst.profile_root.join("node_modules");
+    let node_modules = profile_root.join("node_modules");
     let mut pack_plugins = Vec::new();
     let embed_set: std::collections::HashSet<&str> = options
         .embed_registry_ids
@@ -381,117 +548,124 @@ pub(crate) async fn export_pack_inner(
     // §12 file-layer strip: the core tree-walker withholds secret-named files
     // and reports them here so the pack's `secretsExcluded: true` is honest.
     let mut withheld: Vec<String> = Vec::new();
-    for p in &plan.plugins {
-        let embed = embed_set.contains(p.registry_id.as_str());
-        let source = if embed {
-            // The embedded archive path mirrors the install folder exactly
-            // (`embedded/plugins/<registryId>`), so the installer can map it
-            // back to `node_modules/<registryId>` — including scoped npm names,
-            // which are two path segments. Falls back to a sanitised single
-            // segment only when the raw id could escape the archive.
-            let pack_dir = format!("embedded/plugins/{}", embed_dir_name(&p.registry_id));
-            let from = node_modules.join(&p.registry_id);
-            if !from.is_dir() {
-                return Err(errors::coded(
-                    errors::ErrCode::NotFound,
-                    format!("无法打包插件目录：{}", p.registry_id),
-                ));
+    let cancelled = || cancel_flag.load(Ordering::SeqCst);
+    // On any error after the file is created, drop the partial archive: a failed
+    // export must not leave a truncated `.phlpack` for the user to share (§R6).
+    let result = (|| -> Result<(usize, bool), String> {
+        for p in &plugin_plans {
+            if cancelled() {
+                return Err("cancelled".into());
             }
-            builder
-                .add_tree(&from, &pack_dir)
-                .map(|report| withheld.extend(report.withheld_secrets))?;
-            embedded_count += 1;
-            PluginSource::Embedded { path: pack_dir }
-        } else {
-            if !p.registry_available {
-                return Err(errors::coded(
-                    errors::ErrCode::State,
-                    format!(
-                        "插件 {} 无法从注册表重新下载，请在导出前选择嵌入它",
-                        p.plugin_id
-                    ),
-                ));
-            }
-            PluginSource::Registry {
-                registry_id: p.registry_id.clone(),
-            }
-        };
-        pack_plugins.push(super::PackPlugin {
-            id: p.plugin_id.clone(),
-            version: p.version.clone(),
-            source,
-            // A plugin with no registry id must be embedded, so if it got here
-            // as registry it is genuinely required.
-            required: true,
-        });
-    }
-
-    let mut sessions_included = false;
-    if options.include_sessions && plan.session_count > 0 {
-        let sessions = inst.home.join("sessions");
-        if sessions.is_dir() {
-            builder
-                .add_tree(&sessions, "sessions")
-                .map(|report| withheld.extend(report.withheld_secrets))?;
-            sessions_included = true;
+            let embed = embed_set.contains(p.registry_id.as_str());
+            let source = if embed {
+                // The embedded archive path mirrors the install folder exactly
+                // (`embedded/plugins/<registryId>`), so the installer can map it
+                // back to `node_modules/<registryId>` — including scoped npm
+                // names, which are two path segments. Falls back to a sanitised
+                // single segment only when the raw id could escape the archive.
+                let pack_dir = format!("embedded/plugins/{}", embed_dir_name(&p.registry_id));
+                let from = node_modules.join(&p.registry_id);
+                if !from.is_dir() {
+                    return Err(errors::coded(
+                        errors::ErrCode::NotFound,
+                        format!("无法打包插件目录：{}", p.registry_id),
+                    ));
+                }
+                builder
+                    .add_tree_with_cancel(&from, &pack_dir, &cancelled)
+                    .map(|report| withheld.extend(report.withheld_secrets))?;
+                embedded_count += 1;
+                PluginSource::Embedded { path: pack_dir }
+            } else {
+                if !p.registry_available {
+                    return Err(errors::coded(
+                        errors::ErrCode::State,
+                        format!(
+                            "插件 {} 无法从注册表重新下载，请在导出前选择嵌入它",
+                            p.plugin_id
+                        ),
+                    ));
+                }
+                PluginSource::Registry {
+                    registry_id: p.registry_id.clone(),
+                }
+            };
+            pack_plugins.push(super::PackPlugin {
+                id: p.plugin_id.clone(),
+                version: p.version.clone(),
+                source,
+                // A plugin with no registry id must be embedded, so if it got
+                // here as registry it is genuinely required.
+                required: true,
+            });
         }
+
+        let mut sessions_included = false;
+        if options.include_sessions && session_count > 0 {
+            let sessions = sessions_home.join("sessions");
+            if sessions.is_dir() {
+                builder
+                    .add_tree_with_cancel(&sessions, "sessions", &cancelled)
+                    .map(|report| withheld.extend(report.withheld_secrets))?;
+                sessions_included = true;
+            }
+        }
+
+        // Overrides are a forward slot; PHL-managed instances have none today,
+        // so the list stays empty but the section is emitted for completeness.
+        let manifest = PhlPackManifest {
+            format_version: super::PACK_FORMAT_VERSION,
+            pack: super::format::PackMeta {
+                id: format!("pack-{}", sanitize_pack_id(&id)),
+                name: inst_manifest.name.clone(),
+                version: "1.0.0".into(),
+                author: String::new(),
+                description: format!("从 PHL 实例「{}」导出", inst_manifest.name),
+                created_at: now_iso(),
+                icon: None,
+            },
+            dsh: super::PackDsh {
+                version: inst_manifest.version_id.clone(),
+                source: None,
+                hash: None,
+            },
+            runtime: super::PackRuntime {
+                kind: Some("node".into()),
+                node_version: Some(inst_manifest.runtime_id.clone()),
+                arch: Some(current_arch()),
+            },
+            plugins: pack_plugins,
+            overrides: Vec::new(),
+            content: super::PackContent {
+                sessions_included,
+                session_count: sessions_included.then_some(session_count),
+                secrets_excluded: true,
+                privacy: Some(super::PackPrivacy {
+                    warning_acknowledged: sessions_included && options.sessions_privacy_ack,
+                    note: sessions_included
+                        .then(|| "包含历史对话，可能含用户输入与敏感信息".into()),
+                }),
+            },
+            integrity: None,
+            environment: Some(EnvironmentSection(
+                serde_json::to_value(&bundle).map_err(|e| e.to_string())?,
+            )),
+        };
+
+        // Seal and re-open: never ship a pack our own installer would refuse.
+        builder.finish_with_cancel(manifest, &cancelled)?;
+        let _validated: ValidatedPack =
+            super::read_pack_from_path_with_cancel(Path::new(&dest), &cancelled)
+                .map_err(super::pack_error)?;
+        Ok((embedded_count, sessions_included))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&dest);
     }
-
-    // Overrides are a forward slot; PHL-managed instances have none today, so
-    // the list stays empty but the section is emitted for schema completeness.
-    let manifest = PhlPackManifest {
-        format_version: super::PACK_FORMAT_VERSION,
-        pack: super::format::PackMeta {
-            id: format!("pack-{}", sanitize_pack_id(&id)),
-            name: inst.manifest.name.clone(),
-            version: "1.0.0".into(),
-            author: String::new(),
-            description: format!("从 PHL 实例「{}」导出", inst.manifest.name),
-            created_at: now_iso(),
-            icon: None,
-        },
-        dsh: super::PackDsh {
-            version: inst.manifest.version_id.clone(),
-            source: None,
-            hash: None,
-        },
-        runtime: super::PackRuntime {
-            kind: Some("node".into()),
-            node_version: Some(inst.manifest.runtime_id.clone()),
-            arch: Some(current_arch()),
-        },
-        plugins: pack_plugins,
-        overrides: Vec::new(),
-        content: super::PackContent {
-            sessions_included,
-            session_count: sessions_included.then_some(plan.session_count),
-            secrets_excluded: true,
-            privacy: Some(super::PackPrivacy {
-                warning_acknowledged: sessions_included && options.sessions_privacy_ack,
-                note: sessions_included.then(|| "包含历史对话，可能含用户输入与敏感信息".into()),
-            }),
-        },
-        integrity: None,
-        environment: Some(EnvironmentSection(
-            serde_json::to_value(&bundle).map_err(|e| e.to_string())?,
-        )),
-    };
-
-    // Seal and re-open: never ship a pack our own installer would refuse.
-    builder.finish(manifest)?;
-    let _validated: ValidatedPack =
-        super::read_pack_from_path(Path::new(&dest)).map_err(super::pack_error)?;
-
+    let (embedded_count, sessions_included) = result?;
     withheld.sort();
     withheld.dedup();
-    Ok(PackExportReport {
-        pack_path: dest,
-        plugin_count: plan.plugins.len(),
-        embedded_count,
-        sessions_included,
-        credential_names: partition.credentials,
-        secret_files_withheld: withheld,
-    })
+    Ok((embedded_count, sessions_included, withheld))
 }
 
 /// Turn a registry id (`@scope/name`, or any npm name) into a single safe pack

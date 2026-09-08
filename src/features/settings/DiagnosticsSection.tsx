@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/cn'
 import {
@@ -42,7 +43,7 @@ export function DiagnosticsSection() {
         ui.toast({
           kind: 'error',
           title: '诊断失败',
-          message: err instanceof Error ? err.message : String(err),
+          message: parseThrownError(err).message,
         })
       })
       .finally(() => setDiagLoading(false))
@@ -94,7 +95,7 @@ export function DiagnosticsSection() {
       ui.toast({
         kind: 'error',
         title: '清理缓存失败',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     } finally {
       setCacheBusy(false)

@@ -16,7 +16,7 @@
 //! only references them by id. Sharing the bits while isolating the state is
 //! the whole point of the product.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use tauri::State;
 use crate::api_config::ApiBinding;
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
+use crate::plugins::cordis::declared_plugin_ids;
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
@@ -610,11 +611,20 @@ pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> Inst
 /// source of truth removes a whole class of drift: an install whose record was
 /// lost still shows up, a record whose files were removed does not, and a
 /// plugin added out of band is discovered rather than ignored.
+///
+/// A package counts as installed when it carries PHL's `phl-plugin.json`
+/// marker *or* when `cordis.patch.yml` declares a mount row for it (`id:` or
+/// `name:`). The second clause is the out-of-band half: a plugin installed by
+/// hand (`pnpm add` into the profile + a written insert block) is exactly as
+/// installed to DSH as one PHL committed — it simply lacks PHL's paperwork.
+/// Packages that are merely present in `node_modules` (transitive deps,
+/// pnpm's store layout) match neither and stay invisible.
 pub(crate) async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
     let node_modules = profile.join("node_modules");
     let disabled = disabled_plugin_ids(profile).await;
+    let declared = declared_plugin_ids(profile).await;
     let mut out = Vec::new();
-    collect_packages(&node_modules, &disabled, &mut out, true).await;
+    collect_packages(&node_modules, &disabled, &declared, &mut out, true).await;
     out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
     out
 }
@@ -624,6 +634,7 @@ pub(crate) async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
 async fn collect_packages(
     dir: &Path,
     disabled: &HashSet<String>,
+    declared: &HashMap<String, bool>,
     out: &mut Vec<InstalledPluginInfo>,
     allow_scopes: bool,
 ) {
@@ -641,36 +652,73 @@ async fn collect_packages(
             continue;
         }
         if allow_scopes && name.starts_with('@') {
-            Box::pin(collect_packages(&path, disabled, out, false)).await;
+            Box::pin(collect_packages(&path, disabled, declared, out, false)).await;
             continue;
         }
-        let Ok(raw) = tokio::fs::read_to_string(path.join("phl-plugin.json")).await else {
-            continue; // not installed by PHL
-        };
-        let Ok(marker) = serde_json::from_str::<PluginMarker>(&raw) else {
-            continue;
-        };
-        // Markers written before the catalog id was recorded fall back to the
-        // registry id — a slightly wrong label beats losing the install.
-        let plugin_id = marker
-            .plugin_id
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| marker.registry_id.clone());
-        if plugin_id.is_empty() {
+        if let Ok(raw) = tokio::fs::read_to_string(path.join("phl-plugin.json")).await {
+            let Ok(marker) = serde_json::from_str::<PluginMarker>(&raw) else {
+                continue;
+            };
+            // Markers written before the catalog id was recorded fall back to the
+            // registry id — a slightly wrong label beats losing the install.
+            let plugin_id = marker
+                .plugin_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| marker.registry_id.clone());
+            if plugin_id.is_empty() {
+                continue;
+            }
+            out.push(InstalledPluginInfo {
+                enabled: !disabled.contains(&marker.registry_id),
+                registry_id: marker.registry_id,
+                plugin_id,
+                version: marker.version,
+                trust: if marker.trust.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    marker.trust
+                },
+            });
             continue;
         }
+        // Use the full scoped name; a bare leaf could alias an unrelated package.
+        let name = if allow_scopes {
+            name
+        } else {
+            format!(
+                "{}/{name}",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            )
+        };
+        let Some(&disabled_here) = declared.get(&name) else {
+            continue;
+        };
+        let version = package_json_version(&path).await;
         out.push(InstalledPluginInfo {
-            enabled: !disabled.contains(&marker.registry_id),
-            registry_id: marker.registry_id,
-            plugin_id,
-            version: marker.version,
-            trust: if marker.trust.is_empty() {
-                "unknown".to_string()
-            } else {
-                marker.trust
-            },
+            enabled: !disabled_here,
+            registry_id: name.clone(),
+            plugin_id: name,
+            version,
+            trust: "unknown".to_string(),
         });
     }
+}
+
+/// The `version` field of a package's `package.json`, for out-of-band
+/// installs that carry no PHL marker. Best effort: a broken or absent
+/// package.json degrades to an empty version, not a dropped plugin.
+async fn package_json_version(pkg_dir: &Path) -> String {
+    let Ok(raw) = tokio::fs::read_to_string(pkg_dir.join("package.json")).await else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return String::new();
+    };
+    value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 async fn run_clone(
@@ -1185,6 +1233,84 @@ mod tests {
             "cordis.patch.yml is the enabled-state source"
         );
         assert_eq!(solo.registry_id, "solo");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn plugins_declared_in_the_patch_without_a_marker_are_adopted() {
+        let root = temp_root("scan-outofband");
+        create_instance_inner(root.as_path(), manifest("oob-0001", "Oob"))
+            .await
+            .unwrap();
+        let profile = root
+            .join("instances")
+            .join("oob-0001")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default");
+        let modules = profile.join("node_modules");
+
+        // What a hand fix leaves behind (pnpm into the profile + insert
+        // blocks): package.json only, no PHL marker anywhere.
+        std::fs::create_dir_all(modules.join("dshmarket")).unwrap();
+        std::fs::write(
+            modules.join("dshmarket").join("package.json"),
+            r#"{"name":"dshmarket","version":"1.43.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(modules.join("dsh-dream-skin")).unwrap();
+        std::fs::write(
+            modules.join("dsh-dream-skin").join("package.json"),
+            r#"{"name":"dsh-dream-skin"}"#,
+        )
+        .unwrap();
+        // pnpm's store layout and transitive deps carry no marker and no patch
+        // entry — adopting anything present in node_modules would flood the
+        // list with hundreds of unrelated packages.
+        std::fs::create_dir_all(modules.join("schemastery")).unwrap();
+        std::fs::create_dir_all(modules.join("@acme/toolkit")).unwrap();
+        std::fs::write(
+            modules.join("@acme/toolkit/package.json"),
+            r#"{"name":"@acme/toolkit","version":"2.0.0"}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            profile.join("cordis.patch.yml"),
+            "- insert:\n    - id: dshmarket\n      name: 'dshmarket'\n\
+             - insert:\n    - id: dsh-dream-skin\n      name: 'dsh-dream-skin'\n      disabled: true\n    - name: '@acme/toolkit'\n      id: toolkit\n",
+        )
+        .unwrap();
+
+        let plugins = scan_plugins(&profile).await;
+        assert_eq!(
+            plugins.len(),
+            3,
+            "patch-declared packages are adopted; unlisted dirs are not"
+        );
+
+        let market = plugins.iter().find(|p| p.plugin_id == "dshmarket").unwrap();
+        assert!(
+            market.enabled,
+            "a mounted insert block with no flag is enabled"
+        );
+        assert_eq!(market.version, "1.43.0", "version read from package.json");
+        assert_eq!(market.registry_id, "dshmarket");
+        assert_eq!(market.trust, "unknown");
+
+        let skin = plugins
+            .iter()
+            .find(|p| p.plugin_id == "dsh-dream-skin")
+            .unwrap();
+        assert!(!skin.enabled, "the block's own disabled flag is honored");
+        assert_eq!(skin.version, "", "missing version degrades, never drops");
+        let scoped = plugins
+            .iter()
+            .find(|p| p.registry_id == "@acme/toolkit")
+            .unwrap();
+        assert!(scoped.enabled, "a sibling's disabled flag must not leak");
+        assert_eq!(scoped.version, "2.0.0");
 
         let _ = std::fs::remove_dir_all(&root);
     }

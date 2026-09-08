@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import {
   adoptInstance,
@@ -134,7 +135,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
     } catch (err) {
       set({
         scanState: 'error',
-        scanError: err instanceof Error ? err.message : String(err),
+        scanError: parseThrownError(err).message,
       })
     }
   },
@@ -150,7 +151,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       ui.toast({
         kind: 'error',
         title: '该目录不是可接入的 DSH',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   },
@@ -166,7 +167,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       ui.toast({
         kind: 'error',
         title: '无法识别该 DSH 可执行文件',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   },
@@ -218,7 +219,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       set({ sourceSessions: sessions })
     } catch (err) {
       set({
-        sourceSessionsError: err instanceof Error ? err.message : String(err),
+        sourceSessionsError: parseThrownError(err).message,
       })
     }
   },
@@ -262,7 +263,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       })
       set({ preview, previewState: 'ready' })
     } catch (err) {
-      set({ previewState: 'error', previewError: err instanceof Error ? err.message : String(err) })
+      set({ previewState: 'error', previewError: parseThrownError(err).message })
     }
   },
 
@@ -300,7 +301,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
                 : '复制完成：历史对话随环境一起接入。',
       })
     } catch (err) {
-      set({ submitting: false, submitError: err instanceof Error ? err.message : String(err) })
+      set({ submitting: false, submitError: parseThrownError(err).message })
     }
   },
 }))

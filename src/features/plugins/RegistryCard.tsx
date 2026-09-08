@@ -68,27 +68,24 @@ export const RegistryCard = memo(function RegistryCard({
       className="group/row px-3.5 py-3 [content-visibility:auto] [contain-intrinsic-size:auto_136px]"
     >
       <div className="flex items-start gap-3">
-        <button
-          className="flex min-w-0 flex-1 items-start gap-3 text-left"
-          onClick={() => onSelect(plugin.id)}
-        >
+        <div className="flex min-w-0 flex-1 items-start gap-3 text-left">
           <PluginAvatar plugin={plugin} />
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-              <span className="truncate text-base font-medium text-ink transition-colors group-hover/row:text-accent-ink">
-                {plugin.name}
+            <button className="block w-full text-left" onClick={() => onSelect(plugin.id)}>
+              <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+                <span className="truncate text-base font-medium text-ink transition-colors group-hover/row:text-accent-ink">
+                  {plugin.name}
+                </span>
+                {subtitle && <span className="truncate text-sm text-ink-faint">｜ {subtitle}</span>}
+                {plugin.official && <Badge tone="accent">官方</Badge>}
               </span>
-              {subtitle && (
-                <span className="truncate text-sm text-ink-faint">｜ {subtitle}</span>
-              )}
-              {plugin.official && <Badge tone="accent">官方</Badge>}
-            </div>
-            <div className="mt-1 flex min-w-0 items-center gap-1.5">
-              <Badge tone="outline">
-                {PLUGIN_CATEGORY_LABELS[plugin.category as PluginCategory] ?? plugin.category}
-              </Badge>
-              <p className="min-w-0 flex-1 truncate text-sm text-ink-muted">{plugin.summary}</p>
-            </div>
+              <span className="mt-1 flex min-w-0 items-center gap-1.5">
+                <Badge tone="outline">
+                  {PLUGIN_CATEGORY_LABELS[plugin.category as PluginCategory] ?? plugin.category}
+                </Badge>
+                <span className="min-w-0 flex-1 truncate text-sm text-ink-muted">{plugin.summary}</span>
+              </span>
+            </button>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
               {/* Badges carry their own outline, so they stay ungrouped; the
                   plain metrics after them read as one `·`-separated run,
@@ -137,7 +134,7 @@ export const RegistryCard = memo(function RegistryCard({
                 ))}
             </div>
           </div>
-        </button>
+        </div>
         {/* `Card interactive` puts a pointer cursor on the whole surface,
             but only the title button opens the detail view — the action
             column must not claim an affordance it does not have. */}

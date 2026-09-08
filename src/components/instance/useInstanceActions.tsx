@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useCallback, useMemo } from 'react'
 import {
   Copy,
@@ -123,7 +124,7 @@ export function useInstanceActions(instance: Instance | undefined) {
       ui.toast({
         kind: 'error',
         title: '无法打开实例目录',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     })
   }, [instance, ui])
@@ -180,7 +181,7 @@ export function useInstanceActions(instance: Instance | undefined) {
       ui.toast({
         kind: 'error',
         title: '导出 Bundle 失败',
-        message: err instanceof Error ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
     }
   }, [instance, ui])

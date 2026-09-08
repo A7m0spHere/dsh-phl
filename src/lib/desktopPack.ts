@@ -10,7 +10,31 @@
  */
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { isDesktop } from './desktopCore'
+import { cancelTransfer } from './desktopVersions'
 import type { RemoteInstanceManifest } from './desktop'
+
+let packTransferSequence = 0
+function packTransferId(kind: 'export' | 'install'): string {
+  packTransferSequence += 1
+  return `pack-${kind}:${Date.now()}:${packTransferSequence}`
+}
+
+async function invokeCancellable<T>(
+  command: string,
+  args: Record<string, unknown>,
+  kind: 'export' | 'install',
+  signal?: AbortSignal,
+): Promise<T> {
+  const transferId = packTransferId(kind)
+  const abort = () => void cancelTransfer(transferId)
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
+  try {
+    return await invoke<T>(command, { ...args, transferId })
+  } finally {
+    signal?.removeEventListener('abort', abort)
+  }
+}
 
 /* ------------------------------- export ------------------------------- */
 
@@ -69,9 +93,10 @@ export async function exportInstancePack(
   id: string,
   dest: string,
   options: PackExportOptions,
+  signal?: AbortSignal,
 ): Promise<RemotePackExportReport> {
   if (!isDesktop) throw new Error('导出整合包仅在桌面端可用')
-  return invoke<RemotePackExportReport>('export_instance_pack', { id, dest, options })
+  return invokeCancellable<RemotePackExportReport>('export_instance_pack', { id, dest, options }, 'export', signal)
 }
 
 /* ------------------------------- install ------------------------------ */
@@ -132,11 +157,17 @@ export async function installPack(
   path: string,
   req: PackInstallRequest,
   onProgress?: (p: { progress: number; bytesDone: number; bytesTotal: number }) => void,
+  signal?: AbortSignal,
 ): Promise<RemotePackInstallOutcome> {
   if (!isDesktop) throw new Error('整合包安装仅在桌面端可用')
   const channel = new Channel<{ progress: number; bytesDone: number; bytesTotal: number }>()
   if (onProgress) channel.onmessage = onProgress
-  return invoke<RemotePackInstallOutcome>('install_pack', { path, req, onProgress: channel })
+  return invokeCancellable<RemotePackInstallOutcome>(
+    'install_pack',
+    { path, req, onProgress: channel },
+    'install',
+    signal,
+  )
 }
 
 /* -------------------------------- dialogs ----------------------------- */

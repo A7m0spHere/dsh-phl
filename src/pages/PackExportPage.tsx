@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { parseThrownError } from '@/lib/errorCodes'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, ArrowLeft, Check, Download, Loader2, ShieldCheck } from 'lucide-react'
 import {
   choosePackSavePath,
@@ -30,6 +31,7 @@ export function PackExportPage({ id }: { id: string }) {
   const [includeSessions, setIncludeSessions] = useState(false)
   const [working, setWorking] = useState(false)
   const [progress, setProgress] = useState(0)
+  const exportController = useRef<AbortController | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -41,10 +43,11 @@ export function PackExportPage({ id }: { id: string }) {
           // Default the embed set to the plugins we can't re-download.
           setEmbed(new Set(p.plugins.filter((pl) => pl.embedRecommended).map((pl) => pl.registryId)))
         })
-        .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)))
+        .catch((e) => alive && setError(parseThrownError(e).message))
     }
     return () => {
       alive = false
+      exportController.current?.abort()
     }
   }, [id])
 
@@ -71,8 +74,9 @@ export function PackExportPage({ id }: { id: string }) {
     }
     setWorking(true)
     setProgress(0.4)
+    exportController.current = new AbortController()
     try {
-      const report = await exportInstancePack(id, dest, options)
+      const report = await exportInstancePack(id, dest, options, exportController.current.signal)
       setProgress(1)
       // §12: if the core tree-walker withheld secret-named files from any
       // embedded plugin / the session tree, say exactly which — a pack that
@@ -94,10 +98,15 @@ export function PackExportPage({ id }: { id: string }) {
       })
       navigate({ name: 'instance', id })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
-      toast({ kind: 'error', title: '导出失败', message: msg })
+      const msg = parseThrownError(e).message
+      if (msg === 'cancelled') {
+        toast({ kind: 'info', title: '已取消导出' })
+      } else {
+        setError(msg)
+        toast({ kind: 'error', title: '导出失败', message: msg })
+      }
     } finally {
+      exportController.current = null
       setWorking(false)
     }
   }
@@ -190,6 +199,11 @@ export function PackExportPage({ id }: { id: string }) {
           )}
 
           <div className="flex justify-end">
+            {working && (
+              <Button variant="secondary" onClick={() => exportController.current?.abort()}>
+                取消导出
+              </Button>
+            )}
             <Button variant="primary" disabled={working} onClick={() => void startExport()}>
               {working ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
               导出为 .phlpack

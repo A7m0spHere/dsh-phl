@@ -111,6 +111,173 @@ fn core_extractor_refuses_a_map_escaping_its_root() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Deserialize the `plugins` array exactly as a pack's manifest carries it.
+fn manifest_plugins(json: serde_json::Value) -> Vec<PackPlugin> {
+    serde_json::from_value(json).unwrap()
+}
+
+/// Write one embedded plugin folder into a staging profile the way unpack would
+/// (package.json + a source file), and return that folder path.
+fn stage_plugin(profile: &Path, folder: &str, package_json: &str) -> PathBuf {
+    let dir = profile.join("node_modules").join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), package_json).unwrap();
+    std::fs::write(dir.join("index.js"), b"export default 1").unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn embedded_plugin_gets_a_marker_and_cordis_registration() {
+    // A CLI-built pack ships only package.json + sources — no PHL marker — yet
+    // after install it must show up as installed and be Cordis-registered, or
+    // `scan_plugins` silently drops it (§R3 acceptance 1 + 2).
+    let dir = root("register");
+    let profile = dir.join("dsh-home").join("profiles").join("web");
+    std::fs::create_dir_all(profile.join("node_modules")).unwrap();
+    let mine = stage_plugin(&profile, "mine", r#"{"name":"mine","version":"0.1.0"}"#);
+
+    let n = register_embedded_plugins(
+        &manifest_plugins(json!([
+            {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
+        ])),
+        &profile,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+    assert!(!dir.join("cordis.patch.yml").exists());
+
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mine.join("phl-plugin.json")).unwrap())
+            .unwrap();
+    // Registry id + version come from the folder's own package.json; pluginId
+    // from the manifest; trust honestly `unverified` for a pack-carried plugin.
+    assert_eq!(marker["registryId"], "mine");
+    assert_eq!(marker["pluginId"], "who/mine");
+    assert_eq!(marker["version"], "0.1.0");
+    assert_eq!(marker["trust"], "unverified");
+
+    let cordis = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+    let _: Vec<serde_yaml::Value> =
+        serde_yaml::from_str(&cordis).expect("DSH must parse the active profile patch");
+    assert!(
+        cordis.contains("- id: mine"),
+        "cordis entry missing: {cordis}"
+    );
+    assert!(
+        !cordis.contains("disabled: true"),
+        "pack-carried plugins default to enabled, not a fabricated state"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn scoped_embedded_plugin_registers_under_its_true_npm_name() {
+    // `@scope/name` unpacks to a two-segment folder; registration must key on
+    // the real npm name, not the flattened pack folder (§R3 scoped-name case).
+    let dir = root("scoped");
+    let profile = dir.join("dsh-home").join("profiles").join("web");
+    std::fs::create_dir_all(profile.join("node_modules/@acme")).unwrap();
+    let folder = std::path::Path::new("@acme").join("toolkit");
+    let staged = stage_plugin(
+        &profile,
+        &folder.to_string_lossy(),
+        r#"{"name":"@acme/toolkit","version":"2.3.4"}"#,
+    );
+
+    let n = register_embedded_plugins(
+        &manifest_plugins(json!([
+            {"id":"acme/toolkit","version":"2.3.4","source":{"type":"embedded","path":"embedded/plugins/@acme/toolkit"}}
+        ])),
+        &profile,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+    assert!(!dir.join("cordis.patch.yml").exists());
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(staged.join("phl-plugin.json")).unwrap())
+            .unwrap();
+    assert_eq!(marker["registryId"], "@acme/toolkit");
+    assert_eq!(marker["version"], "2.3.4");
+    let cordis = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+    let _: Vec<serde_yaml::Value> =
+        serde_yaml::from_str(&cordis).expect("DSH must parse the active profile patch");
+    assert!(
+        cordis.contains("- id: '@acme/toolkit'"),
+        "scoped entry missing: {cordis}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_embedded_plugin_without_a_manifest_is_a_hard_error() {
+    // A declared embedded payload whose folder never landed a package.json is
+    // refused — the staging caller then rolls back instead of committing an
+    // instance whose plugin DSH would not load (§R3 "登记失败不留半成品").
+    let dir = root("missing");
+    let profile = dir.join("dsh-home").join("profiles").join("web");
+    std::fs::create_dir_all(profile.join("node_modules").join("ghost")).unwrap();
+    // `ghost` folder exists (so it is not a NotFound-canonicalize) but has no
+    // package.json at all.
+    let result = register_embedded_plugins(
+        &manifest_plugins(json!([
+            {"id":"ghost","version":"1.0","source":{"type":"embedded","path":"embedded/plugins/ghost"}}
+        ])),
+        &profile,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "must refuse an embedded plugin with no package.json"
+    );
+    // Nothing got registered: no marker, and no cordis file was even created.
+    assert!(!profile
+        .join("node_modules")
+        .join("ghost")
+        .join("phl-plugin.json")
+        .exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_stale_carried_marker_is_overwritten_not_trusted() {
+    // A desktop-export pack may carry the source machine's marker (with a bogus
+    // trust / registry id). Registration must rebuild it from this import's
+    // facts (package.json name), never trust the carried marker (§R3).
+    let dir = root("stale");
+    let profile = dir.join("dsh-home").join("profiles").join("web");
+    std::fs::create_dir_all(profile.join("node_modules")).unwrap();
+    let mine = stage_plugin(&profile, "mine", r#"{"name":"mine","version":"0.1.0"}"#);
+    std::fs::write(
+        mine.join("phl-plugin.json"),
+        br#"{"pluginId":"WRONG","registryId":"WRONG","version":"9.9.9","trust":"verified"}"#,
+    )
+    .unwrap();
+
+    register_embedded_plugins(
+        &manifest_plugins(json!([
+            {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
+        ])),
+        &profile,
+    )
+    .await
+    .unwrap();
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mine.join("phl-plugin.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        marker["registryId"], "mine",
+        "carried WRONG id must not survive"
+    );
+    assert_ne!(
+        marker["trust"], "verified",
+        "carried trust must not be inherited"
+    );
+    assert_eq!(marker["trust"], "unverified");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn resolver_classifies_embedded_and_registry_dependencies() {
     let dir = root("resolver");

@@ -16,10 +16,14 @@
 //! [`confine`] check is defence-in-depth for a re-read that races an edit,
 //! never the sole barrier.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::PackError;
+use crate::{ensure_not_cancelled, PackError, MAX_SINGLE_ENTRY, MAX_UNCOMPRESSED_TOTAL};
+
+/// Fixed streaming buffer for archive I/O (§R6): no payload is ever read or
+/// written as a whole-entry `Vec`, so peak memory is independent of file size.
+const STREAM_BUF: usize = 65_536;
 
 /// One extracted payload file's destination (relative form is kept for the
 /// caller to tally sessions vs plugins by the map it supplied).
@@ -44,16 +48,34 @@ pub struct ExtractedFile {
 /// and sessions into *different* directories of one instance tree, so one
 /// root would be a lie. `map` returns `(dest, root)` — the root is the part
 /// of the instance the dest belongs to.
-pub fn unpack_entries_to<F>(pack_path: &Path, mut map: F) -> Result<Vec<ExtractedFile>, PackError>
+pub fn unpack_entries_to<F>(pack_path: &Path, map: F) -> Result<Vec<ExtractedFile>, PackError>
 where
     F: FnMut(&Path) -> Option<(PathBuf, PathBuf)>,
 {
+    unpack_entries_to_with_cancel(pack_path, map, &|| false)
+}
+
+/// Cancellable form of [`unpack_entries_to`]. Cancellation is polled between
+/// entries and for every decompressed 64 KiB chunk; the current partial file is
+/// removed before the cancellation error is returned.
+pub fn unpack_entries_to_with_cancel<M, C>(
+    pack_path: &Path,
+    mut map: M,
+    cancel: &C,
+) -> Result<Vec<ExtractedFile>, PackError>
+where
+    M: FnMut(&Path) -> Option<(PathBuf, PathBuf)>,
+    C: Fn() -> bool + ?Sized,
+{
+    ensure_not_cancelled(cancel)?;
     let file = std::fs::File::open(pack_path)
         .map_err(|e| PackError::Unreadable(format!("打开整合包失败: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| PackError::Unreadable(e.to_string()))?;
     let mut out = Vec::new();
+    let mut total_written: u64 = 0;
     for index in 0..archive.len() {
+        ensure_not_cancelled(cancel)?;
         let mut entry = archive
             .by_index(index)
             .map_err(|e| PackError::Unreadable(e.to_string()))?;
@@ -69,19 +91,66 @@ where
             std::fs::create_dir_all(parent)
                 .map_err(|e| PackError::Unreadable(format!("创建解包目录失败: {e}")))?;
         }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|e| PackError::Unreadable(format!("解压读取失败 {}: {e}", entry.name())))?;
-        std::fs::write(&confined, &bytes)
-            .map_err(|e| PackError::Unreadable(format!("写入解包文件失败 {confined:?}: {e}")))?;
+        // Stream the entry to disk in fixed buffers (§R6), enforcing the
+        // single-file and total limits on the *actual* bytes decompressed (a
+        // hostile archive can under-declare `size`), and removing the partial
+        // file if any read/write step fails so the caller never sees a
+        // half-written payload.
+        let archive_name = entry.name().replace('\\', "/");
+        let written = stream_entry_to_file(&mut entry, &confined, &mut total_written, cancel)
+            .inspect_err(|_| {
+                // A partial write must not survive: drop the half-written file.
+                let _ = std::fs::remove_file(&confined);
+            })?;
         out.push(ExtractedFile {
-            archive_name: entry.name().replace('\\', "/"),
+            archive_name,
             dest: confined,
-            bytes: bytes.len() as u64,
+            bytes: written,
         });
     }
     Ok(out)
+}
+
+/// Copy one entry into `dest` with a fixed buffer, growing the caller's running
+/// `total_written`. Enforces `MAX_SINGLE_ENTRY` per file and
+/// `MAX_UNCOMPRESSED_TOTAL` overall against the *bytes actually produced* — not
+/// the archive's self-declared size — then flushes and returns the byte count.
+fn stream_entry_to_file<R: Read>(
+    entry: &mut R,
+    dest: &Path,
+    total_written: &mut u64,
+    cancel: &(impl Fn() -> bool + ?Sized),
+) -> Result<u64, PackError> {
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| PackError::Unreadable(format!("创建解包文件失败 {dest:?}: {e}")))?;
+    let mut buf = [0u8; STREAM_BUF];
+    let mut written: u64 = 0;
+    loop {
+        ensure_not_cancelled(cancel)?;
+        let n = entry
+            .read(&mut buf)
+            .map_err(|e| PackError::Unreadable(format!("解压读取失败 {dest:?}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        written += n as u64;
+        *total_written += n as u64;
+        if written > MAX_SINGLE_ENTRY {
+            return Err(PackError::TooLarge(format!(
+                "解包条目实际字节数超过单文件上限 {MAX_SINGLE_ENTRY}: {dest:?}"
+            )));
+        }
+        if *total_written > MAX_UNCOMPRESSED_TOTAL {
+            return Err(PackError::TooLarge(format!(
+                "解包总字节数超过上限 {MAX_UNCOMPRESSED_TOTAL}"
+            )));
+        }
+        file.write_all(&buf[..n])
+            .map_err(|e| PackError::Unreadable(format!("写入解包文件失败 {dest:?}: {e}")))?;
+    }
+    file.flush()
+        .map_err(|e| PackError::Unreadable(format!("刷新解包文件失败 {dest:?}: {e}")))?;
+    Ok(written)
 }
 
 /// Join `dest` onto `root` only if it resolves inside `root`. `dest` arrives
@@ -163,5 +232,38 @@ mod tests {
             PathBuf::from("a/c")
         );
         assert_eq!(normalize_lexical(Path::new("./x")), PathBuf::from("x"));
+    }
+
+    #[test]
+    fn streaming_unpack_observes_cancel_and_removes_partial_file() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zip::write::SimpleFileOptions;
+
+        let dir =
+            std::env::temp_dir().join(format!("phl-pack-cancel-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("large.phlpack");
+        let file = std::fs::File::create(&pack).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("assets/large.bin", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&vec![0x33u8; 1024 * 1024]).unwrap();
+        zip.finish().unwrap();
+
+        let out = dir.join("out");
+        let partial = out.join("assets/large.bin");
+        let calls = AtomicUsize::new(0);
+        let cancel = || calls.fetch_add(1, Ordering::SeqCst) >= 3;
+        let err =
+            unpack_entries_to_with_cancel(&pack, |rel| Some((out.join(rel), out.clone())), &cancel)
+                .unwrap_err();
+        assert_eq!(err, PackError::Cancelled);
+        assert!(
+            !partial.exists(),
+            "cancelled extraction left a partial file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

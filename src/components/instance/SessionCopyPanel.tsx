@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 /**
  * Inline "对话迁移" panel for the instance detail 数据 card.
  *
@@ -50,7 +51,7 @@ export function SessionCopyPanel({
     if (isDesktop) {
       listSessions(instanceId)
         .then((list) => alive && setSessions(list))
-        .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)))
+        .catch((e) => alive && setError(parseThrownError(e).message))
     } else {
       setSessions([])
     }
@@ -102,7 +103,7 @@ export function SessionCopyPanel({
       // touched instance's on-disk number moved — tell the host to re-measure.
       onCopied?.()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
+      const msg = parseThrownError(e).message
       setError(msg)
       toast({ kind: 'error', title: '复制失败', message: msg })
     } finally {

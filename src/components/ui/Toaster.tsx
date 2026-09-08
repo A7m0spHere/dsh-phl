@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { forwardRef, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { AlertCircle, CheckCircle2, Info, TriangleAlert, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
@@ -22,7 +22,7 @@ const TONES = {
   progress: 'text-accent',
 }
 
-function ToastRow({ toast }: { toast: ToastModel }) {
+const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function ToastRow({ toast }, ref) {
   const dismiss = useUIStore((s) => s.dismissToast)
   const { t } = useMotion()
   const [paused, setPaused] = useState(false)
@@ -41,6 +41,7 @@ function ToastRow({ toast }: { toast: ToastModel }) {
 
   return (
     <motion.div
+      ref={ref}
       layout
       initial={{ opacity: 0, y: -14, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -95,7 +96,7 @@ function ToastRow({ toast }: { toast: ToastModel }) {
       )}
     </motion.div>
   )
-}
+})
 
 /**
  * Toasts land under the title bar, centred — the same place the app's own

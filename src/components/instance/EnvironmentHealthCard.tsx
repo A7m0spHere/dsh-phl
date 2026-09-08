@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useCallback, useEffect, useState } from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, Wrench, XCircle } from 'lucide-react'
 import {
@@ -51,7 +52,7 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
       const result = await verifyInstance(instanceId)
       setReport(result)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(parseThrownError(err).message)
     } finally {
       setRunning(false)
     }
@@ -84,7 +85,7 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
       setRepairNote(parts.join('；') || '没有可执行的修复动作')
       await run()
     } catch (err) {
-      setRepairNote(err instanceof Error ? err.message : String(err))
+      setRepairNote(parseThrownError(err).message)
     } finally {
       setRepairing(false)
     }

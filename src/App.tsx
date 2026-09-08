@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { useEffect } from 'react'
 import { MotionConfig } from 'motion/react'
 import { desktop, migrationStatus } from '@/lib/desktop'
@@ -71,7 +72,7 @@ export default function App() {
         useUIStore.getState().toast({
           kind: 'error',
           title: '加载失败',
-          message: err instanceof Error && err.message ? err.message : String(err),
+          message: parseThrownError(err).message,
           action: {
             label: '重试',
             run: load,

@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import * as desktop from '@/lib/desktop'
 import { useSettingsStore } from './settingsStore'
@@ -135,7 +136,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       if (combined.results.some((r) => r.changed) && !await get().save({ ...config, providers })) return
       useUIStore.getState().toast({ kind: 'info', title: '模型信息补全完成', message: metadataSummary(combined) })
     } catch (err) {
-      useUIStore.getState().toast({ kind: 'warn', title: '模型信息补全暂不可用', message: err instanceof Error ? err.message : String(err) })
+      useUIStore.getState().toast({ kind: 'warn', title: '模型信息补全暂不可用', message: parseThrownError(err).message })
     } finally { set({ enriching: false }) }
   },
 
@@ -169,7 +170,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '保存 API 配置库失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     } finally {
@@ -272,7 +273,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '同步 API 配置失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     } finally {
@@ -293,7 +294,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({
         kind: 'error',
         title: '从实例导入失败',
-        message: err instanceof Error && err.message ? err.message : String(err),
+        message: parseThrownError(err).message,
       })
       return null
     }

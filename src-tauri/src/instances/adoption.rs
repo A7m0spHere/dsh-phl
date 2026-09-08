@@ -982,13 +982,20 @@ mod tests {
             !inst.join("dsh-home").exists(),
             "external creates no copy tree"
         );
-        assert_eq!(
-            outcome.record.dsh_home,
-            strip_verbatim(&std::fs::canonicalize(&source).unwrap())
-                .to_string_lossy()
-                .to_string(),
-            "the record points at the user's own home"
+        // Verify by resolved directory *identity*, not raw string equality. The
+        // record stores the source path the user pointed at verbatim; on Windows
+        // that can arrive in the 8.3 short form (e.g. `...\RUNNER~1\...` from a
+        // temp dir) while `canonicalize` returns the long form
+        // (`...\runneradmin\...`), so comparing the strings directly was a
+        // representation clash, not a real defect. Canonicalising both sides to
+        // their unique final path still proves the external home resolves to the
+        // user's actual source directory (and fails loudly if it points anywhere
+        // that does not exist).
+        let want = strip_verbatim(&std::fs::canonicalize(&source).unwrap());
+        let got = strip_verbatim(
+            &std::fs::canonicalize(std::path::Path::new(&outcome.record.dsh_home)).unwrap(),
         );
+        assert_eq!(got, want, "the record points at the user's own home");
         assert_eq!(
             outcome.record.manifest.management_mode,
             ManagementMode::External

@@ -1,3 +1,4 @@
+import { parseThrownError } from '@/lib/errorCodes'
 /** The model-catalog editor: per-provider /models discovery + manual entries. */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
@@ -127,7 +128,7 @@ export function ModelEditor({
       setPickerOpen(true)
     } catch (e) {
       if (seq !== fetchSeq.current) return
-      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)
+      const msg = typeof e === 'string' ? e : parseThrownError(e).message
       const missing = msg.startsWith(ENV_MISSING_PREFIX)
       setNeedKey(missing)
       setError(missing ? msg.slice(ENV_MISSING_PREFIX.length) : msg)

@@ -31,10 +31,11 @@ pub use phl_pack_core::write;
 // against, and the pack pipeline's error vocabulary (`PackError`).
 #[allow(unused_imports)]
 pub use phl_pack_core::{
-    read_pack, read_pack_from_path, sha256_hex, validate_manifest, EnvironmentSection, PackContent,
-    PackDsh, PackError, PackIntegrity, PackMeta, PackPlugin, PackPrivacy, PackRuntime,
-    PhlPackManifest, PluginSource, ValidatedPack, MANIFEST_NAME, MAX_ENTRIES, MAX_MANIFEST_BYTES,
-    MAX_SINGLE_ENTRY, MAX_UNCOMPRESSED_TOTAL, PACK_FORMAT_VERSION,
+    read_pack, read_pack_from_path, read_pack_from_path_with_cancel, read_pack_with_cancel,
+    sha256_hex, validate_manifest, EnvironmentSection, PackContent, PackDsh, PackError,
+    PackIntegrity, PackMeta, PackPlugin, PackPrivacy, PackRuntime, PhlPackManifest, PluginSource,
+    ValidatedPack, MANIFEST_NAME, MAX_ENTRIES, MAX_MANIFEST_BYTES, MAX_SINGLE_ENTRY,
+    MAX_UNCOMPRESSED_TOTAL, PACK_FORMAT_VERSION,
 };
 // `is_secret_entry_name` is the §12 predicate export.rs reuses to pre-warn at
 // preview time (`add_tree`'s `TreeAdd` result flows through without being
@@ -45,5 +46,9 @@ pub use phl_pack_core::write::is_secret_entry_name;
 /// stable `[state]`-coded strings (they are all "this pack is not acceptable"
 /// refusals, not transport failures).
 pub(crate) fn pack_error(e: PackError) -> String {
-    crate::errors::coded(crate::errors::ErrCode::State, e.detail())
+    if e == PackError::Cancelled {
+        "cancelled".into()
+    } else {
+        crate::errors::coded(crate::errors::ErrCode::State, e.detail())
+    }
 }

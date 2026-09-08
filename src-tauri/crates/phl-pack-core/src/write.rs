@@ -21,7 +21,8 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::{
-    normalize_entry, sha256_hex, PackError, PhlPackManifest, ValidatedPack, MANIFEST_NAME,
+    ensure_not_cancelled, normalize_entry, read_pack_from_path_with_cancel, sha256_hex, PackError,
+    PhlPackManifest, ValidatedPack, MANIFEST_NAME,
 };
 
 fn options() -> SimpleFileOptions {
@@ -53,7 +54,17 @@ pub struct TreeAdd {
 /// archive hygiene, not policy: a pack that promises `secretsExcluded` may
 /// not carry a file whose very name promises credentials.
 pub fn is_secret_entry_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    // Judge the basename only. Callers legitimately hand us either a bare file
+    // name (the CLI collector, the host preview) or a full archive-relative
+    // path (`add_tree`), and a `config/.env` is exactly as secret as a root
+    // `.env` — an earlier version that matched the *whole* path against the
+    // `starts_with(".env")` family silently let nested credentials through, so
+    // the preview said "excluded" while the archive carried the file. Collapsing
+    // to the basename here makes every walker agree by construction instead of
+    // relying on each call site to pre-strip. Both separators are handled so the
+    // rule is invariant to whether a caller normalised backslashes yet.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
     // The `.env` family, minus the documented examples — an example file is
     // config documentation and belongs in the pack.
     if lower.starts_with(".env") {
@@ -117,14 +128,50 @@ impl PackBuilder {
         &self.integrity
     }
 
-    /// Read a file from disk and add it, so callers never hold a whole plugin
-    /// directory in memory.
+    /// Stream a file from disk into the archive, hashing as it goes, so a
+    /// large payload is never materialised whole in memory (§R6: the previous
+    /// `read_to_end` + `add_bytes` path peaked at the file's full size). The
+    /// deflate writer and the SHA-256 hasher consume the same fixed buffer in
+    /// one pass, so the recorded integrity covers exactly the bytes written.
     pub fn add_file_from_disk(&mut self, src: &Path, archive_name: &str) -> Result<(), String> {
-        let mut buf = Vec::new();
-        std::fs::File::open(src)
-            .and_then(|mut f| f.read_to_end(&mut buf))
-            .map_err(|e| format!("读取 {src:?} 失败: {e}"))?;
-        self.add_bytes(archive_name, &buf)
+        self.add_file_from_disk_with_cancel(src, archive_name, &|| false)
+    }
+
+    /// Cancellable streaming file add. The callback is checked before every
+    /// 64 KiB read/write chunk; cancellation returns the stable `cancelled`
+    /// marker so the host can remove the partial archive.
+    pub fn add_file_from_disk_with_cancel<F: Fn() -> bool + ?Sized>(
+        &mut self,
+        src: &Path,
+        archive_name: &str,
+        cancel: &F,
+    ) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
+        normalize_entry(archive_name).map_err(|e| e.detail())?;
+        let mut file = std::fs::File::open(src).map_err(|e| format!("读取 {src:?} 失败: {e}"))?;
+        self.writer
+            .start_file(archive_name, options())
+            .map_err(|e| format!("写入条目 {archive_name} 失败: {e}"))?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65_536];
+        loop {
+            ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("读取 {src:?} 失败: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            self.writer
+                .write_all(&buf[..n])
+                .map_err(|e| format!("写入条目内容失败: {e}"))?;
+            hasher.update(&buf[..n]);
+        }
+        let digest = hex::encode(hasher.finalize());
+        self.integrity
+            .insert(archive_name.replace('\\', "/"), digest);
+        Ok(())
     }
 
     /// Add a whole directory tree under an archive prefix, skipping symlinks
@@ -136,15 +183,26 @@ impl PackBuilder {
     /// secret paths are returned so the host can surface them; the count
     /// returned is the number actually added.
     pub fn add_tree(&mut self, dir: &Path, archive_prefix: &str) -> Result<TreeAdd, String> {
+        self.add_tree_with_cancel(dir, archive_prefix, &|| false)
+    }
+
+    pub fn add_tree_with_cancel<F: Fn() -> bool + ?Sized>(
+        &mut self,
+        dir: &Path,
+        archive_prefix: &str,
+        cancel: &F,
+    ) -> Result<TreeAdd, String> {
         let mut added = 0;
         let mut secrets: Vec<String> = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         let prefix = archive_prefix.trim_end_matches('/');
         while let Some(current) = stack.pop() {
+            ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
             for entry in std::fs::read_dir(&current)
                 .map_err(|e| format!("遍历 {current:?} 失败: {e}"))?
                 .flatten()
             {
+                ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
                 let path = entry.path();
                 let meta = entry
                     .metadata()
@@ -170,7 +228,7 @@ impl PackBuilder {
                     secrets.push(name);
                     continue;
                 }
-                self.add_file_from_disk(&path, &name)?;
+                self.add_file_from_disk_with_cancel(&path, &name, cancel)?;
                 added += 1;
             }
         }
@@ -182,7 +240,16 @@ impl PackBuilder {
 
     /// Write `phlpack.json` last, with the integrity map the builder assembled
     /// from the payload files, and finalise the archive.
-    pub fn finish(mut self, mut manifest: PhlPackManifest) -> Result<(), String> {
+    pub fn finish(self, manifest: PhlPackManifest) -> Result<(), String> {
+        self.finish_with_cancel(manifest, &|| false)
+    }
+
+    pub fn finish_with_cancel<F: Fn() -> bool + ?Sized>(
+        mut self,
+        mut manifest: PhlPackManifest,
+        cancel: &F,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel).map_err(|e| e.detail())?;
         if self.integrity.is_empty() {
             manifest.integrity = None;
         } else {
@@ -215,13 +282,16 @@ fn collect_tree_files(
     prefix: &str,
     out: &mut Vec<(String, PathBuf)>,
     withheld: &mut Vec<String>,
+    cancel: &impl Fn() -> bool,
 ) -> Result<(), PackError> {
+    ensure_not_cancelled(cancel)?;
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| PackError::Unreadable(format!("读取打包目录 {dir:?} 失败: {e}")))?
         .flatten()
         .collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
+        ensure_not_cancelled(cancel)?;
         let path = entry.path();
         if path
             .symlink_metadata()
@@ -237,7 +307,7 @@ fn collect_tree_files(
             } else {
                 format!("{prefix}/{name}")
             };
-            collect_tree_files(&path, &next, out, withheld)?;
+            collect_tree_files(&path, &next, out, withheld, cancel)?;
         } else {
             if is_secret_entry_name(&name) {
                 let rel = if prefix.is_empty() {
@@ -278,6 +348,16 @@ pub fn build_pack_from_dir(
     out: &Path,
     withheld_secrets: &mut Vec<String>,
 ) -> Result<ValidatedPack, PackError> {
+    build_pack_from_dir_with_cancel(src_dir, out, withheld_secrets, &|| false)
+}
+
+pub fn build_pack_from_dir_with_cancel<F: Fn() -> bool>(
+    src_dir: &Path,
+    out: &Path,
+    withheld_secrets: &mut Vec<String>,
+    cancel: &F,
+) -> Result<ValidatedPack, PackError> {
+    ensure_not_cancelled(cancel)?;
     let manifest_path = src_dir.join(MANIFEST_NAME);
     let bytes = std::fs::read(&manifest_path).map_err(|_| PackError::MissingManifest)?;
     let text = std::str::from_utf8(&bytes)
@@ -286,23 +366,21 @@ pub fn build_pack_from_dir(
     crate::validate_manifest_schema(&manifest)?;
 
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_tree_files(src_dir, "", &mut files, withheld_secrets)?;
+    collect_tree_files(src_dir, "", &mut files, withheld_secrets, cancel)?;
     files.retain(|(rel, _)| rel != MANIFEST_NAME);
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut builder = PackBuilder::create(out).map_err(PackError::Unreadable)?;
     for (rel, path) in &files {
-        let payload = std::fs::read(path)
-            .map_err(|e| PackError::Unreadable(format!("读取 {path:?} 失败: {e}")))?;
-        // Builder errors (a bad archive name, a write failure) are format
-        // errors from the caller's point of view: the produced bytes refused
-        // to become a pack.
+        ensure_not_cancelled(cancel)?;
         builder
-            .add_bytes(rel, &payload)
+            .add_file_from_disk_with_cancel(path, rel, cancel)
             .map_err(PackError::Invalid)?;
     }
-    builder.finish(manifest).map_err(PackError::Invalid)?;
-    crate::read_pack_from_path(out)
+    builder
+        .finish_with_cancel(manifest, cancel)
+        .map_err(PackError::Invalid)?;
+    read_pack_from_path_with_cancel(out, cancel)
 }
 
 #[cfg(test)]
@@ -346,6 +424,69 @@ mod tests {
         assert!(
             !integrity.contains_key("phlpack.json"),
             "manifest not self-hashed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streaming_add_file_from_disk_matches_the_byte_digest() {
+        // §R6: the streaming path must record the SAME sha256 as `add_bytes`
+        // over identical content, across many fixed-buffer iterations.
+        let dir = std::env::temp_dir().join(format!("phl-streamdigest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content: Vec<u8> = (0..1_000_003u64).map(|i| (i % 251) as u8).collect();
+        let src = dir.join("blob.bin");
+        std::fs::write(&src, &content).unwrap();
+
+        let streamed = dir.join("a.phlpack");
+        {
+            let mut b = PackBuilder::create(&streamed).unwrap();
+            b.add_file_from_disk(&src, "embedded/plugins/blob.bin")
+                .unwrap();
+            let digest = b.integrity()["embedded/plugins/blob.bin"].clone();
+            assert_eq!(digest, sha256_hex(&content), "streamed hash must match");
+            b.finish(sample_manifest()).unwrap();
+        }
+        let by_bytes = dir.join("b.phlpack");
+        {
+            let mut b = PackBuilder::create(&by_bytes).unwrap();
+            b.add_bytes("embedded/plugins/blob.bin", &content).unwrap();
+            b.finish(sample_manifest()).unwrap();
+        }
+        // Both archives re-validate through the integrity verifier.
+        read_pack_from_path(&streamed).expect("streamed pack validates");
+        read_pack_from_path(&by_bytes).expect("bytes pack validates");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_handles_a_many_entry_pack_in_linear_time() {
+        // §R6: `verify_integrity` used to re-scan every archive index for each
+        // integrity key (O(entries²)). A fully-covered multi-entry pack must
+        // still validate correctly through the single-pass index.
+        let dir = std::env::temp_dir().join(format!("phl-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("many.phlpack");
+        const N: usize = 800;
+        {
+            let mut b = PackBuilder::create(&pack).unwrap();
+            for i in 0..N {
+                b.add_bytes(
+                    &format!("embedded/plugins/p{i}/index.js"),
+                    format!("export const i = {i}").as_bytes(),
+                )
+                .unwrap();
+            }
+            b.finish(sample_manifest()).unwrap();
+        }
+        let validated = read_pack_from_path(&pack).expect("a many-entry pack validates");
+        let integrity = validated.manifest.integrity.expect("all payloads hashed");
+        assert_eq!(integrity.len(), N);
+        assert_eq!(
+            integrity[&format!("embedded/plugins/p{}/index.js", N - 1)],
+            sha256_hex(format!("export const i = {}", N - 1).as_bytes())
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -518,11 +659,89 @@ mod tests {
     }
 
     #[test]
+    fn add_tree_withholds_nested_secret_files_and_keeps_examples() {
+        // R1: the desktop export path walks whole trees through `add_tree`,
+        // which hands the *relative* path to the secret test. Nested
+        // `config/.env` / `auth/token.json` are exactly as secret as a root
+        // `.env`, so the shared basename rule must drop them — and the
+        // withheld report must carry the full archive path, while ordinary and
+        // example files travel untouched.
+        let dir = std::env::temp_dir().join(format!("phl-addtree-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("plugin");
+        std::fs::create_dir_all(src.join("config")).unwrap();
+        std::fs::create_dir_all(src.join("auth")).unwrap();
+        std::fs::write(src.join(".env"), b"A=1").unwrap();
+        std::fs::write(src.join("config").join(".env"), b"B=2").unwrap();
+        std::fs::write(src.join("auth").join("token.json"), b"C=3").unwrap();
+        std::fs::write(src.join(".env.example"), b"# docs").unwrap();
+        std::fs::write(src.join("config").join("tokenizer.js"), b"// ok").unwrap();
+
+        let mut b = PackBuilder::create(&dir.join("out.phlpack")).unwrap();
+        let tree = b.add_tree(&src, "embedded/plugins/mine").unwrap();
+        assert_eq!(tree.added, 2, "only the two non-secret files go in");
+        let withheld: Vec<&str> = tree.withheld_secrets.iter().map(|s| s.as_str()).collect();
+        assert!(withheld.contains(&"embedded/plugins/mine/.env"));
+        assert!(withheld.contains(&"embedded/plugins/mine/config/.env"));
+        assert!(withheld.contains(&"embedded/plugins/mine/auth/token.json"));
+        let integrity = b.integrity();
+        assert!(integrity.contains_key("embedded/plugins/mine/.env.example"));
+        assert!(integrity.contains_key("embedded/plugins/mine/config/tokenizer.js"));
+        for secret in [
+            "embedded/plugins/mine/.env",
+            "embedded/plugins/mine/config/.env",
+            "embedded/plugins/mine/auth/token.json",
+        ] {
+            assert!(
+                !integrity.contains_key(secret),
+                "{secret} leaked into the pack"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_rule_matches_the_same_basename_at_any_depth() {
+        // The whole point of collapsing to the basename: a caller passing a
+        // root name, a nested relative path, or a normalised archive path all
+        // get the same verdict, so the preview and every walker agree.
+        assert!(is_secret_entry_name("config/.env"));
+        assert!(is_secret_entry_name("a/b/c/token.json"));
+        assert!(is_secret_entry_name(
+            "embedded\\plugins\\mine\\config\\.env"
+        ));
+        assert!(!is_secret_entry_name("config/tokenizer.js"));
+        assert!(!is_secret_entry_name("auth/credentials.sample.json"));
+        assert!(!is_secret_entry_name("docs/.env.example"));
+    }
+
+    #[test]
     fn add_bytes_rejects_a_traversal_name() {
         let dir = std::env::temp_dir().join(format!("phl-packtrav-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let mut b = PackBuilder::create(&dir.join("x.phlpack")).unwrap();
         assert!(b.add_bytes("../escape", b"x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streaming_add_observes_cancel_inside_one_large_file() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir =
+            std::env::temp_dir().join(format!("phl-pack-cancel-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("large.bin");
+        std::fs::write(&source, vec![0x5au8; 1024 * 1024]).unwrap();
+        let calls = AtomicUsize::new(0);
+        let cancel = || calls.fetch_add(1, Ordering::SeqCst) >= 2;
+        let mut builder = PackBuilder::create(&dir.join("partial.phlpack")).unwrap();
+        let err = builder
+            .add_file_from_disk_with_cancel(&source, "assets/large.bin", &cancel)
+            .unwrap_err();
+        assert_eq!(err, "cancelled");
+        assert!(calls.load(Ordering::SeqCst) >= 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
