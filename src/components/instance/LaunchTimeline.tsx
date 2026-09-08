@@ -32,7 +32,7 @@ export function LaunchTimeline({ state }: { state: InstanceRuntimeState }) {
               key={phase}
               className={cn(
                 'flex items-center gap-2 py-[5px] text-sm transition-colors duration-200',
-                active ? 'text-ink' : done ? 'text-ink-muted' : 'text-ink-faint/60',
+                active ? 'text-ink' : done ? 'text-ink-muted' : 'text-ink-faint',
               )}
             >
               <span className="flex h-4 w-4 shrink-0 items-center justify-center">

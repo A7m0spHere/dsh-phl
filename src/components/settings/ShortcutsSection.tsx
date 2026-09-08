@@ -71,7 +71,7 @@ export function ShortcutsSection() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索快捷键或功能"
           aria-label="搜索快捷键"
-          className="min-w-0 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-ink-faint/70"
+          className="min-w-0 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-ink-faint"
         />
         <span className="flex shrink-0 items-center gap-1.5 text-2xs text-ink-faint">
           <span className="relative flex h-1.5 w-1.5">

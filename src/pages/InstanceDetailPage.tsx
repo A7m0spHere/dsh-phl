@@ -342,8 +342,14 @@ export function InstanceDetailPage({ id }: { id: string }) {
           </Button>
           <Menu
             items={actions.menuItems}
-            trigger={({ toggle: openMenu }) => (
-              <IconButton label="更多操作" size="lg" variant="secondary" onClick={openMenu}>
+            trigger={({ toggle: openMenu, menuProps }) => (
+              <IconButton
+                label="更多操作"
+                size="lg"
+                variant="secondary"
+                onClick={openMenu}
+                {...menuProps}
+              >
                 <MoreHorizontal size={15} />
               </IconButton>
             )}

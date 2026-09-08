@@ -285,13 +285,14 @@ export function GuideOverlay() {
             animate="show"
             exit="out"
             role="dialog"
-            aria-modal
+            aria-modal="true"
+            aria-labelledby="phl-guide-title"
             className="relative flex max-h-full w-[520px] flex-col overflow-hidden rounded-xl bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
           >
             <header className="flex items-center gap-2.5 border-b border-line px-4 py-3">
               <Logo size={20} />
               <div className="min-w-0 flex-1">
-                <div className="text-base font-semibold tracking-tight text-ink">
+                <div id="phl-guide-title" className="text-base font-semibold tracking-tight text-ink">
                   欢迎使用 PHL
                 </div>
                 <div className="text-2xs text-ink-faint">DSH Instance &amp; Runtime Manager</div>

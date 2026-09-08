@@ -42,7 +42,7 @@ pub(crate) use process::{
     resolve_node, CREATE_NO_WINDOW,
 };
 #[cfg(test)]
-pub(crate) use process::{check_kill_output, parse_web_url, port_free};
+pub(crate) use process::{check_kill_output, parse_web_url, port_free, redact_web_token};
 
 /// Emitted when a launched DSH process exits for any reason — crash, manual
 /// stop, normal shutdown. The frontend folds this into the instance's UI
@@ -98,6 +98,19 @@ impl Processes {
         if map.get(instance_id).map(|e| e.pid) == Some(pid) {
             map.remove(instance_id);
         }
+    }
+
+    /// True when `pid` is still the instance's current process, or when no
+    /// process is registered at all. A watcher uses this to decide whether it
+    /// may close the instance's WebUI window: a *newer* launch must not lose
+    /// its window to the previous process's exit, while a plain stop (which
+    /// removes the entry itself) still must.
+    pub(crate) fn is_current_or_empty(&self, instance_id: &str, pid: u32) -> bool {
+        self.0
+            .lock()
+            .expect("processes lock")
+            .get(instance_id)
+            .map_or(true, |entry| entry.pid == pid)
     }
 
     pub(crate) fn entry_of(&self, instance_id: &str) -> Option<ProcessEntry> {
@@ -201,6 +214,33 @@ pub async fn launch_instance(
     result
 }
 
+/// May this pid be killed on behalf of `instance_id`?
+///
+/// Killing is the one irreversible action in PHL, so the same identity gate
+/// that decides adoption is applied *before* the kill: the persisted record
+/// says which process we launched, and a pid that no longer matches it has
+/// been reused by somebody else. A process with no record is ours by
+/// construction (PHL started it in this session); a process that is already
+/// gone needs no permission at all — the caller still cleans up.
+fn stop_permission(registry: &Registry, instance_id: &str, pid: u32) -> Result<(), String> {
+    let Some(rec) = registry.record_of(instance_id) else {
+        return Ok(());
+    };
+    match decide(&rec, &probe_process(pid)) {
+        Adoption::Adopt => Ok(()),
+        Adoption::Forget {
+            keep_running: true,
+            reason,
+        } => Err(crate::errors::coded(
+            crate::errors::ErrCode::State,
+            format!(
+                "实例 {instance_id} 的进程身份无法确认（{reason}，PID {pid}）：已停止跟踪，但不会终止它。请在任务管理器里确认后手动结束。"
+            ),
+        )),
+        Adoption::Forget { .. } => Ok(()),
+    }
+}
+
 /// Not running in the map → nothing to do; the exit event (or its absence)
 /// keeps the frontend state honest either way.
 #[tauri::command]
@@ -215,6 +255,7 @@ pub async fn stop_instance(
     // listing it, and nothing in the UI could stop it any more.
     let entry = processes.entry_of(&instance_id);
     if let Some(entry) = entry {
+        stop_permission(&registry, &instance_id, entry.pid)?;
         kill_tree(entry.pid).await?;
         processes.remove_if_pid(&instance_id, entry.pid);
         registry.forget_pid(&instance_id, entry.pid);
@@ -262,7 +303,8 @@ pub struct AdoptReport {
 /// exists in this root is dropped likewise (its directory may have been
 /// deleted while PHL was away).
 #[tauri::command]
-pub async fn adopt_processes(
+pub async fn adopt_processes<R: tauri::Runtime>(
+    app: AppHandle<R>,
     processes: State<'_, Processes>,
     registry: State<'_, Registry>,
     phl: State<'_, PhlState>,
@@ -306,11 +348,15 @@ pub async fn adopt_processes(
                     None => None,
                 };
                 report.adopted.push(AdoptedProcess {
-                    instance_id: rec.instance_id,
+                    instance_id: rec.instance_id.clone(),
                     pid: rec.pid,
                     port: rec.port,
                     web_url,
                 });
+                // Adopted must not mean unobserved: without this, an adopted
+                // DSH that crashes after the PHL restart keeps its entry, its
+                // registry row and its WebUI window forever.
+                watch_adopted_process(app.clone(), rec);
             }
             Adoption::Forget {
                 reason,
@@ -327,6 +373,46 @@ pub async fn adopt_processes(
         }
     }
     Ok(report)
+}
+
+/// An adopted process is not this PHL's child, so there is no `wait()` to
+/// await. Poll the same identity gate that adopted it instead: while
+/// `decide` still says Adopt the process is ours and alive; the moment it
+/// says otherwise (gone, or the pid handed to a stranger) run the launch
+/// watcher's cleanup, so an adopted DSH clears its state and its window
+/// exactly like one launched in this session.
+fn watch_adopted_process<R: tauri::Runtime>(app: AppHandle<R>, rec: PersistedProcess) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if matches!(decide(&rec, &probe_process(rec.pid)), Adoption::Adopt) {
+                continue;
+            }
+            let instance_id = rec.instance_id.clone();
+            let ours = app
+                .try_state::<Processes>()
+                .map(|processes| processes.is_current_or_empty(&instance_id, rec.pid))
+                .unwrap_or(false);
+            if let Some(processes) = app.try_state::<Processes>() {
+                processes.remove_if_pid(&instance_id, rec.pid);
+            }
+            if let Some(registry) = app.try_state::<Registry>() {
+                registry.forget_pid(&instance_id, rec.pid);
+            }
+            if ours {
+                crate::webui::close_for_instance(&app, &instance_id);
+            }
+            let _ = app.emit(
+                INSTANCE_EXITED,
+                serde_json::json!({
+                    "instanceId": instance_id,
+                    "pid": rec.pid,
+                    "code": serde_json::Value::Null,
+                }),
+            );
+            return;
+        }
+    });
 }
 
 /* ------------------------------- launch ------------------------------- */
@@ -630,6 +716,12 @@ async fn run_launch(
     let watcher_id = instance_id.clone();
     tokio::spawn(async move {
         let status = child.wait().await;
+        // Decide before the entry is removed: a fast restart has already
+        // registered the new pid, and this exit must not take that window down.
+        let ours = watcher_app
+            .try_state::<Processes>()
+            .map(|processes| processes.is_current_or_empty(&watcher_id, pid))
+            .unwrap_or(false);
         if let Some(processes) = watcher_app.try_state::<Processes>() {
             processes.remove_if_pid(&watcher_id, pid);
         }
@@ -639,7 +731,9 @@ async fn run_launch(
         // A dead instance must not keep its embedded WebUI window open:
         // closing the window never stops the process, but the process
         // exiting always closes the window (see `crate::webui`).
-        crate::webui::close_for_instance(&watcher_app, &watcher_id);
+        if ours {
+            crate::webui::close_for_instance(&watcher_app, &watcher_id);
+        }
         let code = status.ok().and_then(|s| s.code());
         let _ = watcher_app.emit(
             INSTANCE_EXITED,
@@ -880,6 +974,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_webui_token_never_leaves_the_backend() {
+        // `dsh web` prints the authenticated URL at the top of the log, and a
+        // short log puts that line inside the tail PHL shows the user.
+        let line = "dsh web: http://127.0.0.1:3080/?token=6qeWvc1o3FEaOTrI4YOOIAP9F_1MSDi4AbNhh2HWO7w\nready";
+        let redacted = redact_web_token(line);
+        assert!(!redacted.contains("6qeWvc"), "{redacted}");
+        assert!(redacted.contains("token=<redacted>"));
+        assert!(redacted.contains("ready"), "the rest of the log survives");
+
+        // A token that ends at a query separator keeps the rest of the query.
+        assert_eq!(
+            redact_web_token("http://h/?token=abc&x=1"),
+            "http://h/?token=<redacted>&x=1"
+        );
+        assert_eq!(redact_web_token("nothing to hide"), "nothing to hide");
+
+        // And the tail path itself redacts, not just the helper.
+        let dir = temp_dir("tail-token");
+        let path = dir.join("launch.log");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let tail = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(log_tail(&path, 10));
+        assert!(!tail.contains("6qeWvc"), "{tail}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn log_tail_of_a_huge_file_reads_only_the_window() {
         // O-12: asking for 3 lines out of a log that has megabytes of
@@ -936,5 +1058,63 @@ mod tests {
         );
         // Removal after disappearance is inert, not a panic.
         processes.remove_if_pid("inst", 111);
+    }
+
+    #[test]
+    fn stop_refuses_a_pid_the_registry_does_not_own() {
+        let registry = Registry::default();
+        // No record: a process PHL launched in this session is ours.
+        assert!(stop_permission(&registry, "inst", 1234).is_ok());
+
+        // A record whose creation stamp cannot belong to this pid: the number
+        // has been reused, so PHL must refuse to kill it.
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid: 1234,
+            port: 3080,
+            started_at_ms: 0,
+            exe_path: "C:\\node.exe".into(),
+        });
+        let err = stop_permission(&registry, "inst", std::process::id()).unwrap_err();
+        assert!(err.contains("身份无法确认"), "{err}");
+
+        // A pid that is already gone is not a kill target, but must not block
+        // the cleanup either.
+        assert!(stop_permission(&registry, "inst", 1234).is_ok());
+    }
+
+    #[test]
+    fn a_watcher_only_closes_the_window_of_its_own_process() {
+        // The other half of the relaunch race: the old watcher must not close
+        // the WebUI window that belongs to the new process, while a plain stop
+        // (which removes the entry itself) still has to close it.
+        let processes = Processes::default();
+        processes.set(
+            "inst",
+            ProcessEntry {
+                pid: 111,
+                port: 3080,
+            },
+        );
+        assert!(processes.is_current_or_empty("inst", 111), "its own pid");
+
+        // A relaunch registered the new pid before the old watcher woke up.
+        processes.set(
+            "inst",
+            ProcessEntry {
+                pid: 222,
+                port: 3081,
+            },
+        );
+        assert!(
+            !processes.is_current_or_empty("inst", 111),
+            "the stale watcher must leave the new window alone"
+        );
+        assert!(processes.is_current_or_empty("inst", 222));
+
+        // Stop removes the entry itself; "nothing registered" is not "newer".
+        processes.remove_if_pid("inst", 222);
+        assert!(processes.is_current_or_empty("inst", 222));
+        assert!(processes.is_current_or_empty("never-seen", 1));
     }
 }

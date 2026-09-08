@@ -78,7 +78,34 @@ async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, Str
         },
     });
 
-    // 6. 下载缓存：可安全清理的 .part 残留与保留的压缩包。
+    // 6. 安装残留：中断的安装事务、旧版暂存目录、下载分片。只报告，不删除 ——
+    //    清理入口在各分区（版本/运行时的删除、缓存清理），这里让用户知道它们存在。
+    let residue = crate::repair::scan_residue_inner(root_path)
+        .await
+        .unwrap_or_default();
+    let stale: Vec<_> = residue.iter().filter(|r| r.stale).collect();
+    items.push(DiagnosticItem {
+        id: "residue".into(),
+        level: if residue.is_empty() { "ok" } else { "warn" }.into(),
+        label: "安装残留".into(),
+        detail: if residue.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{} 处（其中 {} 处已过期）：{}",
+                residue.len(),
+                stale.len(),
+                residue
+                    .iter()
+                    .take(3)
+                    .map(|r| r.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        },
+    });
+
+    // 7. 下载缓存：可安全清理的 .part 残留与保留的压缩包。
     let (cache_bytes, cache_files) = cache_summary(root_path).await;
     items.push(DiagnosticItem {
         id: "cache".into(),

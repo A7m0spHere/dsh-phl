@@ -109,33 +109,12 @@ pub async fn open_or_focus_webui(
     Ok(())
 }
 
-/// Close one instance's WebUI window (settings actions, future tray menus).
-/// Missing window is success: the user asked for "not open", and it isn't.
-#[tauri::command]
-pub fn close_webui_window(app: AppHandle, instance_id: String) -> Result<(), String> {
-    let id = sanitize_segment(&instance_id, "实例 id")?;
-    if let Some(window) = app.get_webview_window(&label_of(&id)) {
-        let _ = window.close();
-    }
-    Ok(())
-}
-
-/// Instance ids whose WebUI window is currently open. The frontend uses it to
-/// decide whether its "打开 WebUI" is opening or focusing.
-#[tauri::command]
-pub fn list_open_webui_windows(app: AppHandle) -> Vec<String> {
-    app.webview_windows()
-        .keys()
-        .filter_map(|label| label.strip_prefix(WEBUI_PREFIX).map(str::to_string))
-        .collect()
-}
-
 /* ------------------------------ lifecycle ------------------------------ */
 
 /// Process-exit hook (stop / crash / clean shutdown, from the launch
 /// watcher): an instance that is no longer running must not keep a window
 /// where its UI pretends to be live.
-pub(crate) fn close_for_instance(app: &AppHandle, instance_id: &str) {
+pub(crate) fn close_for_instance<R: tauri::Runtime>(app: &AppHandle<R>, instance_id: &str) {
     if let Some(window) = app.get_webview_window(&label_of(instance_id)) {
         let _ = window.close();
     }

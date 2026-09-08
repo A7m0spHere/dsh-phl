@@ -1,5 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { isDesktop, currentWindow, type Unlisten } from './desktopCore'
+import { parseThrownError } from './errorCodes'
 import type { ApiBinding } from '@/types'
 
 /**
@@ -143,14 +144,38 @@ export async function onInstanceExited(
  * rejected non-loopback URL, a window-creation failure) we open the system
  * browser instead, so "打开 WebUI" always reaches a live DSH.
  */
-export async function openDshWebUi(instanceId: string, url: string, title?: string): Promise<void> {
+/** How "打开 WebUI" reached the user, or why it could not. */
+export type WebUiOpenResult =
+  | { ok: true; how: 'window' | 'browser' }
+  | { ok: false; reason: string }
+
+export async function openDshWebUi(
+  instanceId: string,
+  url: string,
+  title?: string,
+): Promise<WebUiOpenResult> {
   if (!isDesktop) {
     window.open(url, '_blank', 'noopener')
-    return
+    return { ok: true, how: 'browser' }
   }
+  let windowError: unknown
   try {
     await invoke('open_or_focus_webui', { instanceId, url, title: title ?? null })
-  } catch {
+    return { ok: true, how: 'window' }
+  } catch (err) {
+    windowError = err
+  }
+  // The fallback is part of the contract, but so is admitting failure: when
+  // both halves fail the caller must say something. Swallowing the first error
+  // and letting the second reject into a `void` call site made "打开 WebUI" a
+  // button that silently did nothing.
+  try {
     await invoke('open_external', { url })
+    return { ok: true, how: 'browser' }
+  } catch (fallbackError) {
+    return {
+      ok: false,
+      reason: `内嵌窗口失败：${parseThrownError(windowError).message}；改用系统浏览器也失败：${parseThrownError(fallbackError).message}`,
+    }
   }
 }

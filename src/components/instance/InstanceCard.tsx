@@ -215,13 +215,14 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
 
           <Menu
             items={menuItems}
-            trigger={({ open: isOpen, toggle: t2 }) => (
+            trigger={({ open: isOpen, toggle: t2, menuProps }) => (
               <Tooltip content="更多操作" side="top">
                 <IconButton
                   label="更多操作"
                   size="sm"
                   variant="ghost"
                   onClick={t2}
+                  {...menuProps}
                   className={cn(
                     'transition-opacity duration-200',
                     !isOpen && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',

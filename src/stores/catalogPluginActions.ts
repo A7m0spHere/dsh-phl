@@ -17,6 +17,12 @@ export const pluginKey = (instanceId: string, pluginId: string) => `p:${instance
 
 const latestGen = new Map<string, number>()
 
+/// In-flight enable/disable per plugin. Two clicks raced two writes to the
+/// same `cordis.patch.yml`: whichever response landed last patched the UI,
+/// while whichever *request* landed last decided the file — the switch could
+/// then show the opposite of what DSH loads.
+const pluginToggles = new Set<string>()
+
 function patchInstancePlugins(instanceId: string, update: (plugins: InstalledPlugin[]) => InstalledPlugin[]): void {
   const store = useInstanceStore.getState()
   const current = store.byId(instanceId)
@@ -146,22 +152,29 @@ export function createPluginActions(
       if (!instance) return
       const installed = instance.plugins.find((plugin) => plugin.pluginId === pluginId)
       if (!installed) return
-      const label = get().pluginById(pluginId)?.name ?? pluginId
-      if (!installed.linked) {
-        try {
-          await repository.setPluginEnabled(instance, installed, enabled)
-        } catch (err) {
-          useUIStore.getState().toast({
-            kind: 'error',
-            title: `${label} ${enabled ? '启用' : '停用'}失败`,
-            message: parseThrownError(err).message,
-          })
-          return
+      const key = pluginKey(instanceId, pluginId)
+      if (pluginToggles.has(key)) return
+      pluginToggles.add(key)
+      try {
+        const label = get().pluginById(pluginId)?.name ?? pluginId
+        if (!installed.linked) {
+          try {
+            await repository.setPluginEnabled(instance, installed, enabled)
+          } catch (err) {
+            useUIStore.getState().toast({
+              kind: 'error',
+              title: `${label} ${enabled ? '启用' : '停用'}失败`,
+              message: parseThrownError(err).message,
+            })
+            return
+          }
         }
+        patchInstancePlugins(instanceId, (plugins) =>
+          plugins.map((plugin) => (plugin.pluginId === pluginId ? { ...plugin, enabled } : plugin)),
+        )
+      } finally {
+        pluginToggles.delete(key)
       }
-      patchInstancePlugins(instanceId, (plugins) =>
-        plugins.map((plugin) => (plugin.pluginId === pluginId ? { ...plugin, enabled } : plugin)),
-      )
     },
 
     async uninstallPlugin(instanceId, pluginId) {

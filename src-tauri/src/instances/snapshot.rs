@@ -157,12 +157,18 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
         .map_err(|e| e.to_string())?;
     let copy_result = copy_tree_with_progress(
         dsh_home.clone(),
-        dest,
+        dest.clone(),
         Arc::clone(flag),
         SkipRule::RunStateAtRoot,
-        // The home's `node_modules` is junctions into the shared version
-        // tree; a snapshot keeps them as links (see `LinkPolicy`).
-        LinkPolicy::Preserve,
+        // The home's `node_modules` holds junctions into the shared version
+        // tree and into the home's own `.pnpm`; a snapshot keeps both as
+        // links (see `LinkPolicy::Preserve`).
+        // The staging directory is renamed to the snapshot's final name below,
+        // so in-tree links must already name that final home.
+        LinkPolicy::Preserve {
+            source_root: dsh_home.clone(),
+            dest_root: snapshots_root(&dir).join(&snap_id).join("dsh-home"),
+        },
         root.to_path_buf(),
         on_progress,
     )
@@ -283,12 +289,18 @@ pub(crate) async fn restore_snapshot_inner(
     // classifies links instead of following them, and reports the worker's
     // real result rather than a half-finished tree.
     let restore_flag = Arc::new(AtomicBool::new(false));
+    let dest_home = staging.join("dsh-home");
     if let Err(e) = copy_tree_with_progress(
         snap_home.clone(),
-        staging.join("dsh-home"),
+        dest_home.clone(),
         Arc::clone(&restore_flag),
         SkipRule::Nothing,
-        LinkPolicy::Preserve,
+        // `current` is where this tree is renamed to, so in-tree links must
+        // name the live home rather than the `.phl-restore` staging path.
+        LinkPolicy::Preserve {
+            source_root: snap_home.clone(),
+            dest_root: current.clone(),
+        },
         root.to_path_buf(),
         &|_| {},
     )

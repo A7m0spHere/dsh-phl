@@ -3,9 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // Only the latest-version probe path is exercised here; the rest of the
 // repository surface is irrelevant to these actions and stubbed empty.
 const latest = vi.hoisted(() => vi.fn())
+const toggled = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services', () => ({
-  repository: { latestPluginVersion: (...args: unknown[]) => latest(...args) },
+  repository: {
+    latestPluginVersion: (...args: unknown[]) => latest(...args),
+    setPluginEnabled: (...args: unknown[]) => toggled(...args),
+  },
   Cancelled: class Cancelled extends Error {},
 }))
 vi.mock('./uiStore', () => ({
@@ -22,6 +26,7 @@ vi.mock('./instanceStore', () => ({
         id === 'inst'
           ? { id: 'inst', plugins: [{ pluginId: 'p-a', version: '1.0.0', linked: false }] }
           : undefined,
+      updateInstance: vi.fn(),
     }),
   },
 }))
@@ -30,6 +35,7 @@ import { useCatalogStore } from './catalogStore'
 
 beforeEach(() => {
   latest.mockReset()
+  toggled.mockReset()
   useCatalogStore.setState({
     latestVersions: {},
     // pluginById reads `plugins`; seed a row so `p-a` is checkable.
@@ -140,5 +146,27 @@ describe('update-check state machine (§R5)', () => {
       status: 'resolved',
       latest: '2.0.0',
     })
+  })
+})
+
+describe('plugin toggle serialization', () => {
+  it('a double-click does not race two writes to the same patch file', async () => {
+    // Two clicks used to fire two `cordis.patch.yml` writes; whichever request
+    // landed last decided the file while whichever response landed last
+    // decided the switch, so the UI could show the opposite of what DSH loads.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    toggled.mockImplementation(async () => {
+      await gate
+    })
+
+    const first = useCatalogStore.getState().setPluginEnabled('inst', 'p-a', true)
+    const second = useCatalogStore.getState().setPluginEnabled('inst', 'p-a', false)
+    release()
+    await Promise.all([first, second])
+
+    expect(toggled).toHaveBeenCalledTimes(1)
   })
 })

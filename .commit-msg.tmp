@@ -1,0 +1,31 @@
+fix: reliability round — storage switch, launch watchers, links, secrets, a11y
+
+Publishes the reviewed fixes from the working repository (code only; the local
+planning docs stay out as usual). Everything below was re-verified inside this
+release copy: npm test 84, npm run build, cargo fmt --check, cargo clippy
+--workspace --all-targets -D warnings, cargo test --workspace 313 passed.
+
+- storage: the data-root switch adopted the new path before the backend did
+  (a refused root left the field and the disk disagreeing), cancelling a
+  migration reported failure, and the first-run choice did not re-read the
+  stores. The switch now goes through setRootVerified and reports a refusal.
+- launch: adopted processes are watched for exit (they kept their entry and
+  their WebUI window forever), the launch watcher only closes the window of
+  its own pid, and kill_tree has a 10s deadline instead of hanging a stop.
+- links: pnpm lays a plugin's dependencies out as junctions into the
+  instance's own node_modules/.pnpm — measured on Windows — so a copy now
+  carries links that live inside the copied tree (Preserve gained
+  source_root/dest_root and callers pass the final path, not the staging
+  name), and a migration translates them with the moving subtree.
+- secrets: log tails are redacted before they reach the UI (dsh web prints the
+  per-boot WebUI token on the first line), cordis.patch.yml is written
+  tmp+rename, the manifest temp name is per-writer, and stop verifies the pid
+  identity before killing.
+- stores/UI: plugin toggles and API-config saves are serialized instead of
+  dropping the user's edit, and a WebUI that could not open says so.
+- a11y: measured contrast — ink-faint 2.72:1 → 4.60:1 light, 3.46:1 → 4.59:1
+  dark, muted moved to 5.95:1; dialogs are labelled and trap/return focus;
+  menus are keyboard-navigable; every switch has a name.
+
+Windows CI path assertions (8.3 short names vs long names) are fixed by
+comparing directory identity.

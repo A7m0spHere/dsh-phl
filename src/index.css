@@ -21,9 +21,13 @@
     --c-line: 220 16% 90%;
     --c-line-strong: 220 14% 82%;
 
+    /* Contrast (measured against surface/canvas/sunken, WCAG 2.1):
+       ink 16.8:1 · muted 5.95:1 · faint 4.60:1. The faint token used to sit at
+       60% (2.72-2.99:1) while carrying 11-14px labels, which is below AA for
+       any text size; muted moved down with it so the two stay distinguishable. */
     --c-ink: 222 30% 13%;
-    --c-ink-muted: 220 10% 44%;
-    --c-ink-faint: 220 10% 60%;
+    --c-ink-muted: 220 10% 38%;
+    --c-ink-faint: 220 10% 45%;
 
     --c-shadow: 222 44% 22%;
 
@@ -60,9 +64,11 @@
     --c-line: 222 12% 21%;
     --c-line-strong: 222 10% 30%;
 
+    /* Contrast (measured against surface/canvas/raised): ink 14.1:1 ·
+       muted 5.95:1 · faint 4.59:1. Faint was 48% (3.46-4.15:1). */
     --c-ink: 220 22% 93%;
     --c-ink-muted: 220 9% 64%;
-    --c-ink-faint: 220 8% 48%;
+    --c-ink-faint: 220 8% 56%;
 
     --c-shadow: 224 60% 2%;
 

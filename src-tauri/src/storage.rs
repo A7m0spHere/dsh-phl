@@ -308,10 +308,22 @@ async fn undo_migration(path: &Path, journal: &MigrationJournal) -> Result<MoveS
                 // rolling the move back has to translate them again — the
                 // restored tree would otherwise reference a root that is being
                 // emptied. `Raw` matching, because `to/versions` may never have
-                // moved and therefore cannot be canonicalized.
-                if let Err(err) =
-                    crate::instances::repoint_managed_links(&back, &to, &from, LinkMatch::Raw)
-                {
+                // moved and therefore cannot be canonicalized. The walk and its
+                // `mklink` calls are blocking, so they run off the runtime.
+                let rewritten = tokio::task::spawn_blocking({
+                    let (dir, from_root, to_root) = (back.clone(), to.clone(), from.clone());
+                    move || {
+                        crate::instances::repoint_managed_links(
+                            &dir,
+                            &from_root,
+                            &to_root,
+                            LinkMatch::Raw,
+                        )
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
+                if let Err(err) = rewritten {
                     let _ = tokio::fs::rename(&back, &src).await;
                     return Err(format!(
                         "无法还原 {} 中的链接: {err}（该目录已放回目标根）",
@@ -558,7 +570,13 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         // data root *replaces* the original — a filter that made sense for
         // cloning an instance would drop every `snapshots/` and `logs/` here
         // and the source is deleted right after, destroying them for good.
-        let bytes = dir_size(&src);
+        // Blocking tree walk: off the runtime, like the copy itself.
+        let bytes = tokio::task::spawn_blocking({
+            let src = src.clone();
+            move || dir_size(&src)
+        })
+        .await
+        .unwrap_or(0);
 
         // Fast path, same drive: rename. The journal row already says
         // `moving`, so an interrupt here is recovered the same way as a
@@ -568,9 +586,25 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             // into the OLD root that the deletion step will erase. Re-point
             // them before declaring the kind moved (and refuse + roll the
             // rename back on anything the copy path would refuse).
-            if let Err(e) =
-                crate::instances::repoint_managed_links(&dst, &from, &to, LinkMatch::Canonical)
-            {
+            // `Raw`: the tree has already been renamed, so a link into its old
+            // location (pnpm's `.pnpm`, for instance) is dangling and could
+            // never be classified by resolving it. The rename moves paths, and
+            // path text is exactly what has to be translated. The walk and its
+            // `mklink` calls are blocking, so they run off the runtime.
+            let rewritten = tokio::task::spawn_blocking({
+                let (dir, from_root, to_root) = (dst.clone(), from.clone(), to.clone());
+                move || {
+                    crate::instances::repoint_managed_links(
+                        &dir,
+                        &from_root,
+                        &to_root,
+                        LinkMatch::Raw,
+                    )
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("链接重写线程异常退出: {e}")));
+            if let Err(e) = rewritten {
                 let _ = tokio::fs::rename(&dst, &src).await;
                 journal.set(kind, EntryState::Pending, 0);
                 if let Some(p) = journal_path {
@@ -608,12 +642,14 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             stage.clone(),
             Arc::clone(flag),
             SkipRule::Nothing,
-            // `versions/` moves with the root, so a link is re-pointed at the
-            // same relative location under the destination instead of at the
-            // old absolute prefix, which dangles once the source is deleted.
+            // The whole root moves, so a link into the shared `versions/` tree
+            // or into this subtree is re-pointed at the same relative location
+            // under the destination instead of at the old absolute prefix,
+            // which dangles once the source is deleted.
             LinkPolicy::Rewrite {
                 new_root: to.clone(),
                 match_on: LinkMatch::Canonical,
+                source_root: src.clone(),
             },
             from.clone(),
             &|p| {
@@ -640,7 +676,12 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
             let _ = tokio::fs::remove_dir_all(&stage).await;
             return Err(error);
         }
-        let staged = dir_size(&stage);
+        let staged = tokio::task::spawn_blocking({
+            let stage = stage.clone();
+            move || dir_size(&stage)
+        })
+        .await
+        .unwrap_or(0);
         if staged != bytes {
             let _ = tokio::fs::remove_dir_all(&stage).await;
             return Err(format!(
@@ -726,6 +767,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Compare two paths by *identity*, not spelling.
+    ///
+    /// Windows gives the same directory two names: the 8.3 short form
+    /// (`C:\Users\RUNNER~1\…`) and the long form (`C:\Users\runneradmin\…`).
+    /// CI's `%TEMP%` is the short one, so a link created from it and a path
+    /// canonicalized from it are the same directory but different strings —
+    /// comparing the text made these tests fail on the runner only.
+    fn same_dir(a: &Path, b: &Path) -> bool {
+        let norm = |p: &Path| {
+            std::fs::canonicalize(p)
+                .map(|c| crate::paths::strip_verbatim(&c))
+                .unwrap_or_else(|_| crate::paths::strip_verbatim(p))
+        };
+        norm(a) == norm(b)
     }
 
     fn no_cancel() -> Arc<AtomicBool> {
@@ -913,12 +970,11 @@ mod tests {
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
         );
-        assert_eq!(
-            crate::paths::strip_verbatim(&std::fs::read_link(inst.join("a-deps")).unwrap()),
-            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
-                .join("versions")
-                .join("v1")
-                .join("node_modules"),
+        assert!(
+            same_dir(
+                &std::fs::read_link(inst.join("a-deps")).unwrap(),
+                &from.join("versions").join("v1").join("node_modules"),
+            ),
             "the already-classified managed link was NOT re-pointed by the aborted move"
         );
         assert_eq!(
@@ -1148,12 +1204,11 @@ mod tests {
             .join("dsh-home")
             .join("profiles")
             .join("node_modules");
-        assert_eq!(
-            crate::paths::strip_verbatim(&std::fs::read_link(&restored).unwrap()),
-            crate::paths::strip_verbatim(&std::fs::canonicalize(&from).unwrap())
-                .join("versions")
-                .join("v1")
-                .join("node_modules"),
+        assert!(
+            same_dir(
+                &std::fs::read_link(&restored).unwrap(),
+                &from.join("versions").join("v1").join("node_modules"),
+            ),
             "the restored link points at the source root, not the emptied one"
         );
         assert_eq!(

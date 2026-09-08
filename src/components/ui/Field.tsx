@@ -77,8 +77,10 @@ export function SettingRow({
 
 /* ---------------- text ---------------- */
 
+// Placeholders keep the full-strength token: any alpha over the surface drops
+// them well below the 4.5:1 the token itself is tuned for.
 const inputBase =
-  'w-full rounded-sm bg-surface px-2 text-base text-ink ring-1 ring-inset ring-line-strong/60 placeholder:text-ink-faint/70 transition-[box-shadow,background-color] duration-150 ease-out hover:ring-line-strong focus:outline-none focus:ring-[1.5px] focus:ring-accent disabled:opacity-50'
+  'w-full rounded-sm bg-surface px-2 text-base text-ink ring-1 ring-inset ring-line-strong/60 placeholder:text-ink-faint transition-[box-shadow,background-color] duration-150 ease-out hover:ring-line-strong focus:outline-none focus:ring-[1.5px] focus:ring-accent disabled:opacity-50'
 
 export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   invalid?: boolean
@@ -103,7 +105,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         {prefix && <span className="shrink-0 text-sm text-ink-faint">{prefix}</span>}
         <input
           ref={ref}
-          className="min-w-0 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-ink-faint/70"
+          className="min-w-0 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-ink-faint"
           {...rest}
         />
         {suffix && <span className="shrink-0 text-sm text-ink-faint">{suffix}</span>}

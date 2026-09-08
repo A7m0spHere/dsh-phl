@@ -72,6 +72,33 @@ async fn read_head(log_path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Replace the per-boot WebUI token in a log excerpt.
+///
+/// `dsh web` prints the authenticated URL as the first line of its log, and
+/// PHL puts log tails into toasts and diagnostics reports that users paste into
+/// issues. The token is per-boot and the log is local, but while the instance
+/// runs it is a live credential — it must not cross the IPC boundary.
+pub(crate) fn redact_web_token(text: &str) -> String {
+    const KEY: &str = "token=";
+    const PLACEHOLDER: &str = "token=<redacted>";
+    if !text.contains(KEY) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(KEY) {
+        out.push_str(&rest[..idx]);
+        out.push_str(PLACEHOLDER);
+        let tail = &rest[idx + KEY.len()..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ')' | ','))
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(crate) fn parse_web_url(log_text: &str) -> Option<String> {
     for line in log_text.lines() {
         const MARKER: &str = "dsh web:";
@@ -279,24 +306,37 @@ pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
         lines.remove(0);
     }
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join(
+    // Redacted here rather than at each call site: this string ends up in
+    // toasts and diagnostics reports, and a short log has the token line in it.
+    redact_web_token(&lines[start..].join(
         "
 ",
-    )
+    ))
 }
+
+/// A hung kill must not hang the stop command forever. The blocking worker
+/// cannot be cancelled, but the caller gets an answer and the process entry
+/// stays tracked, so the user can retry instead of watching a spinner.
+const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The spawned node is only the tree root — DSH shells out to plugins and
 /// tools, so the whole tree has to go with it.
 #[cfg(windows)]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
-    let output = tokio::task::spawn_blocking(move || {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
+    let output = tokio::time::timeout(
+        KILL_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        }),
+    )
     .await
+    .map_err(|_| {
+        format!("终止进程 {pid} 超时（taskkill 超过 10 秒无响应），可在任务管理器中手动结束")
+    })?
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     check_kill_output(pid, output)
@@ -306,12 +346,16 @@ pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
     // No libc dependency: `kill` on the direct child. DSH's own children are
     // expected to exit with it; a tree-kill here would need a setsid pre-exec.
-    let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-    })
+    let output = tokio::time::timeout(
+        KILL_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output()
+        }),
+    )
     .await
+    .map_err(|_| format!("终止进程 {pid} 超时（kill 超过 10 秒无响应）"))?
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     check_kill_output(pid, output)

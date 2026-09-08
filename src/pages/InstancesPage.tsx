@@ -294,8 +294,8 @@ export function InstancesPage() {
                   in without re-growing the header. */}
               <Menu
                 align="start"
-                trigger={({ open, toggle }) => (
-                  <Button variant="ghost" onClick={toggle} aria-expanded={open}>
+                trigger={({ toggle, menuProps }) => (
+                  <Button variant="ghost" onClick={toggle} {...menuProps}>
                     更多导入方式
                   </Button>
                 )}

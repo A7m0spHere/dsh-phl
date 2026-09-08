@@ -37,7 +37,12 @@ export function Menu({
   className,
   width = 184,
 }: {
-  trigger: (props: { open: boolean; toggle: () => void }) => ReactNode
+  trigger: (props: {
+    open: boolean
+    toggle: () => void
+    /** Spread onto the trigger button: the menu's state, announced. */
+    menuProps: { 'aria-haspopup': 'menu'; 'aria-expanded': boolean }
+  }) => ReactNode
   items: MenuItem[]
   align?: 'start' | 'end'
   side?: 'top' | 'bottom'
@@ -50,6 +55,41 @@ export function Menu({
   const anchorRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const { t, scale } = useMotion()
+
+  /**
+   * Keyboard contract: opening moves focus to the first item, arrows cycle,
+   * Escape (handled below) and outside clicks close, and closing hands focus
+   * back to the trigger. Without this the menu was mouse-only.
+   */
+  useLayoutEffect(() => {
+    if (open) {
+      panelRef.current
+        ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+        ?.focus()
+      return
+    }
+    anchorRef.current?.querySelector<HTMLElement>('button, [role="button"]')?.focus()
+  }, [open])
+
+  const onPanelKeyDown = (event: React.KeyboardEvent) => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+    event.preventDefault()
+    const items = Array.from(
+      panelRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [],
+    )
+    if (items.length === 0) return
+    const current = items.indexOf(document.activeElement as HTMLElement)
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : event.key === 'ArrowDown'
+            ? (current + 1) % items.length
+            : (current - 1 + items.length) % items.length
+    items[next].focus()
+  }
 
   useLayoutEffect(() => {
     if (!open) return
@@ -101,7 +141,11 @@ export function Menu({
   return (
     <>
       <div ref={anchorRef} className={cn('inline-flex', className)}>
-        {trigger({ open, toggle: () => setOpen((v) => !v) })}
+        {trigger({
+          open,
+          toggle: () => setOpen((v) => !v),
+          menuProps: { 'aria-haspopup': 'menu', 'aria-expanded': open },
+        })}
       </div>
       {createPortal(
         <AnimatePresence>
@@ -110,6 +154,7 @@ export function Menu({
               ref={panelRef}
               role="menu"
               data-menu-panel
+              onKeyDown={onPanelKeyDown}
               initial={{ opacity: 0, scale: scale === 0 ? 1 : 0.95, y: scale === 0 ? 0 : dropUp ? 4 : -4 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: scale === 0 ? 1 : 0.97, y: scale === 0 ? 0 : dropUp ? 2 : -2 }}

@@ -684,6 +684,7 @@ export function MoreSettings({ portIssue, attempted }: { portIssue?: string; att
                     <Switch
                       checked={draft.autoPort}
                       onChange={(v) => patch({ autoPort: v, port: v ? draft.port : suggestPort() })}
+                      label="自动分配端口"
                     />
                   </div>
                   <AnimatePresence initial={false}>
@@ -815,7 +816,7 @@ export function PathPreview() {
           </li>
         ))}
       </ul>
-      <p className="mt-2 break-all text-2xs leading-relaxed text-ink-faint/80">
+      <p className="mt-2 break-all text-2xs leading-relaxed text-ink-faint">
         数据目录 {settingsRoot}
       </p>
       <p className={cn('mt-0.5 text-2xs', lowSpace ? 'text-warn' : 'text-ink-faint')}>
@@ -887,7 +888,7 @@ export function CreatingOverlay() {
                     key={s.id}
                     className={cn(
                       'flex items-center gap-2.5 text-base transition-colors duration-200',
-                      active ? 'text-ink' : done ? 'text-ink-muted' : 'text-ink-faint/60',
+                      active ? 'text-ink' : done ? 'text-ink-muted' : 'text-ink-faint',
                     )}
                   >
                     <span className="flex h-4 w-4 items-center justify-center">

@@ -110,6 +110,7 @@ export function SettingsPage() {
     useShallow((s) => ({
       root: s.root,
       setRoot: s.setRoot,
+      setRootVerified: s.setRootVerified,
       reset: s.reset,
       startup: s.startup,
       minimizeToTray: s.minimizeToTray,
@@ -177,8 +178,20 @@ export function SettingsPage() {
    * new one — edits fail with "实例不存在", and a delete reports success while
    * the real directory survives, unreachable, in the old location.
    */
-  const switchRootTo = async (next: string) => {
-    settings.setRoot(next)
+  const switchRootTo = async (next: string): Promise<boolean> => {
+    // The backend has to adopt the path before the UI moves: a local-only
+    // switch would leave the field pointing at one directory while every read
+    // and write resolved against the other (see `setRootVerified`).
+    if (!(await settings.setRootVerified(next))) {
+      ui.toast({
+        kind: 'error',
+        title: '无法切换数据目录',
+        message: `PHL 没有接受 ${next}。路径必须是绝对路径（例如 D:\\PHL），且配置目录可写；当前数据目录保持不变。`,
+        duration: 8000,
+      })
+      setRootDraft(settings.root)
+      return false
+    }
     setRootDraft(next)
     await Promise.all([
       useInstanceStore.getState().reload(),
@@ -191,6 +204,11 @@ export function SettingsPage() {
         message: parseThrownError(err).message,
       })
     })
+    // The per-instance sizes and the orphan scan are keyed to the old root's
+    // ids and directories; re-run them now that the list describes the new one.
+    void measureDiskUsage()
+    void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
+    return true
   }
 
   // Keep the field in step when the root changes from somewhere else.
@@ -274,7 +292,16 @@ export function SettingsPage() {
         void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
         return
       }
-      await switchRootTo(to)
+      if (!(await switchRootTo(to))) {
+        // The data is already in `to`; leaving the root behind would strand it.
+        ui.toast({
+          kind: 'error',
+          title: '数据已迁移，但目录未切换',
+          message: `数据已在 ${to}，PHL 却没能把数据目录切过去。请到本页把路径手动改成它，否则列表会指向已经搬空的旧目录。`,
+          duration: 12000,
+        })
+        return
+      }
       ui.toast({
         kind: 'success',
         title: '数据迁移完成',
@@ -282,6 +309,18 @@ export function SettingsPage() {
         duration: 6000,
       })
     } catch (err) {
+      // Rust reports a cancelled transfer as `Err("cancelled")`; showing the
+      // failure toast for it told the user their migration broke when they had
+      // simply stopped it.
+      if (parseThrownError(err).message.trim() === 'cancelled') {
+        ui.toast({
+          kind: 'info',
+          title: '迁移已取消',
+          message: '数据目录未更改；已完成的部分保留在新目录，可在本页继续或撤销。',
+          duration: 6000,
+        })
+        return
+      }
       ui.toast({
         kind: 'error',
         title: '迁移失败',
@@ -310,13 +349,32 @@ export function SettingsPage() {
     }
   }
 
+  /**
+   * Why a typed path cannot be a data root, in the same terms the backend
+   * enforces (`paths::validate_root`). Checked before the two confirmations so
+   * the user is not walked through a migration decision that cannot happen.
+   */
+  const rootProblem = (raw: string): string | null => {
+    const path = raw.trim()
+    if (!path) return '请输入目录路径。'
+    if (!/^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(path)) return '请填写绝对路径，例如 D:\\PHL。'
+    if (/[\\/]\.{1,2}(?:[\\/]|$)/.test(path)) return '路径里不能包含 . 或 .. 这样的相对段。'
+    return null
+  }
+
   const applyRoot = async () => {
     const next = normalizeRoot(rootDraft)
     if (!next || next === settings.root) return
+    const problem = rootProblem(next)
+    if (problem) {
+      ui.toast({ kind: 'warn', title: '数据目录无效', message: problem })
+      return
+    }
     const live = useInstanceStore.getState()
     if (Object.values(live.states).some((s) => ['running', 'starting', 'stopping'].includes(s.status))
       || live.hasPendingWrites() || live.createProgress || Object.keys(live.snapshotTransfers).length
-      || useApiConfigStore.getState().saving || useApiConfigStore.getState().syncing
+      || useApiConfigStore.getState().saving || useApiConfigStore.getState().pendingSaves > 0
+      || useApiConfigStore.getState().syncing
       || useCatalogStore.getState().activeTransfers() > 0) {
       ui.toast({
         kind: 'warn',
@@ -413,6 +471,7 @@ export function SettingsPage() {
                     disabled
                     checked={settings.minimizeToTray}
                     onChange={(v) => settings.set('minimizeToTray', v)}
+                    label="关闭窗口时最小化到托盘"
                   />
                 }
               />
@@ -423,6 +482,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.closeStopsInstances}
                     onChange={(v) => settings.set('closeStopsInstances', v)}
+                    label="退出时停止所有实例"
                   />
                 }
               />
@@ -434,6 +494,7 @@ export function SettingsPage() {
                     disabled
                     checked={settings.checkUpdates}
                     onChange={(v) => settings.set('checkUpdates', v)}
+                    label="自动检查 DSH 新版本"
                   />
                 }
               />
@@ -444,6 +505,7 @@ export function SettingsPage() {
                   <Switch
                     checked={ui.confirmDelete}
                     onChange={(v) => ui.setPref('confirmDelete', v)}
+                    label="删除实例前二次确认"
                   />
                 }
               />
@@ -505,6 +567,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.keepArchives}
                     onChange={(v) => settings.set('keepArchives', v)}
+                    label="保留安装包"
                   />
                 }
               />
@@ -531,6 +594,7 @@ export function SettingsPage() {
                   <Switch
                     checked={settings.pendingReleaseAlerts}
                     onChange={(v) => settings.set('pendingReleaseAlerts', v)}
+                    label="GitHub 版本上架 npm 时提醒"
                   />
                 }
               />
@@ -617,6 +681,7 @@ export function SettingsPage() {
                     <Switch
                       checked={ui.showLaunchDock}
                       onChange={(v) => ui.setPref('showLaunchDock', v)}
+                      label="显示底部启动栏"
                     />
                   }
                 />
