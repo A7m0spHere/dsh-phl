@@ -28,7 +28,7 @@ use tauri::State;
 use crate::api_config::ApiBinding;
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, sanitize_segment, PhlState};
-use crate::plugins::cordis::{find_item_end, indent_of, patch_path};
+use crate::plugins::cordis::declared_plugin_ids;
 use crate::plugins::disabled_plugin_ids;
 use crate::versions::{now_iso, Transfers};
 
@@ -622,81 +622,10 @@ pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> Inst
 pub(crate) async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
     let node_modules = profile.join("node_modules");
     let disabled = disabled_plugin_ids(profile).await;
-    let declared = declared_patch_blocks(profile).await;
+    let declared = declared_plugin_ids(profile).await;
     let mut out = Vec::new();
     collect_packages(&node_modules, &disabled, &declared, &mut out, true).await;
     out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
-    out
-}
-
-/// Every plugin id/mount name declared in the profile's patch file → whether
-/// its block carries `disabled: true`. The flag and the keys are read only at
-/// the mount row's own child indent — the same rule `set_plugin_disabled`
-/// writes by — so a `disabled:`/`name:` inside a nested `config:` belongs to
-/// that mapping, not to us.
-async fn declared_patch_blocks(profile: &Path) -> HashMap<String, bool> {
-    let Ok(text) = tokio::fs::read_to_string(patch_path(profile)).await else {
-        return HashMap::new();
-    };
-    let lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let mut out: HashMap<String, bool> = HashMap::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if !trimmed.starts_with("- insert:")
-            && !trimmed.starts_with("- id:")
-            && !trimmed.starts_with("- name:")
-        {
-            i += 1;
-            continue;
-        }
-        let end = find_item_end(&lines, i);
-        // The mount row: nested `- id:` for an insert block, the top line
-        // itself for a bare `- id:`/`- name:` row.
-        let row = if trimmed.starts_with("- insert:") {
-            match (i + 1..end).find(|&j| lines[j].trim_start().starts_with("- id:")) {
-                Some(r) => r,
-                None => {
-                    i = end;
-                    continue;
-                }
-            }
-        } else {
-            i
-        };
-        let key_indent = indent_of(&lines[row]) + 2;
-        let own = lines[row]
-            .trim_start()
-            .strip_prefix("- id:")
-            .or_else(|| lines[row].trim_start().strip_prefix("- name:"))
-            .map(|v| v.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
-            .unwrap_or_default();
-        let name = (row + 1..end).find_map(|j| {
-            (indent_of(&lines[j]) == key_indent)
-                .then(|| {
-                    lines[j]
-                        .trim_start()
-                        .strip_prefix("name:")
-                        .map(|v| v.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
-                })
-                .flatten()
-        });
-        let flagged = (row + 1..end).any(|j| {
-            indent_of(&lines[j]) == key_indent
-                && lines[j]
-                    .trim_start()
-                    .strip_prefix("disabled:")
-                    .is_some_and(|v| v.trim() == "true")
-        });
-        for key in [Some(own), name]
-            .into_iter()
-            .flatten()
-            .filter(|k| !k.is_empty())
-        {
-            out.entry(key).or_insert(flagged);
-        }
-        i = end;
-    }
     out
 }
 
@@ -752,12 +681,15 @@ async fn collect_packages(
             });
             continue;
         }
-        // No marker: adopt only what the patch file actually mounts, and only
-        // unscoped dirs — a scoped leaf's bare name could collide with a
-        // `@scope/pkg` declared id, and pnpm hoists scoped installs anyway.
-        if !allow_scopes {
-            continue;
-        }
+        // Use the full scoped name; a bare leaf could alias an unrelated package.
+        let name = if allow_scopes {
+            name
+        } else {
+            format!(
+                "{}/{name}",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            )
+        };
         let Some(&disabled_here) = declared.get(&name) else {
             continue;
         };
@@ -1337,18 +1269,24 @@ mod tests {
         // entry — adopting anything present in node_modules would flood the
         // list with hundreds of unrelated packages.
         std::fs::create_dir_all(modules.join("schemastery")).unwrap();
+        std::fs::create_dir_all(modules.join("@acme/toolkit")).unwrap();
+        std::fs::write(
+            modules.join("@acme/toolkit/package.json"),
+            r#"{"name":"@acme/toolkit","version":"2.0.0"}"#,
+        )
+        .unwrap();
 
         std::fs::write(
             profile.join("cordis.patch.yml"),
             "- insert:\n    - id: dshmarket\n      name: 'dshmarket'\n\
-             - insert:\n    - id: dsh-dream-skin\n      name: 'dsh-dream-skin'\n      disabled: true\n",
+             - insert:\n    - id: dsh-dream-skin\n      name: 'dsh-dream-skin'\n      disabled: true\n    - name: '@acme/toolkit'\n      id: toolkit\n",
         )
         .unwrap();
 
         let plugins = scan_plugins(&profile).await;
         assert_eq!(
             plugins.len(),
-            2,
+            3,
             "patch-declared packages are adopted; unlisted dirs are not"
         );
 
@@ -1367,6 +1305,12 @@ mod tests {
             .unwrap();
         assert!(!skin.enabled, "the block's own disabled flag is honored");
         assert_eq!(skin.version, "", "missing version degrades, never drops");
+        let scoped = plugins
+            .iter()
+            .find(|p| p.registry_id == "@acme/toolkit")
+            .unwrap();
+        assert!(scoped.enabled, "a sibling's disabled flag must not leak");
+        assert_eq!(scoped.version, "2.0.0");
 
         let _ = std::fs::remove_dir_all(&root);
     }

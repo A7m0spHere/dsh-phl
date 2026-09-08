@@ -114,6 +114,43 @@ const successOutcome = {
   deferredPlugins: [], sessionsImported: 0, credentialNames: [],
 }
 
+it('reset isolates a new install from an old rejection and progress callback', async () => {
+  const pending: Array<{ reject: (error: Error) => void; progress: (p: { progress: number }) => void; signal: AbortSignal }> = []
+  mocks.installPack.mockImplementation((_path, _req, progress, signal) =>
+    new Promise((_resolve, reject) => pending.push({ reject, progress, signal })),
+  )
+  usePackStore.setState({ path: '/tmp/first.phlpack', preview: preview() })
+  const first = usePackStore.getState().install()
+  await usePackStore.getState().install()
+  expect(mocks.installPack).toHaveBeenCalledTimes(1)
+  usePackStore.getState().reset()
+  usePackStore.setState({ path: '/tmp/second.phlpack', preview: preview() })
+  const second = usePackStore.getState().install()
+  pending[0].progress({ progress: 0.9 })
+  pending[0].reject(new Error('cancelled'))
+  await first
+  expect(usePackStore.getState().installError).toBeNull()
+  expect(usePackStore.getState().installing).toBe(true)
+  expect(usePackStore.getState().progress).toBe(0)
+  usePackStore.getState().cancelInstall()
+  expect(pending[1].signal.aborted).toBe(true)
+  pending[1].reject(new Error('cancelled'))
+  await second
+})
+
+it('a preview resolving after back cannot repopulate a discarded selection', async () => {
+  let finish!: (value: ReturnType<typeof preview>) => void
+  mocks.choosePackOpenPath.mockResolvedValue('/tmp/first.phlpack')
+  mocks.previewPack.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const picking = usePackStore.getState().pickPack()
+  await vi.waitFor(() => expect(mocks.previewPack).toHaveBeenCalled())
+  usePackStore.getState().back()
+  finish(preview())
+  await picking
+  expect(usePackStore.getState().preview).toBeNull()
+  expect(usePackStore.getState().step).toBe('pick')
+})
+
 it('after a failed install, back returns to the preview for a clean retry (§R4)', async () => {
   await usePackStore.setState({
     step: 'preview', path: '/tmp/x.phlpack', preview: preview(), name: 'My Instance',

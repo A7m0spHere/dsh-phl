@@ -1,5 +1,33 @@
 # 项目审查与重构记录
 
+## 2026-09-08：GitHub 更新前审核
+
+范围：本地 `663cbe0` 与远端 `f17030e` 的树差异（89 个文件），重点检查插件写入、Pack 安装/导出、取消与异步状态，以及 bridge/store 拆分。两条历史没有共同祖先；发布时保留双方历史，以本次审查修复后的代码树整合，不强制覆盖远端引用。
+
+本次确认并修复：
+
+| 优先级 | 触发与影响 | 修复与验证 |
+|---|---|---|
+| P1 | Pack 内置插件把 Cordis 注册写到实例根目录，DSH 读取 profile 时找不到挂载 | `register_embedded_plugins` 只接收 profile；回归直接读取 `dsh-home/profiles/web/cordis.patch.yml`，并确认根目录没有误写 |
+| P1 | 插件启停/卸载使用普通 `profile_dir`，绕过 external 实例写入限制 | 恢复 `writable_profile_dir`，与插件安装及外部实例只读契约一致 |
+| P1 | profile 级 `pnpm add` 改写共享依赖，插件失败回滚无法恢复这些文件；超时后子进程还可能继续写盘 | 在当前插件目录安装，忽略上层 workspace、禁用 lifecycle scripts；超时终止并等待子进程；本地依赖集成测试验证 profile 不变、依赖可由 Node 加载、脚本未运行 |
+| P1 | scoped 包名的未引用 `@` 产生无效 YAML；共享 insert 中扫描、停用、卸载可能混淆兄弟插件或嵌套 config | 引用 scoped id；统一按 mount row 读取和编辑；保留其他插件；支持 name 开头的行、注释和 scoped 包扫描；以 YAML 解析与真实文件操作验证 |
+| P2 | Pack reset 后旧请求的进度、失败或 finally 回写新流程，第二次安装丢失取消句柄；返回后旧 preview 重新填充 | 请求代次与独立 AbortController 身份检查；阻止重复提交；异步交错回归覆盖旧失败、旧进度、新取消与返回 |
+
+验证：
+
+- `npm run typecheck`、`npm test`：75 项通过。
+- `npm run build`：通过；主 JS 504.01 kB，gzip 158.87 kB；仍有已有的 500 kB 分包提示。
+- `npm run bridge:check`：17 个 bridge、71 个调用、75 个注册，无缺失或重复；已加入 CI。
+- `cargo test --manifest-path src-tauri/Cargo.toml --workspace --offline`：277 项通过，6 项默认忽略（包含新增 pnpm 环境依赖测试）。
+- 显式执行 `dependencies_stay_inside_the_plugin_and_scripts_do_not_run -- --ignored`：1 项通过，使用本机 pnpm/Node 和本地测试包。
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --offline --workspace --all-targets --all-features -- -D warnings`：通过。
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`、`git diff --check`：通过。
+
+远端前一轮 CI `34035139199` 的失败原因是 Windows 8.3 短路径与长路径直接比较。本地待发布更新已改为 canonicalize 后比较目录身份，本轮回归通过。未执行真实用户实例启停、NSIS 安装或跨机器 Pack 搬迁；上述自动化结果不等同于这些真机验收。
+
+---
+
 日期：2026-09-05。工作分支：`codex/project-review-refactor`，基于 `feat/api-config-ui-polish`。
 
 本轮深入检查了实例状态、配置持久化、进程生命周期和目录迁移，并对版本、插件、运行时模块进行了静态检查及既有测试回归。总体的 React → service → Rust 分层可以继续使用，主要问题集中在异步操作交错、失败处理，以及多个复制流程的重复实现。

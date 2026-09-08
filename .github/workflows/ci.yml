@@ -27,6 +27,8 @@ jobs:
 
       - run: npm run typecheck
 
+      - run: npm run bridge:check
+
       - run: npm test
 
       # The build doubles as the `dist/` the Rust job needs: tauri's

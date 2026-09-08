@@ -394,7 +394,7 @@ async fn install_inner(
             // into the existing `remove_dir_all(&staging)` cleanup — no half-
             // committed instance ever lands.
             task.set_phase("登记内置插件");
-            register_embedded_plugins(&pack.manifest.plugins, &profile, &staging).await?;
+            register_embedded_plugins(&pack.manifest.plugins, &profile).await?;
 
             task.set_phase("应用环境");
             let mut credential_names = Vec::new();
@@ -525,7 +525,6 @@ fn unpack_pack_with_cancel<F: Fn() -> bool + ?Sized>(
 async fn register_embedded_plugins(
     plugins: &[PackPlugin],
     profile: &Path,
-    instance_root: &Path,
 ) -> Result<usize, String> {
     let plugins_root = profile.join("node_modules");
     // Two manifest ids can share one unpacked folder; register each folder once.
@@ -598,7 +597,7 @@ async fn register_embedded_plugins(
             "trust": "unverified",
             "source": { "type": "pack-embedded" },
         });
-        commit_install(&dir, &marker, instance_root, &registry_id)
+        commit_install(&dir, &marker, profile, &registry_id)
             .await
             .map_err(|e| format!("登记内置插件 {registry_id} 失败：{e}"))?;
         count += 1;

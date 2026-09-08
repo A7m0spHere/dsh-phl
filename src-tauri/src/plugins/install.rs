@@ -295,7 +295,7 @@ pub(crate) async fn commit_install(
         .await
         .map_err(|e| format!("无法写入安装记录: {e}"))?;
 
-    install_plugin_dependencies(instance_root, dest)
+    install_plugin_dependencies(dest)
         .await
         .map_err(|e| format!("安装插件依赖失败: {e}"))?;
 
@@ -314,51 +314,57 @@ pub(crate) async fn commit_install(
     Ok(())
 }
 
-/// Bound on `pnpm add` during a plugin install. A dependency closure can be
-/// large (a real plugin may pull react + codemirror + …), so this is generous,
-/// but it must never hang the commit — a timeout rolls the install back.
+/// A dependency install must complete before the package swap can commit.
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Install the plugin's npm dependency closure into the profile `node_modules`.
-///
-/// The DSH loader imports each mounted package with the profile's own module
-/// resolution, so a plugin is only runnable once its `dependencies` live in the
-/// profile too — extraction alone (above) installs the bare package, and any
-/// non-self-contained plugin then crashes the whole tree at boot with
-/// `Cannot find package '<dep>'`. `pnpm` is the package manager the DSH profile
-/// is built around (`pnpm-workspace.yaml`), so the install is pinned to it; a
-/// missing `pnpm` surfaces as an actionable error, never a half-installed
-/// plugin the user only discovers on the next launch.
-async fn install_plugin_dependencies(profile: &Path, dest: &Path) -> Result<(), String> {
-    let specs = dependency_specs(dest).await?;
-    if specs.is_empty() {
-        return Ok(()); // self-contained plugin: nothing to resolve
+/// Keep the dependency closure inside the package being committed. A profile-
+/// level `pnpm add` rewrites shared dependencies and package.json outside the
+/// install rollback boundary. Ignoring the enclosing workspace also prevents
+/// pnpm from mutating sibling plugins. Lifecycle scripts follow the same
+/// disabled-by-default policy as the DSH version installer.
+async fn install_plugin_dependencies(dest: &Path) -> Result<(), String> {
+    if dependency_specs(dest).await?.is_empty() {
+        return Ok(());
     }
     let bin = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
     let mut command = tokio::process::Command::new(bin);
     command
-        .current_dir(profile)
-        .arg("add")
-        .args(&specs)
+        .current_dir(dest)
+        .args([
+            "install",
+            "--ignore-workspace",
+            "--prod",
+            "--ignore-scripts",
+            "--no-lockfile",
+        ])
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // CREATE_NO_WINDOW (0x0800_0000): a GUI app must not pop a console for
-    // the package manager's child processes. `tokio::process::Command` exposes
-    // this as an inherent method (not the std CommandExt trait).
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
-    let output = tokio::time::timeout(DEPENDENCY_INSTALL_TIMEOUT, command.output())
-        .await
-        .map_err(|_| "安装依赖超时（pnpm），已回滚".to_string())?
-        .map_err(|e| {
-            format!(
-                "无法运行 pnpm 安装依赖（DSH profile 依赖 pnpm，请先安装 pnpm 或 corepack）: {e}"
-            )
-        })?;
+    let child = command
+        .spawn()
+        .map_err(|e| format!("无法运行 pnpm 安装依赖，请先安装 pnpm 或 corepack：{e}"))?;
+    let pid = child.id();
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    let output = match tokio::time::timeout(DEPENDENCY_INSTALL_TIMEOUT, &mut output).await {
+        Ok(result) => result.map_err(|e| format!("读取 pnpm 结果失败：{e}"))?,
+        Err(_) => {
+            if let Some(pid) = pid {
+                crate::launch::kill_tree(pid).await?;
+            }
+            // Reap the stopped child before callers restore or delete its files.
+            let _ = output.await;
+            return Err("安装依赖超时（pnpm）".into());
+        }
+    };
     if !output.status.success() {
-        let tail = stderr_tail(&output.stderr);
-        return Err(format!("pnpm 安装依赖失败: {tail}"));
+        return Err(format!(
+            "pnpm 安装依赖失败: {}",
+            stderr_tail(&output.stderr)
+        ));
     }
     Ok(())
 }
@@ -613,6 +619,60 @@ mod tests {
             dependency_specs(&dest).await.unwrap(),
             vec!["react@18.3.1", "schemastery@^3.0.0", "ws@^8.0.0"],
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pnpm and Node on PATH; uses only a local fixture dependency"]
+    async fn dependencies_stay_inside_the_plugin_and_scripts_do_not_run() {
+        let root = temp_root("dep-isolation");
+        let profile = root.join("profile");
+        let dest = profile.join("node_modules/dsh-local");
+        let dependency = root.join("local-dep");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"phl-fixture-dep","version":"1.0.0","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(dependency.join("index.js"), "module.exports = 42").unwrap();
+        let package = serde_json::json!({
+            "name": "dsh-local", "version": "1.0.0",
+            "dependencies": {"phl-fixture-dep": format!("file:{}", dependency.to_string_lossy().replace('\\', "/"))},
+            "scripts": {"postinstall": "node -e \"require('fs').writeFileSync('script-ran', 'bad')\""}
+        });
+        std::fs::write(dest.join("package.json"), package.to_string()).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            "{\"name\":\"profile\",\"private\":true}",
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("pnpm-workspace.yaml"),
+            "packages:\n  - node_modules/*\n",
+        )
+        .unwrap();
+        let before = std::fs::read(profile.join("package.json")).unwrap();
+        install_plugin_dependencies(&dest).await.unwrap();
+        assert_eq!(std::fs::read(profile.join("package.json")).unwrap(), before);
+        assert!(!profile.join("pnpm-lock.yaml").exists());
+        assert!(!profile.join("node_modules/phl-fixture-dep").exists());
+        assert!(!dest.join("script-ran").exists());
+        let output = tokio::process::Command::new("node")
+            .current_dir(&dest)
+            .args([
+                "-e",
+                "if (require('phl-fixture-dep') !== 42) process.exit(1)",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

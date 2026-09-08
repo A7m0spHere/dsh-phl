@@ -141,11 +141,11 @@ async fn embedded_plugin_gets_a_marker_and_cordis_registration() {
             {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
         ])),
         &profile,
-        &dir,
     )
     .await
     .unwrap();
     assert_eq!(n, 1);
+    assert!(!dir.join("cordis.patch.yml").exists());
 
     let marker: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(mine.join("phl-plugin.json")).unwrap())
@@ -157,7 +157,9 @@ async fn embedded_plugin_gets_a_marker_and_cordis_registration() {
     assert_eq!(marker["version"], "0.1.0");
     assert_eq!(marker["trust"], "unverified");
 
-    let cordis = std::fs::read_to_string(dir.join("cordis.patch.yml")).unwrap();
+    let cordis = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+    let _: Vec<serde_yaml::Value> =
+        serde_yaml::from_str(&cordis).expect("DSH must parse the active profile patch");
     assert!(
         cordis.contains("- id: mine"),
         "cordis entry missing: {cordis}"
@@ -188,19 +190,21 @@ async fn scoped_embedded_plugin_registers_under_its_true_npm_name() {
             {"id":"acme/toolkit","version":"2.3.4","source":{"type":"embedded","path":"embedded/plugins/@acme/toolkit"}}
         ])),
         &profile,
-        &dir,
     )
     .await
     .unwrap();
     assert_eq!(n, 1);
+    assert!(!dir.join("cordis.patch.yml").exists());
     let marker: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(staged.join("phl-plugin.json")).unwrap())
             .unwrap();
     assert_eq!(marker["registryId"], "@acme/toolkit");
     assert_eq!(marker["version"], "2.3.4");
-    let cordis = std::fs::read_to_string(dir.join("cordis.patch.yml")).unwrap();
+    let cordis = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+    let _: Vec<serde_yaml::Value> =
+        serde_yaml::from_str(&cordis).expect("DSH must parse the active profile patch");
     assert!(
-        cordis.contains("- id: @acme/toolkit"),
+        cordis.contains("- id: '@acme/toolkit'"),
         "scoped entry missing: {cordis}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -221,7 +225,6 @@ async fn an_embedded_plugin_without_a_manifest_is_a_hard_error() {
             {"id":"ghost","version":"1.0","source":{"type":"embedded","path":"embedded/plugins/ghost"}}
         ])),
         &profile,
-        &dir,
     )
     .await;
     assert!(
@@ -257,7 +260,6 @@ async fn a_stale_carried_marker_is_overwritten_not_trusted() {
             {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
         ])),
         &profile,
-        &dir,
     )
     .await
     .unwrap();

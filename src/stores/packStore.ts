@@ -49,6 +49,7 @@ interface PackState {
 }
 
 let installController: AbortController | null = null
+let previewGeneration = 0
 
 /** Identity + naming fields; Rust owns version/runtime/profile/env. */
 function requestManifest(preview: RemotePackPreview, name: string): PackInstallRequest['manifest'] {
@@ -89,13 +90,17 @@ export const usePackStore = create<PackState>((set, get) => ({
   },
 
   async pickPack() {
+    if (get().installing) return
+    const generation = ++previewGeneration
     const path = await choosePackOpenPath()
-    if (!path) return
+    if (!path || generation !== previewGeneration) return
     set({ path, step: 'preview', previewState: 'loading', preview: null, previewError: null })
     try {
       const preview = await previewPack(path)
+      if (generation !== previewGeneration) return
       set({ preview, previewState: 'ready', name: preview.name })
     } catch (err) {
+      if (generation !== previewGeneration) return
       set({ previewState: 'error', previewError: parseThrownError(err).message })
     }
   },
@@ -107,6 +112,7 @@ export const usePackStore = create<PackState>((set, get) => ({
   back() {
     const s = get()
     if (s.step === 'preview') {
+      previewGeneration += 1
       set({ step: 'pick', path: null, preview: null, previewState: 'idle', previewError: null })
       return
     }
@@ -122,20 +128,22 @@ export const usePackStore = create<PackState>((set, get) => ({
 
   async install() {
     const { path, preview, name } = get()
-    if (!path || !preview) return
+    if (!path || !preview || get().installing) return
     const ui = useUIStore.getState()
     const req: PackInstallRequest = { manifest: requestManifest(preview, name), allowMissing: true }
     set({ step: 'progress', installing: true, installError: null, progress: 0 })
-    installController = new AbortController()
+    const controller = new AbortController()
+    installController = controller
     try {
       const outcome: RemotePackInstallOutcome = await installPack(
         path,
         req,
-        (p) => set({ progress: p.progress }),
-        installController.signal,
+        (p) => { if (installController === controller) set({ progress: p.progress }) },
+        controller.signal,
       )
       useInstanceStore.getState().admitInstance(instanceFromRecord(outcome.record))
       await useInstanceStore.getState().load()
+      if (installController !== controller) return
       set({ installing: false })
       const notes: string[] = []
       if (outcome.sessionsImported > 0) notes.push(`导入 ${outcome.sessionsImported} 条历史对话`)
@@ -149,10 +157,11 @@ export const usePackStore = create<PackState>((set, get) => ({
         message: notes.length > 0 ? notes.join(' · ') : '整合包已安装为可启动的实例。',
       })
     } catch (err) {
+      if (installController !== controller) return
       const message = parseThrownError(err).message
       set({ installing: false, installError: message === 'cancelled' ? '安装已取消' : message })
     } finally {
-      installController = null
+      if (installController === controller) installController = null
     }
   },
 
@@ -161,6 +170,7 @@ export const usePackStore = create<PackState>((set, get) => ({
   },
 
   reset() {
+    previewGeneration += 1
     installController?.abort()
     installController = null
     set({

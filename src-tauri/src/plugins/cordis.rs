@@ -58,140 +58,114 @@ async fn write_patch_lines(instance_root: &Path, lines: &[String]) -> Result<(),
 /// from any record of its own — the file DSH actually consults is the only
 /// answer that cannot drift.
 pub(crate) async fn disabled_plugin_ids(instance_root: &Path) -> std::collections::HashSet<String> {
-    let lines = read_patch_lines(instance_root).await;
-    let mut disabled = std::collections::HashSet::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        let is_insert = trimmed.starts_with("- insert:");
-        let is_id = trimmed.starts_with("- id:");
-        if !is_insert && !is_id {
-            i += 1;
-            continue;
+    declared_plugin_ids(instance_root)
+        .await
+        .into_iter()
+        .filter_map(|(id, disabled)| disabled.then_some(id))
+        .collect()
+}
+
+pub(crate) async fn declared_plugin_ids(profile: &Path) -> std::collections::HashMap<String, bool> {
+    let lines = read_patch_lines(profile).await;
+    let mut out = std::collections::HashMap::new();
+    for row in mount_rows(&lines) {
+        let range = row.range;
+        let disabled = row_value(&lines, range, "disabled")
+            .is_some_and(|v| v == serde_yaml::Value::Bool(true));
+        for key in ["id", "name"] {
+            if let Some(serde_yaml::Value::String(id)) = row_value(&lines, range, key) {
+                out.entry(id).or_insert(disabled);
+            }
         }
-        let item_end = find_item_end(&lines, i);
-        let row_start = if is_insert {
-            (i + 1..item_end).find(|&j| lines[j].trim_start().starts_with("- id:"))
-        } else {
-            Some(i)
-        };
-        let Some(row_start) = row_start else {
-            i = item_end;
-            continue;
-        };
-        let id = lines[row_start]
-            .trim_start()
-            .strip_prefix("- id:")
-            .map(|r| r.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
-            .unwrap_or_default();
-        let key_indent = indent_of(&lines[row_start]) + 2;
-        let flagged = (row_start + 1..item_end).any(|j| {
-            indent_of(&lines[j]) == key_indent
-                && lines[j]
-                    .trim_start()
-                    .strip_prefix("disabled:")
-                    .is_some_and(|v| v.trim() == "true")
-        });
-        if !id.is_empty() && flagged {
-            disabled.insert(id);
-        }
-        i = item_end;
     }
-    disabled
+    out
 }
 
 pub(crate) fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// Line range `[start, end)` of the item that mounts the plugin named `id`.
-///
-/// A plugin is mounted by DSH through an `insert:` list, so the block may start
-/// at `- insert:` or (legacy) at a bare `- id:` line. The block ends at the next
-/// non-empty line indented at or above the item's own level. Matching a trimmed
-/// `"- "` prefix instead would also stop at *nested* sequence items (`      - a`
-/// under `config:`), cutting the block in half and orphaning its tail at the
-/// document's top level.
-///
-/// A block matches on either key of its mount row — the loader `id:` or the
-/// package `name:`. PHL writes both identically; a CLI- or hand-written file
-/// may differ, and `name` is what DSH resolves to a `node_modules` package.
-/// Since the scan reports the package dir as the plugin handle, toggling must
-/// find the block by that name too, or it would append a second block and DSH
-/// would insert the same package twice.
-pub(crate) fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
-    let mut start: Option<usize> = None;
-    let mut base = 0usize;
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        match start {
-            None => {
-                if (trimmed.starts_with("- insert:")
-                    || trimmed.starts_with("- id:")
-                    || trimmed.starts_with("- name:"))
-                    && block_mounts(lines, i, id)
-                {
-                    start = Some(i);
-                    base = indent_of(line);
-                }
-            }
-            Some(s) => {
-                if !trimmed.is_empty() && indent_of(line) <= base {
-                    return Some((s, i));
-                }
-            }
-        }
-    }
-    start.map(|s| (s, lines.len()))
+struct MountRow {
+    range: (usize, usize),
+    // Removing a sole row also removes its now-empty insert wrapper.
+    block: (usize, usize),
 }
 
-/// Whether the top-level list item at `start` mounts `id` under its loader id
-/// or its package name. Keys are read only at the mount row's own child
-/// indent, so a `name:`/`disabled:` buried under a nested `config:` can never
-/// impersonate the plugin's own.
-fn block_mounts(lines: &[String], start: usize, id: &str) -> bool {
-    let trimmed = lines[start].trim_start();
-    let item_end = find_item_end(lines, start);
-    let (row, own) = if trimmed.starts_with("- insert:") {
-        let Some(row) = (start + 1..item_end).find(|&j| lines[j].trim_start().starts_with("- id:"))
-        else {
-            return false;
-        };
-        (row, key_value(&lines[row], "- id:"))
-    } else {
-        let prefix = if trimmed.starts_with("- id:") {
-            "- id:"
-        } else {
-            "- name:"
-        };
-        (start, key_value(trimmed, prefix))
+/// Only direct list children are mount rows; lists inside config are opaque.
+fn mount_rows(lines: &[String]) -> Vec<MountRow> {
+    let Some(base) = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("- "))
+        .map(|l| indent_of(l))
+        .min()
+    else {
+        return Vec::new();
     };
-    let key_indent = indent_of(&lines[row]) + 2;
-    [own, row_mount_name(lines, row, item_end, key_indent)]
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if indent_of(&lines[i]) != base || !lines[i].trim_start().starts_with("- ") {
+            i += 1;
+            continue;
+        }
+        let end = find_item_end(lines, i);
+        if lines[i].trim_start().starts_with("- insert:") {
+            let child_base = (i + 1..end)
+                .filter(|&j| lines[j].trim_start().starts_with("- "))
+                .map(|j| indent_of(&lines[j]))
+                .min();
+            if let Some(child_base) = child_base {
+                let starts: Vec<usize> = (i + 1..end)
+                    .filter(|&j| {
+                        indent_of(&lines[j]) == child_base
+                            && lines[j].trim_start().starts_with("- ")
+                    })
+                    .collect();
+                for &start in &starts {
+                    let range = (start, find_item_end(lines, start).min(end));
+                    rows.push(MountRow {
+                        range,
+                        block: if starts.len() == 1 { (i, end) } else { range },
+                    });
+                }
+            }
+        } else {
+            rows.push(MountRow {
+                range: (i, end),
+                block: (i, end),
+            });
+        }
+        i = end;
+    }
+    rows
+}
+
+fn row_value(lines: &[String], range: (usize, usize), key: &str) -> Option<serde_yaml::Value> {
+    let prefix = format!("{key}:");
+    let first = lines[range.0].trim_start().strip_prefix("- ")?;
+    let raw = first.strip_prefix(&prefix).or_else(|| {
+        (range.0 + 1..range.1).find_map(|i| {
+            (indent_of(&lines[i]) == indent_of(&lines[range.0]) + 2)
+                .then(|| lines[i].trim_start().strip_prefix(&prefix))
+                .flatten()
+        })
+    })?;
+    serde_yaml::from_str(raw.trim()).ok()
+}
+
+/// Return just the matched row when an insert contains sibling plugins.
+pub(crate) fn find_block(lines: &[String], id: &str) -> Option<(usize, usize)> {
+    mount_rows(lines)
         .into_iter()
-        .flatten()
-        .any(|k| k == id)
-}
-
-fn key_value(line: &str, prefix: &str) -> Option<String> {
-    line.trim_start().strip_prefix(prefix).map(|v| {
-        let v = v.trim();
-        v.trim_matches(|c| c == '\'' || c == '"').to_string()
-    })
-}
-
-/// The mount row's package name: a `name:` key at exactly `key_indent`.
-fn row_mount_name(
-    lines: &[String],
-    row: usize,
-    item_end: usize,
-    key_indent: usize,
-) -> Option<String> {
-    (row + 1..item_end).find_map(|j| {
-        (indent_of(&lines[j]) == key_indent)
-            .then(|| key_value(&lines[j], "name:"))
-            .flatten()
-    })
+        .find(|row| {
+            ["id", "name"].into_iter().any(|key| {
+                row_value(lines, row.range, key)
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(id)
+            })
+        })
+        .map(|row| row.block)
 }
 
 pub(crate) fn find_item_end(lines: &[String], item_start: usize) -> usize {
@@ -206,9 +180,7 @@ fn item_row_range(lines: &[String], range: (usize, usize)) -> (usize, usize) {
     // begins at `- insert:`. Row-level work (child indent, the `disabled:`
     // key) happens on the nested `- id:` row, so skip the insert opener.
     if lines[range.0].trim_start().starts_with("- insert:") {
-        if let Some(i) =
-            (range.0 + 1..range.1).find(|&i| lines[i].trim_start().starts_with("- id:"))
-        {
+        if let Some(i) = (range.0 + 1..range.1).find(|&i| lines[i].trim_start().starts_with("- ")) {
             return (i, range.1);
         }
     }
@@ -218,11 +190,7 @@ fn item_row_range(lines: &[String], range: (usize, usize)) -> (usize, usize) {
 /// Indentation of the block's direct children, so keys are read and written
 /// at the right level instead of matching something nested deeper.
 fn child_indent(lines: &[String], range: (usize, usize)) -> usize {
-    let row = item_row_range(lines, range);
-    (row.0 + 1..row.1)
-        .find(|&i| !lines[i].trim().is_empty())
-        .map(|i| indent_of(&lines[i]))
-        .unwrap_or_else(|| indent_of(&lines[range.0]) + 2)
+    indent_of(&lines[item_row_range(lines, range).0]) + 2
 }
 
 /// Writes `disabled: true/false` for the plugin block, inserting the block
@@ -275,9 +243,15 @@ pub(crate) async fn set_plugin_disabled(
 /// as "override a plugin that already exists" and silently drop it, so the
 /// plugin installs but never mounts.
 fn insert_block(registry_id: &str, disabled: bool) -> Vec<String> {
+    // YAML plain scalars cannot start with @ (scoped npm package names).
+    let loader_id = if registry_id.starts_with('@') {
+        format!("'{registry_id}'")
+    } else {
+        registry_id.to_string()
+    };
     let mut block = vec![
         "- insert:".to_string(),
-        format!("    - id: {registry_id}"),
+        format!("    - id: {loader_id}"),
         format!("      name: '{registry_id}'"),
     ];
     if disabled {
@@ -331,7 +305,8 @@ pub async fn set_plugin_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    let profile =
+        crate::instances::writable_profile_dir(&phl.root(), &instance_id, "修改插件于").await?;
     let verb = if enabled { "启用" } else { "停用" };
     crate::resources::guarded(
         crate::resources::next_task_id("plugin-toggle"),
@@ -355,7 +330,8 @@ pub async fn uninstall_plugin(
     registry_id: String,
 ) -> Result<(), String> {
     let registry_id = sanitize_pkg_path(&registry_id)?;
-    let profile = crate::instances::profile_dir(&phl.root(), &instance_id).await?;
+    let profile =
+        crate::instances::writable_profile_dir(&phl.root(), &instance_id, "修改插件于").await?;
     crate::resources::guarded(
         crate::resources::next_task_id("plugin-uninstall"),
         "plugin-uninstall",
@@ -443,6 +419,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn shared_insert_keeps_siblings_and_ignores_nested_config_rows() {
+        let dir = temp_profile("shared-insert");
+        std::fs::write(patch_path(&dir), "- insert:\n    - name: '@acme/first'\n      id: first\n      config:\n        entries:\n          - id: nested\n            name: ghost\n    - id: second\n      name: second\n      disabled: true # retained sibling\n").unwrap();
+        set_plugin_disabled(&dir, "@acme/first", true)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc[0]["insert"][0]["disabled"], true);
+        assert_eq!(doc[0]["insert"][1]["disabled"], true);
+        assert!(find_block(&lines(&text), "ghost").is_none());
+        let disabled = disabled_plugin_ids(&dir).await;
+        assert!(disabled.contains("@acme/first"));
+        assert!(disabled.contains("second"));
+        remove_plugin_block(&dir, "@acme/first").await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc[0]["insert"].as_sequence().unwrap().len(), 1);
+        assert_eq!(doc[0]["insert"][0]["name"], "second");
+        set_plugin_disabled(&dir, "second", false).await.unwrap();
+        assert!(disabled_plugin_ids(&dir).await.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn id_only_insert_gets_a_row_level_disabled_key() {
+        let dir = temp_profile("id-only");
+        std::fs::write(patch_path(&dir), "- insert:\n    - id: foo\n").unwrap();
+        set_plugin_disabled(&dir, "foo", true).await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc[0]["insert"][0]["disabled"], true);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// serde_yaml refuses multi-document streams, same as DSH's loader — so
