@@ -373,7 +373,8 @@ export function SettingsPage() {
     const live = useInstanceStore.getState()
     if (Object.values(live.states).some((s) => ['running', 'starting', 'stopping'].includes(s.status))
       || live.hasPendingWrites() || live.createProgress || Object.keys(live.snapshotTransfers).length
-      || useApiConfigStore.getState().saving || useApiConfigStore.getState().syncing
+      || useApiConfigStore.getState().saving || useApiConfigStore.getState().pendingSaves > 0
+      || useApiConfigStore.getState().syncing
       || useCatalogStore.getState().activeTransfers() > 0) {
       ui.toast({
         kind: 'warn',

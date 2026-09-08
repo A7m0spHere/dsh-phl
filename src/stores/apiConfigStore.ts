@@ -47,10 +47,15 @@ export function suggestEnvName(name: string): string {
   return `PHL_${slug}_API_KEY`
 }
 
+/** Serializes API-config writes; see `save`. */
+let saveQueue: Promise<unknown> = Promise.resolve()
+
 interface ApiConfigState {
   config: ApiConfig | null
   loaded: boolean
   saving: boolean
+  /** Saves queued behind the one in flight (the storage page waits for these). */
+  pendingSaves: number
   enriching: boolean
   enrichMissingModels: () => Promise<void>
   /** Instance id whose binding is currently being materialized. */
@@ -104,6 +109,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
   config: null,
   loaded: false,
   saving: false,
+      pendingSaves: 0,
   enriching: false,
   syncing: null,
   snapshots: {},
@@ -152,29 +158,41 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
   },
 
   async save(next) {
-    if (get().saving) {
-      useUIStore.getState().toast({ kind: 'info', title: '请等待当前 API 配置保存完成后重试' })
-      return null
-    }
-    set({ saving: true })
-    try {
-      if (desktop.isDesktop) {
-        const saved = await desktop.saveApiConfig(next)
-        set({ config: saved })
-        return saved
+    // Serialized in call order. Rejecting a second save while one was in
+    // flight threw the user's edit away: the caller is a form that closes
+    // without awaiting the result, so "请等待…" was the last thing they saw.
+    // Each call now waits its turn and resolves with what it actually wrote.
+    set((state) => ({ pendingSaves: state.pendingSaves + 1 }))
+    const run = saveQueue.then(async () => {
+      set({ saving: true })
+      try {
+        if (desktop.isDesktop) {
+          const saved = await desktop.saveApiConfig(next)
+          set({ config: saved })
+          return saved
+        }
+        saveBrowserConfig(next)
+        set({ config: next })
+        return next
+      } catch (err) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '保存 API 配置库失败',
+          message: parseThrownError(err).message,
+        })
+        return null
+      } finally {
+        set({ saving: false })
       }
-      saveBrowserConfig(next)
-      set({ config: next })
-      return next
-    } catch (err) {
-      useUIStore.getState().toast({
-        kind: 'error',
-        title: '保存 API 配置库失败',
-        message: parseThrownError(err).message,
-      })
-      return null
+    })
+    saveQueue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    try {
+      return await run
     } finally {
-      set({ saving: false })
+      set((state) => ({ pendingSaves: Math.max(0, state.pendingSaves - 1) }))
     }
   },
 

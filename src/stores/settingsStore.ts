@@ -227,6 +227,28 @@ export async function maybeOfferRootChoice(): Promise<void> {
   if (!picked) return
   const next = normalizeRoot(picked)
   if (!next || next === settings.root) return
-  useSettingsStore.getState().setRoot(next)
+  if (!(await useSettingsStore.getState().setRootVerified(next))) {
+    useUIStore.getState().toast({
+      kind: 'error',
+      title: '无法使用所选目录',
+      message: `${next} 没有被后端接受，数据目录保持不变。`,
+      duration: 8000,
+    })
+    return
+  }
+  // Everything already read was resolved against the previous root; without
+  // this the first screen keeps describing the directory the user just left.
+  // Imported lazily: this module sits below the stores that would otherwise
+  // cycle back into it.
+  const [{ useInstanceStore }, { useCatalogStore }, { useApiConfigStore }] = await Promise.all([
+    import('./instanceStore'),
+    import('./catalogStore'),
+    import('./apiConfigStore'),
+  ])
+  await Promise.all([
+    useInstanceStore.getState().reload(),
+    useCatalogStore.getState().load(),
+    useApiConfigStore.getState().load(),
+  ]).catch(() => undefined)
   useUIStore.getState().toast({ kind: 'success', title: '数据目录已更新', message: next })
 }

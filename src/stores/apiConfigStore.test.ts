@@ -41,10 +41,29 @@ it('reports an import as failed if persisting it fails', async () => {
   expect(await useApiConfigStore.getState().importFromInstance('test')).toBeNull()
 })
 
-it('does not start a second API write while the current one is pending', async () => {
-  useApiConfigStore.setState({ saving: true })
-  expect(await useApiConfigStore.getState().save(config)).toBeNull()
-  expect(mocks.saveApiConfig).not.toHaveBeenCalled()
+it('queues a second API write behind the one in flight instead of dropping it', async () => {
+  // The old behaviour rejected the second save outright, and the caller — a
+  // form that closes without awaiting the result — lost the edit. Both writes
+  // must reach the disk, in call order, each resolving with what it wrote.
+  const written: string[] = []
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  mocks.saveApiConfig.mockImplementation(async (value: unknown) => {
+    const cfg = value as ApiConfig
+    written.push(cfg.updatedAt)
+    if (written.length === 1) await gate
+    return cfg
+  })
+
+  const first = useApiConfigStore.getState().save({ ...config, updatedAt: 'first' })
+  const second = useApiConfigStore.getState().save({ ...config, updatedAt: 'second' })
+  release()
+  expect((await first)?.updatedAt).toBe('first')
+  expect((await second)?.updatedAt).toBe('second')
+  expect(written).toEqual(['first', 'second'])
+  expect(useApiConfigStore.getState().pendingSaves).toBe(0)
 })
 
 const library: ApiConfig = { version: 1, updatedAt: '', providers: [{ id: 'p', name: 'openai', kind: 'custom', enabled: true, apiKeyEnv: 'KEY', models: [{ id: 'gpt', contextWindow: 123 }] }] }
