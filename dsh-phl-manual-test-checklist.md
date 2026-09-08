@@ -398,6 +398,16 @@
    （原始文本匹配，因为 `to/versions` 不存在、canonicalize 无法分类）；失败则把目录放回目标根并报错。
    回归：`raw_matching_translates_a_link_whose_target_does_not_exist_yet`（copy 层）+
    `undo_translates_managed_links_back_to_the_source_root`（storage 层）。
+8. **#4 的第二个链接来源（本轮修复）——pnpm 插件依赖链接**：实测 pnpm 9.15.9 / Windows，
+   `plugins/install.rs` 的 `pnpm install --ignore-workspace --prod` 把 `node_modules/<dep>`
+   建成指向 `node_modules/.pnpm/<dep>@<v>/node_modules/<dep>` 的 **Junction**，目标落在**实例树内**。
+   原 `Preserve` 只接受 `<root>/versions/` 下的目标 → 装了带依赖插件的实例仍不可克隆/快照，
+   报"指向受管版本之外位置的链接"。#4 此前只对 DSH 自身的版本链接成立，低一层没关。
+   修复（`f7fef82`）：`Preserve { source_root, dest_root }`——共享版本链接照旧，树内链接随副本重建，
+   调用方传**最终**目录而非 staging（staging 会被 rename 到位，指向 staging 的绝对链接落地即悬空）；
+   `Rewrite` 扩大到"正在迁移的子树"，同盘 rename 用 `Raw` 匹配（子树旧路径已不存在，无法 canonicalize）
+   并拒绝带 `..` 的原始目标。回归：copy ×2 新增（树内链接随副本 / Rewrite 翻译）、
+   instances e2e 扩展（clone + snapshot create + restore 全链）、storage 15/15。
 
 ### 手测覆盖映射（§3/§7/§11/§13 压缩结果）
 
