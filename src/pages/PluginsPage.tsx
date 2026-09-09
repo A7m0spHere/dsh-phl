@@ -362,6 +362,27 @@ export function PluginsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instance, plugins, latestVersions, query])
 
+  // Update-check health across the instance's checkable plugins (§R5), driven
+  // by the explicit state — used for the re-check affordance and to stop the
+  // "all up to date" claim from covering checking / failed / unresolvable sets.
+  //
+  // This must stay above the early return below. A hook placed after it runs
+  // only on the renders that do not bail out, which is exactly the "Rendered
+  // more hooks than during the previous render" crash: with no instance,
+  // switching 已安装 → 插件库 blanked the whole page.
+  const checkCounts = useMemo(() => {
+    const c = { checking: 0, failed: 0, unresolvable: 0 }
+    if (!instance) return c
+    for (const ip of instance.plugins) {
+      if (ip.linked) continue
+      const st = latestVersions[ip.pluginId]?.status
+      if (st === 'checking') c.checking++
+      else if (st === 'error') c.failed++
+      else if (st === 'unresolvable') c.unresolvable++
+    }
+    return c
+  }, [instance, latestVersions])
+
   // Only the instance-scoped views (installed / updates) require an instance.
   // The market itself is always browsable — installs are where a target
   // instance becomes necessary.
@@ -403,22 +424,6 @@ export function PluginsPage() {
 
   const upgradable = installed.filter((p) => p.outdated)
   const rows = tab === 'updates' ? upgradable : installed
-
-  // Update-check health across the instance's checkable plugins (§R5), driven
-  // by the explicit state — used for the re-check affordance and to stop the
-  // "all up to date" claim from covering checking / failed / unresolvable sets.
-  const checkCounts = useMemo(() => {
-    const c = { checking: 0, failed: 0, unresolvable: 0 }
-    if (!instance) return c
-    for (const ip of instance.plugins) {
-      if (ip.linked) continue
-      const st = latestVersions[ip.pluginId]?.status
-      if (st === 'checking') c.checking++
-      else if (st === 'error') c.failed++
-      else if (st === 'unresolvable') c.unresolvable++
-    }
-    return c
-  }, [instance, latestVersions])
 
   /* ---------------- detail ---------------- */
 
