@@ -1,95 +1,74 @@
-# SignPath Foundation 申请材料 / Application material
+# SignPath Foundation 申请表 · 逐字段填写
 
-用途：在 <https://signpath.org/apply.html> 的表单里逐项填写。表单是 HubSpot 嵌入的，字段以页面为准；
-下面是各字段可**直接复制**的英文内容。政策正文见 [code-signing-policy.md](./code-signing-policy.md)。
+表单地址 <https://signpath.org/apply.html>（2026-09-09 实测字段，HubSpot 嵌入）。
+带 \* 的为必填。下面每格都能直接复制。
 
-## 复制区（英文）
+## 字段表
 
-**Project name**
+| 字段 | 必填 | 填什么 |
+|---|---|---|
+| Project Name | \* | `PHL` |
+| Repository URL | \* | `https://github.com/A7m0spHere/dsh-phl` |
+| Homepage URL | \* | `https://github.com/A7m0spHere/dsh-phl` |
+| Download URL | | `https://github.com/A7m0spHere/dsh-phl/releases` |
+| Privacy Policy URL | | `https://github.com/A7m0spHere/dsh-phl/blob/main/docs/privacy.md` |
+| Wikipedia URL (optional) | | 留空 |
+| Tagline | \* | 见下方「长文本」 |
+| Description | \* | 见下方「长文本」 |
+| Reputation | \* | 见下方「长文本」 |
+| Maintainer Type | | `Individual maintainer(s)` |
+| Build System | | `GitHub Actions` |
+| First Name | \* | 你的名 |
+| Last Name | \* | 你的姓 |
+| Email | \* | 你的邮箱（SignPath 用它联系你） |
+| Company Name | | 留空 |
+| Primary Discovery Channel | \* | 按实际选：`Organic search` / `Developer platforms (e.g. GitHub)` / `AI / LLM tools` / `Other (please specify)` 等 |
+| Please specify the exact source | | 可留空 |
+| Code of Conduct 同意项 | \* | **勾选** |
+| 接收 SignPath 通讯 | | 可不勾 |
+| 同意数据存储与处理 | \* | **勾选** |
+| reCAPTCHA | \* | 通过验证 |
 
-```text
-PHL
-```
+## 长文本（可直接复制）
 
-**Repository URL**
-
-```text
-https://github.com/A7m0spHere/dsh-phl
-```
-
-**License**
-
-```text
-MIT (OSI-approved, no commercial dual licensing)
-```
-
-**Project description**
-
-```text
-PHL is a Windows desktop application (Tauri 2: Rust backend, React/TypeScript frontend)
-that manages multiple isolated DeepSeek Harness instances and runtimes on one machine.
-Every instance pins its own DSH version, runtime and plugins, and can run at the same time
-as the others without touching their files. It is distributed as an NSIS installer
-(PHL_<version>_x64-setup.exe) published on GitHub Releases.
-```
-
-**What you want to sign**
+**Tagline**
 
 ```text
-PHL_<version>_x64-setup.exe (NSIS installer, ~3 MB) and the PHL.exe it contains.
+Run multiple isolated DeepSeek Harness instances side by side on Windows.
 ```
 
-**Build system / CI**
+**Description**
 
 ```text
-GitHub Actions on GitHub-hosted windows-latest runners. Releases are tag-triggered:
-pushing a v* tag runs .github/workflows/release.yml, which verifies the version, runs
-npm test, npm run build, cargo test --workspace, checks the bundle inputs, builds the
-installer with tauri build, hashes it, and creates the GitHub Release. Nothing is uploaded
-by hand.
+PHL is a Windows desktop application (Tauri 2: Rust backend, React/TypeScript frontend) that
+manages several isolated DeepSeek Harness instances and runtimes on one machine. Each instance
+pins its own DSH version, runtime and plugins, and can run at the same time as the others
+without touching their files. It ships as an NSIS installer (PHL_<version>_x64-setup.exe)
+published on GitHub Releases.
 ```
 
-**Code signing policy URL**
+**Reputation**
 
 ```text
-https://github.com/A7m0spHere/dsh-phl/blob/main/docs/code-signing-policy.md
+PHL is a new project: the first public preview (v0.1.0-alpha.1) was published on 2026-09-09, so
+there is no download history or user community to point at yet. What is verifiable from the
+repository today:
+
+- public, MIT-licensed code base with continuous history;
+- every release is tag-triggered and rebuilt on GitHub-hosted runners, so each published binary
+  can be traced to a workflow log (nothing is uploaded by hand);
+- an alpha gate on every commit: version consistency across four files, TypeScript typecheck,
+  92 frontend tests, rustfmt, clippy with -D warnings, 352 Rust workspace tests, and an
+  IPC-bridge check;
+- a dependency inventory in THIRD_PARTY_NOTICES.md, with cargo audit reporting zero
+  vulnerabilities across 513 locked crates;
+- asset provenance recorded in src-tauri/icons/master/PROVENANCE.md.
+
+PHL is an unofficial companion for DeepSeek Harness; that boundary is stated in the README and
+inside the application.
 ```
 
-**Why code signing is needed**
+## 提交后
 
-```text
-Without an Authenticode signature the installer triggers the browser's "usually not
-downloaded" warning and Windows SmartScreen blocks the first run, which stops most users
-from installing an open source tool. A SignPath Foundation certificate would also give users
-a verifiable link between the published binary and this public repository.
-```
-
-**Malware-free / no proprietary components (short answers)**
-
-```text
-The application has no telemetry and sends no user data anywhere. It manages local
-processes and files only. All dependencies are open source (see THIRD_PARTY_NOTICES.md)
-and the project bundles no proprietary components. The application mark and all assets
-are produced in this repository (see src-tauri/icons/master/PROVENANCE.md).
-```
-
-## 他们会核对什么
-
-| 检查项 | PHL 现状 |
-|---|---|
-| 构建确实由 GitHub 工作流产生 | ✅ 标签触发 `release.yml`，无手工上传 |
-| 来源可追溯 | ✅ 公开仓库 + 标签 + 工作流日志 |
-| OSI 许可、无商业双许可 | ✅ MIT |
-| 无恶意行为 | ✅ 无遥测、无回传 |
-| 公开的代码签名政策 | ✅ 本目录的 policy 文件 |
-| 成员 MFA | ⚠️ 需维护者在 GitHub 账号确认 |
-
-## 通过之后（SignPath 侧）
-
-1. 安装 SignPath GitHub App，并授权本仓库；
-2. 在 SignPath 组织里新建 **Project**（关联本仓库）、**Signing Policy**（谁/什么条件下可签）、
-   **Artifact Configuration**（要签哪些文件、哪些需要签名）；
-3. 记下四个值，填进 GitHub：`SIGNPATH_API_TOKEN`（Secret）、`SIGNPATH_ORGANIZATION_ID`、
-   `SIGNPATH_PROJECT_SLUG`、`SIGNPATH_SIGNING_POLICY_SLUG`、`SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`（Variables）；
-4. 在 `release.yml` 里加一步 `signpath/github-action-submit-signing-request`（或让
-   `scripts/sign-windows.ps1` 改调 SignPath 的 PowerShell cmdlet，签名范围同现有 signCommand）。
+1. SignPath 会先做资格与声誉评审（他们会在仓库里核对构建来源、许可证与政策）；
+2. 通过后按 [code-signing.md](./code-signing.md) 的「通过之后」一节接入。
