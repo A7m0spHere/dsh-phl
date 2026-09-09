@@ -89,6 +89,7 @@ export {
   moveRootData,
   migrationStatus,
   migrationUndo,
+  migrationFinish,
 } from './desktopStorage'
 export type {
   DirSummary,

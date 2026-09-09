@@ -27,3 +27,11 @@ src-tauri/gen/schemas/
 
 # Local scratch: throwaway scripts & screenshots
 .scratch/
+
+# Third-party icon references downloaded for visual comparison only —
+# never commit or ship these (see AGENTS.md "代码来源边界").
+tmp-refs/
+
+# Icon exploration output (contact sheets, per-concept renders). Regenerate any
+# of it with scripts/icon-lab.mjs; only the master and the snapshots are kept.
+src-tauri/icons/candidates/

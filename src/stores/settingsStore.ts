@@ -120,17 +120,14 @@ export const useSettingsStore = create<SettingsState>()(
       setRoot: (root) => {
         const next = normalizeRoot(root) || DEFAULT_ROOT
         set({ root: next })
-        // Mirror to the backend's authoritative root. Best-effort by design:
-        // the boot handshake sets the root *from* the backend and must not
-        // write the pointer back, so this stays fire-and-forget. The storage
-        // page uses `setRootVerified` instead — there the backend has to agree
-        // before the UI moves.
-        void setPhlRoot(next)
+        // Backend results (boot handshake or completed migration) are already
+        // committed. Mirroring them must never write another root pointer.
+        // User-requested changes go through setRootVerified instead.
       },
       /**
        * Switching the data root from 设置 → 存储.
        *
-       * `setRoot` alone is not enough here: it is fire-and-forget, so a root
+       * `setRoot` alone is not enough here: it only mirrors local state, so a root
        * the backend refuses (a relative path, an unwritable config dir) left the
        * field showing the new path while every read and write still resolved
        * against the old root — the list looked unchanged and edits landed in a

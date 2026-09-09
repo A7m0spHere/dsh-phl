@@ -2,8 +2,22 @@ import { parseThrownError } from '@/lib/errorCodes'
 import * as desktop from '@/lib/desktop'
 import { registryBase } from './tauriVersions'
 import type { Instance, LaunchPhase } from '@/types'
-import { Cancelled, LaunchError, newTransferId } from './repository'
+import { Cancelled, KeptRunningError, LaunchError, newTransferId } from './repository'
 import type { LaunchContext, LaunchProgress, LaunchOutcome, PhlRepository } from './repository'
+
+/**
+ * The backend's `[state] kept-alive <pid> <port>：<why>` message (R3): the
+ * launch was aborted but the DSH process could not be confirmed dead, so its
+ * registration — and the port it holds — are intentionally kept. Recognising
+ * this beats the generic `signal.aborted → Cancelled` fallback, which would
+ * tell the store the instance is simply gone when the backend still manages a
+ * live process on a specific port.
+ */
+function parseKeptRunning(message: string): KeptRunningError | null {
+  const m = /^kept-alive (\d+) (\d+)：([\s\S]*)$/.exec(message)
+  if (!m) return null
+  return new KeptRunningError(Number(m[1]), Number(m[2]), m[3])
+}
 
 /**
  * Desktop overrides for the **process / port module**: a launch spawns
@@ -100,6 +114,11 @@ async function launch(
     })
     return outcome
   } catch (err) {
+    // The kept-alive check runs BEFORE the abort fallback: a cancellation
+    // whose termination could not be confirmed is not a clean cancel — the
+    // process is alive and the backend still manages it (R3).
+    const kept = parseKeptRunning(parseThrownError(err).message)
+    if (kept) throw kept
     if (signal.aborted) throw new Cancelled()
     if (err instanceof LaunchError) throw err
     throw new LaunchError('启动失败', parseThrownError(err).message)

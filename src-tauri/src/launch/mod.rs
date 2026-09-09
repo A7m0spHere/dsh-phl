@@ -33,6 +33,7 @@ use crate::versions::{now_iso, sanitize_version};
 pub(crate) mod process;
 pub(crate) mod registry;
 
+use registry::ProcessState;
 pub(crate) use registry::{
     decide, latest_launch_log, probe_process, Adoption, PersistedProcess, Registry,
 };
@@ -172,6 +173,7 @@ pub async fn launch_instance(
     processes: State<'_, Processes>,
     registry: State<'_, Registry>,
     phl: State<'_, PhlState>,
+    locks: State<'_, crate::resources::ResourceLocks>,
     creds: State<'_, crate::credentials::Creds>,
     transfer_id: String,
     instance_id: String,
@@ -189,6 +191,11 @@ pub async fn launch_instance(
     api: Option<crate::api_config::ApiBinding>,
     on_progress: Channel<LaunchEvent>,
 ) -> Result<LaunchOutcome, String> {
+    let instance_id = sanitize_version(&instance_id)?;
+    let _held = locks
+        .acquire(&[crate::resources::Resource::Instance(instance_id.clone())])
+        .map_err(|e| crate::errors::coded(crate::errors::ErrCode::Busy, e.to_string()))?;
+    ensure_launch_available(&processes, &registry, &instance_id, probe_process)?;
     let cancel = launches.take(&transfer_id);
     let result = run_launch(
         &app,
@@ -214,6 +221,159 @@ pub async fn launch_instance(
     result
 }
 
+/// The UI can be stale after an uncertain adoption or a failed cancellation.
+/// Check the registration under the instance lock before any startup writes:
+/// another spawn must not overwrite the handle of an unconfirmed process.
+fn ensure_launch_available(
+    processes: &Processes,
+    registry: &Registry,
+    id: &str,
+    probe: impl FnOnce(u32) -> registry::Probe,
+) -> Result<(), String> {
+    let record = registry.record_of(id);
+    let entry = processes.entry_of(id).or_else(|| {
+        record.as_ref().map(|r| ProcessEntry {
+            pid: r.pid,
+            port: r.port,
+        })
+    });
+    let Some(entry) = entry else { return Ok(()) };
+    let observed = probe(entry.pid);
+    let reused = observed.state == ProcessState::Alive
+        && record.as_ref().is_some_and(|r| {
+            r.pid == entry.pid
+                && matches!(
+                    decide(r, &observed),
+                    Adoption::Forget {
+                        keep_running: true,
+                        ..
+                    }
+                )
+                && observed.exe_path.is_some()
+                && observed.created_at_ms.is_some()
+        });
+    if observed.state == ProcessState::Exited || reused {
+        processes.remove_if_pid(id, entry.pid);
+        registry.forget_pid(id, entry.pid);
+        return Ok(());
+    }
+    // Also reserve a durable-only record so the kept-alive UI's stop action
+    // reaches this PID. stop_permission still refuses unknown identities.
+    processes.set(
+        id,
+        ProcessEntry {
+            pid: entry.pid,
+            port: entry.port,
+        },
+    );
+    Err(crate::errors::coded(
+        crate::errors::ErrCode::State,
+        format!(
+            "kept-alive {} {}：该实例仍有未退出或无法确认退出的进程登记，未重复启动；请先重试停止",
+            entry.pid, entry.port,
+        ),
+    ))
+}
+
+fn set_isolated_home(command: &mut tokio::process::Command, home: &Path) {
+    // Must run after all instance/provider environment injection. On Windows
+    // Command treats DSH_HOME and dsh_home as the same key.
+    command.env("DSH_HOME", home);
+}
+
+/// How long to wait for a force-killed process to be confirmed gone before
+/// declaring termination unverified (R3). `taskkill /F` returning success is
+/// a request honored, not an exit observed.
+const EXIT_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
+
+/// Only an observed exit authorizes removing a registration. The injected
+/// probe and window also let tests exercise denied/hung termination without
+/// touching any real DSH process.
+async fn confirm_exit(mut probe: impl FnMut() -> ProcessState, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    loop {
+        if probe() == ProcessState::Exited {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_termination(
+    processes: &Processes,
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+    kill: Result<(), String>,
+    probe: impl FnMut() -> ProcessState,
+    window: Duration,
+) -> Result<(), String> {
+    if confirm_exit(probe, window).await {
+        processes.remove_if_pid(instance_id, pid);
+        registry.forget_pid(instance_id, pid);
+        return Ok(());
+    }
+    Err(kill
+        .err()
+        .unwrap_or_else(|| format!("进程 {pid} 的退出尚未确认")))
+}
+
+/// Terminate a process we launched and forget its registration — but the
+/// forgetting is *conditional on confirmed exit*. Both in-memory and
+/// persisted state are kept when the kill failed or the pid is still alive:
+/// the port stays reserved, the UI keeps a stoppable handle, a relaunch
+/// cannot strand a second live DSH, and the next PHL boot can still adopt
+/// it. This is `stop_instance`'s read-kill-then-forget rule applied to the
+/// launch-failure paths, which used to ignore `kill_tree`'s result and
+/// delete the rows regardless.
+async fn terminate_and_forget(
+    processes: &Processes,
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+    port: u16,
+    context: &str,
+    child: &mut tokio::process::Child,
+) -> Result<(), String> {
+    let kill = kill_tree(pid).await;
+    // The retained child handle refers to this launch, even if querying the
+    // numeric pid is denied or the OS later reuses that number.
+    let why = match finish_termination(
+        processes,
+        registry,
+        instance_id,
+        pid,
+        kill,
+        || match child.try_wait() {
+            Ok(Some(_)) => ProcessState::Exited,
+            Ok(None) => ProcessState::Alive,
+            Err(_) => ProcessState::Unknown,
+        },
+        EXIT_CONFIRM_WINDOW,
+    )
+    .await
+    {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    // `kept-alive <pid> <port>` is a machine-readable header on a coded
+    // message: the repository parses the pid/port from it and maps the launch
+    // to a *running, stoppable* instance state (R3's retryable stop entry)
+    // instead of a failed start the UI would strand without a stop button.
+    // The instance stays registered in memory and on disk, so stop-by-id
+    // terminates the real process whenever the user asks.
+    Err(crate::errors::coded(
+        crate::errors::ErrCode::State,
+        format!(
+            "kept-alive {pid} {port}：{context}，但{why}；PHL 保留了该实例的登记与端口占用，可稍后重试停止"
+        ),
+    ))
+}
+
 /// May this pid be killed on behalf of `instance_id`?
 ///
 /// Killing is the one irreversible action in PHL, so the same identity gate
@@ -234,11 +394,35 @@ fn stop_permission(registry: &Registry, instance_id: &str, pid: u32) -> Result<(
         } => Err(crate::errors::coded(
             crate::errors::ErrCode::State,
             format!(
-                "实例 {instance_id} 的进程身份无法确认（{reason}，PID {pid}）：已停止跟踪，但不会终止它。请在任务管理器里确认后手动结束。"
+                "实例 {instance_id} 的进程身份无法确认（{reason}，PID {pid}）：已保留登记，本次未终止它，可稍后重试停止。"
             ),
         )),
         Adoption::Forget { .. } => Ok(()),
     }
+}
+
+/// `stop_instance`'s core: kill the tree, and only forget the rows once the
+/// process is verifiably not running. A kill that fails against a pid the
+/// kernel already reports gone IS the desired outcome — typically a kept-alive
+/// instance (R3) that exited on its own since the launch failure — so the
+/// retry succeeds instead of bouncing the user off the same error forever.
+async fn terminate_or_gone(
+    processes: &Processes,
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+) -> Result<(), String> {
+    let kill = kill_tree(pid).await;
+    finish_termination(
+        processes,
+        registry,
+        instance_id,
+        pid,
+        kill,
+        || probe_process(pid).state,
+        EXIT_CONFIRM_WINDOW,
+    )
+    .await
 }
 
 /// Not running in the map → nothing to do; the exit event (or its absence)
@@ -256,9 +440,7 @@ pub async fn stop_instance(
     let entry = processes.entry_of(&instance_id);
     if let Some(entry) = entry {
         stop_permission(&registry, &instance_id, entry.pid)?;
-        kill_tree(entry.pid).await?;
-        processes.remove_if_pid(&instance_id, entry.pid);
-        registry.forget_pid(&instance_id, entry.pid);
+        terminate_or_gone(&processes, &registry, &instance_id, entry.pid).await?;
     }
     Ok(())
 }
@@ -323,7 +505,7 @@ pub async fn adopt_processes<R: tauri::Runtime>(
             // `forget_pid` uses; that is safe because adoption is the boot
             // chain's last step and runs before any command of this session
             // can have re-registered the instance.
-            let alive = probe_process(rec.pid).alive;
+            let alive = probe_process(rec.pid).state != ProcessState::Exited;
             registry.forget(&rec.instance_id);
             report.dropped.push(DroppedProcess {
                 instance_id: rec.instance_id,
@@ -362,7 +544,9 @@ pub async fn adopt_processes<R: tauri::Runtime>(
                 reason,
                 keep_running,
             } => {
-                registry.forget_pid(&rec.instance_id, rec.pid);
+                if probe.state != ProcessState::Unknown {
+                    registry.forget_pid(&rec.instance_id, rec.pid);
+                }
                 report.dropped.push(DroppedProcess {
                     instance_id: rec.instance_id,
                     pid: rec.pid,
@@ -385,7 +569,10 @@ fn watch_adopted_process<R: tauri::Runtime>(app: AppHandle<R>, rec: PersistedPro
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if matches!(decide(&rec, &probe_process(rec.pid)), Adoption::Adopt) {
+            let probe = probe_process(rec.pid);
+            if probe.state == ProcessState::Unknown
+                || matches!(decide(&rec, &probe), Adoption::Adopt)
+            {
                 continue;
             }
             let instance_id = rec.instance_id.clone();
@@ -498,6 +685,13 @@ async fn run_launch(
             .await
             .map_err(|e| e.to_string())?;
     }
+    if !manifest.as_ref().is_some_and(crate::instances::is_external) {
+        // launch_instance holds the same instance lock as plugin writes.
+        crate::plugins::install::recover_profile_transaction(
+            &dsh_home.join("profiles").join(&profile),
+        )
+        .await?;
+    }
 
     // Pre-launch API handling. Two things happen, and the difference between
     // them is the whole design:
@@ -587,7 +781,7 @@ async fn run_launch(
     // except DSH_HOME: it IS the isolation boundary, and an instance env that
     // quietly redirected it would point the process into some other instance.
     for (key, value) in &env {
-        if key != "DSH_HOME" {
+        if !key.eq_ignore_ascii_case("DSH_HOME") {
             command.env(key, value);
         }
     }
@@ -610,6 +804,7 @@ async fn run_launch(
             }
         }
     }
+    set_isolated_home(&mut command, &dsh_home);
     command
         .current_dir(&workspace)
         .stdout(std::process::Stdio::from(
@@ -647,11 +842,27 @@ async fn run_launch(
     let started = Instant::now();
     loop {
         if Launches::is_cancelled(cancel) {
-            // kill_tree, not child.kill(): node is only the root of the tree.
-            let _ = kill_tree(pid).await;
-            processes.remove_if_pid(&instance_id, pid);
-            registry.forget_pid(&instance_id, pid);
-            return Err("cancelled".into());
+            // The cancellation outcome must not lie: "cancelled" is fine when
+            // the process is verifiably gone, but an abort whose termination
+            // could not be confirmed keeps the registration (R3) — the coded
+            // `kept-alive` error says so and stays stoppable in the UI.
+            return match terminate_and_forget(
+                processes,
+                registry,
+                &instance_id,
+                pid,
+                port,
+                "启动已取消",
+                &mut child,
+            )
+            .await
+            {
+                Ok(()) => Err("cancelled".into()),
+                Err(e) => {
+                    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+                    Err(e)
+                }
+            };
         }
         if let Ok(Some(status)) = child.try_wait() {
             processes.remove_if_pid(&instance_id, pid);
@@ -672,13 +883,29 @@ async fn run_launch(
         }
         let elapsed = started.elapsed();
         if elapsed >= READY_TIMEOUT {
-            let _ = kill_tree(pid).await;
-            processes.remove_if_pid(&instance_id, pid);
-            registry.forget_pid(&instance_id, pid);
+            // The old wording claimed the process had been terminated before
+            // anyone had observed it. Now the claim depends on proof: the
+            // kept-alive case surfaces as a coded, still-stoppable instance.
             let tail = log_tail(&log_path, 30).await;
-            return Err(format!(
-                "等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"
-            ));
+            return match terminate_and_forget(
+                processes,
+                registry,
+                &instance_id,
+                pid,
+                port,
+                "等待 120 秒仍未就绪",
+                &mut child,
+            )
+            .await
+            {
+                Ok(()) => Err(format!(
+                    "等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"
+                )),
+                Err(e) => {
+                    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+                    Err(format!("{e}。\n--- 日志末尾 ---\n{tail}"))
+                }
+            };
         }
         let _ = on_progress.send(LaunchEvent {
             stage: "await-ready".into(),
@@ -709,45 +936,74 @@ async fn run_launch(
         detail: Some(format!("localhost:{port}")),
     });
 
+    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+
+    // `dsh web` prints its authenticated URL before binding; a short poll
+    // allows for delayed log flushing.
+    let web_url = read_web_url(&log_path).await;
+    Ok(LaunchOutcome { pid, port, web_url })
+}
+
+/// Keep owning the child handle on every path that retains a registration.
+/// A wait error is an unknown observation, never an exit event.
+async fn observe_child_exit(
+    mut child: tokio::process::Child,
+    on_exit: impl FnOnce(std::process::ExitStatus),
+) {
+    loop {
+        match child.wait().await {
+            Ok(status) => {
+                on_exit(status);
+                return;
+            }
+            Err(e) => {
+                eprintln!("[phl] 等待实例退出失败，保留登记并重试: {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+fn forget_exited_process(processes: &Processes, registry: &Registry, id: &str, pid: u32) -> bool {
+    let ours = processes.is_current_or_empty(id, pid);
+    processes.remove_if_pid(id, pid);
+    registry.forget_pid(id, pid);
+    ours
+}
+
+fn watch_child_process<R: tauri::Runtime>(
+    watcher_app: AppHandle<R>,
+    watcher_id: String,
+    pid: u32,
+    child: tokio::process::Child,
+) {
     // Single source of truth for "no longer running": the watcher removes the
     // map entry (by pid, so a relaunched instance's entry survives) and
     // notifies the frontend for both crashes and clean shutdowns.
-    let watcher_app = app.clone();
-    let watcher_id = instance_id.clone();
-    tokio::spawn(async move {
-        let status = child.wait().await;
+    tokio::spawn(observe_child_exit(child, move |status| {
         // Decide before the entry is removed: a fast restart has already
         // registered the new pid, and this exit must not take that window down.
-        let ours = watcher_app
-            .try_state::<Processes>()
-            .map(|processes| processes.is_current_or_empty(&watcher_id, pid))
-            .unwrap_or(false);
-        if let Some(processes) = watcher_app.try_state::<Processes>() {
-            processes.remove_if_pid(&watcher_id, pid);
-        }
-        if let Some(registry) = watcher_app.try_state::<Registry>() {
-            registry.forget_pid(&watcher_id, pid);
-        }
+        let ours = match (
+            watcher_app.try_state::<Processes>(),
+            watcher_app.try_state::<Registry>(),
+        ) {
+            (Some(processes), Some(registry)) => {
+                forget_exited_process(&processes, &registry, &watcher_id, pid)
+            }
+            _ => false,
+        };
         // A dead instance must not keep its embedded WebUI window open:
         // closing the window never stops the process, but the process
         // exiting always closes the window (see `crate::webui`).
         if ours {
             crate::webui::close_for_instance(&watcher_app, &watcher_id);
         }
-        let code = status.ok().and_then(|s| s.code());
+        let code = status.code();
         let _ = watcher_app.emit(
             INSTANCE_EXITED,
             serde_json::json!({ "instanceId": watcher_id, "pid": pid, "code": code }),
         );
-    });
-
-    // `dsh web` prints the authenticated URL (`dsh web: http://127.0.0.1:PORT/?token=…`)
-    // before binding; the bare host:port answers "authentication required".
-    // The line can lag the listening socket by a buffer flush or two, so a
-    // short poll beats shipping the tokenless fallback on first read.
-    let web_url = read_web_url(&log_path).await;
-
-    Ok(LaunchOutcome { pid, port, web_url })
+    }));
 }
 
 /// Scan a launch log for the `dsh web:` line and lift the URL out of it.
@@ -756,6 +1012,203 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::path::PathBuf;
+
+    #[test]
+    fn uncertain_or_live_registration_blocks_a_second_launch() {
+        for state in [ProcessState::Alive, ProcessState::Unknown] {
+            let processes = Processes::default();
+            let registry = Registry::default();
+            let rec = PersistedProcess {
+                instance_id: "inst".into(),
+                pid: 123,
+                port: 3099,
+                started_at_ms: 1000,
+                exe_path: "node.exe".into(),
+            };
+            registry.remember(rec.clone());
+            // Covers a durable record that boot could not adopt into memory.
+            let err = ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+                state,
+                exe_path: Some("node.exe".into()),
+                created_at_ms: Some(1000),
+            })
+            .unwrap_err();
+            assert!(err.contains("kept-alive 123 3099"));
+            assert_eq!(registry.record_of("inst").unwrap(), rec);
+            assert_eq!(
+                processes.entry_of("inst").unwrap().pid,
+                123,
+                "the retry-stop entry must reach the preserved record"
+            );
+            processes.set(
+                "inst",
+                ProcessEntry {
+                    pid: 123,
+                    port: 3099,
+                },
+            );
+            assert!(ensure_launch_available(&processes, &registry, "inst", |_| {
+                registry::Probe::default()
+            })
+            .is_err());
+            assert_eq!(processes.entry_of("inst").unwrap().pid, 123);
+            ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+                state: ProcessState::Exited,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(processes.entry_of("inst").is_none());
+            assert!(registry.record_of("inst").is_none());
+        }
+    }
+
+    #[test]
+    fn reused_registration_is_forgotten_without_touching_the_other_process() {
+        let processes = Processes::default();
+        let registry = Registry::default();
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid: 123,
+            port: 3099,
+            started_at_ms: 1000,
+            exe_path: "node.exe".into(),
+        });
+        ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+            state: ProcessState::Alive,
+            exe_path: Some("unrelated.exe".into()),
+            created_at_ms: Some(2000),
+        })
+        .unwrap();
+        assert!(registry.record_of("inst").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn isolated_home_wins_over_instance_and_provider_case_variants() {
+        let mut command = tokio::process::Command::new("node");
+        command
+            .env("DSH_HOME", "initial")
+            .env("dsh_home", "other-instance")
+            .env("Dsh_Home", "provider-value");
+        set_isolated_home(&mut command, Path::new("C:/isolated-instance/dsh-home"));
+        let values: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("DSH_HOME"))
+            .collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0].1.unwrap(),
+            std::ffi::OsStr::new("C:/isolated-instance/dsh-home")
+        );
+    }
+
+    #[tokio::test]
+    async fn termination_faults_keep_rows_until_exit_is_observed() {
+        for kill_ok in [false, true] {
+            for state in [
+                ProcessState::Alive,
+                ProcessState::Unknown,
+                ProcessState::Exited,
+            ] {
+                let processes = Processes::default();
+                let registry = Registry::default();
+                processes.set(
+                    "inst",
+                    ProcessEntry {
+                        pid: 123,
+                        port: 3099,
+                    },
+                );
+                registry.remember(PersistedProcess {
+                    instance_id: "inst".into(),
+                    pid: 123,
+                    port: 3099,
+                    started_at_ms: 0,
+                    exe_path: "x".into(),
+                });
+                let kill = if kill_ok {
+                    Ok(())
+                } else {
+                    Err("injected access denied".into())
+                };
+                let result = finish_termination(
+                    &processes,
+                    &registry,
+                    "inst",
+                    123,
+                    kill,
+                    || state,
+                    Duration::ZERO,
+                )
+                .await;
+                let exited = state == ProcessState::Exited;
+                assert_eq!(result.is_ok(), exited, "kill_ok={kill_ok}, state={state:?}");
+                assert_eq!(processes.entry_of("inst").is_none(), exited);
+                assert_eq!(registry.record_of("inst").is_none(), exited);
+                // A later retry with an actual exit observation is sufficient,
+                // even when the kill command still fails against the dead pid.
+                finish_termination(
+                    &processes,
+                    &registry,
+                    "inst",
+                    123,
+                    Err("already dead".into()),
+                    || ProcessState::Exited,
+                    Duration::ZERO,
+                )
+                .await
+                .unwrap();
+                assert!(registry.record_of("inst").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_child_exit_clears_rows_and_delivers_one_notification() {
+        let child = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", "exit 7"])
+                .spawn()
+                .unwrap()
+        } else {
+            tokio::process::Command::new("sh")
+                .args(["-c", "exit 7"])
+                .spawn()
+                .unwrap()
+        };
+        let pid = child.id().unwrap();
+        let processes = Processes::default();
+        let registry = Registry::default();
+        processes.set("inst", ProcessEntry { pid, port: 3099 });
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid,
+            port: 3099,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+        assert!(finish_termination(
+            &processes,
+            &registry,
+            "inst",
+            pid,
+            Err("injected kill timeout".into()),
+            || ProcessState::Unknown,
+            Duration::ZERO
+        )
+        .await
+        .is_err());
+        let mut events = Vec::new();
+        observe_child_exit(child, |status| {
+            assert!(forget_exited_process(&processes, &registry, "inst", pid));
+            events.push((pid, status.code()));
+        })
+        .await;
+        assert_eq!(events, vec![(pid, Some(7))]);
+        assert!(processes.entry_of("inst").is_none());
+        assert!(registry.record_of("inst").is_none());
+    }
 
     #[test]
     fn failed_kill_command_is_not_success() {
@@ -1058,6 +1511,132 @@ mod tests {
         );
         // Removal after disappearance is inert, not a panic.
         processes.remove_if_pid("inst", 111);
+    }
+
+    #[tokio::test]
+    async fn termination_is_forgotten_only_once_exit_is_confirmed() {
+        // R3's gate, exercised against real process states: a pid the kernel
+        // reports gone passes; a live process whose kill_tree succeeds passes;
+        // either way the in-memory map and the persisted row move together.
+        let processes = Processes::default();
+        let registry = Registry::default();
+        let mut gone = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .unwrap()
+        } else {
+            tokio::process::Command::new("true").spawn().unwrap()
+        };
+        let pid = gone.id().unwrap();
+        gone.wait().await.unwrap();
+        processes.set("inst", ProcessEntry { pid, port: 3099 });
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid,
+            port: 3099,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+        terminate_and_forget(
+            &processes,
+            &registry,
+            "inst",
+            pid,
+            3099,
+            "启动已取消",
+            &mut gone,
+        )
+        .await
+        .unwrap();
+        assert!(processes.entry_of("inst").is_none());
+        assert!(
+            registry.record_of("inst").is_none(),
+            "confirmed exit: forgotten"
+        );
+
+        // A live child that *can* be terminated also clears both rows — the
+        // proof is the probe saying dead within the confirmation window.
+        let mut sleeper = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", "ping -n 60 127.0.0.1 > nul"])
+                .spawn()
+                .unwrap()
+        } else {
+            tokio::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .unwrap()
+        };
+        let spid = sleeper.id().unwrap();
+        processes.set(
+            "alive",
+            ProcessEntry {
+                pid: spid,
+                port: 3100,
+            },
+        );
+        registry.remember(PersistedProcess {
+            instance_id: "alive".into(),
+            pid: spid,
+            port: 3100,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+        terminate_and_forget(
+            &processes,
+            &registry,
+            "alive",
+            spid,
+            3100,
+            "等待 120 秒仍未就绪",
+            &mut sleeper,
+        )
+        .await
+        .unwrap();
+        assert!(
+            registry.record_of("alive").is_none(),
+            "kill confirmed dead: registration cleared"
+        );
+        assert!(processes.entry_of("alive").is_none());
+        let _ = sleeper.wait().await;
+    }
+
+    #[tokio::test]
+    async fn a_stop_of_a_process_that_died_after_the_keep_clears_the_rows() {
+        // The kept-alive instance's retry-stop path (R3): `terminate_or_gone`
+        // must treat a kill failure against an already-dead pid as the desired
+        // outcome and clear both rows. Whether taskkill itself succeeds or
+        // errors on a dead pid varies by state, so the assertion is the END
+        // — rows gone, command Ok — whichever branch the OS took.
+        let processes = Processes::default();
+        let registry = Registry::default();
+        let mut gone = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let pid = gone.id();
+        gone.wait().unwrap();
+        processes.set("inst", ProcessEntry { pid, port: 3099 });
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid,
+            port: 3099,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+        // `stop_permission`'s decide() gate accepts a dead pid, and the stop
+        // core clears the rows against it.
+        assert!(stop_permission(&registry, "inst", pid).is_ok());
+        terminate_or_gone(&processes, &registry, "inst", pid)
+            .await
+            .expect("a dead pid must never block the stop retry");
+        assert!(processes.entry_of("inst").is_none());
+        assert!(registry.record_of("inst").is_none());
     }
 
     #[test]

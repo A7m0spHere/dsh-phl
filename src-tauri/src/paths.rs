@@ -8,7 +8,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use tauri::State;
 
@@ -103,7 +103,15 @@ pub(crate) fn default_root() -> PathBuf {
 /// trusting a root path from the IPC boundary. The choice is persisted to a
 /// pointer file *outside* the data root (`{config}/PHL/root.json`), so
 /// relocating the data does not strand the pointer inside the old tree.
-pub struct PhlState {
+///
+/// `Clone` shares one inner state (the `Arc`), not a copy of it: a long
+/// operation that must commit a root change *inside* its own guarded body
+/// (`move_root_data`, storage.rs) takes a clone into its closure and still
+/// reads and writes the one root every command resolves against.
+#[derive(Clone)]
+pub struct PhlState(Arc<PhlInner>);
+
+struct PhlInner {
     root: RwLock<PathBuf>,
     pointer: Option<PathBuf>,
     /// True until the pointer file exists. While true, the frontend's boot
@@ -128,11 +136,11 @@ impl PhlState {
             let text = raw.to_string_lossy().into_owned();
             match validate_root(&text) {
                 Ok(root) => {
-                    return Self {
+                    return Self(Arc::new(PhlInner {
                         root: RwLock::new(root),
                         pointer: None,
                         provisional: AtomicBool::new(false),
-                    }
+                    }))
                 }
                 Err(e) => panic!("PHL_ROOT 无效: {e}"),
             }
@@ -148,15 +156,15 @@ impl PhlState {
             .filter(|raw| !raw.is_empty())
             .map(|raw| (PathBuf::from(raw), false))
             .unwrap_or_else(|| (default_root(), true));
-        Self {
+        Self(Arc::new(PhlInner {
             root: RwLock::new(root),
             pointer,
             provisional: AtomicBool::new(provisional),
-        }
+        }))
     }
 
     pub fn root(&self) -> PathBuf {
-        self.root.read().expect("phl root lock").clone()
+        self.0.root.read().expect("phl root lock").clone()
     }
 
     /// A file that must survive a data-root relocation lives next to the
@@ -164,11 +172,19 @@ impl PhlState {
     /// is unavailable (no config dir) — callers degrade to non-persistent
     /// behaviour rather than parking state inside the tree being moved.
     pub(crate) fn sibling_file(&self, name: &str) -> Option<PathBuf> {
-        self.pointer.as_ref().map(|p| p.with_file_name(name))
+        self.0.pointer.as_ref().map(|p| p.with_file_name(name))
+    }
+
+    /// An owned handle to the *same* state, for code that must commit a root
+    /// change from inside a long guarded body (`move_root_data`) and wants a
+    /// lifetime that does not depend on the borrowed `State<'_, PhlState>`
+    /// argument. Cloning the handle clones the `Arc`, never the state.
+    pub(crate) fn shared(&self) -> PhlState {
+        self.clone()
     }
 
     fn is_provisional(&self) -> bool {
-        self.provisional.load(Ordering::SeqCst)
+        self.0.provisional.load(Ordering::SeqCst)
     }
 
     /// The boot handshake. A pointer file wins outright; only a still-
@@ -192,25 +208,59 @@ impl PhlState {
         self.set(validate_root(root)?)
     }
 
+    /// The relocation commit used by a finished migration: `to` is trusted
+    /// because the backend built it — it comes from a journal it wrote or the
+    /// destination `move_root_data` created, not from a UI string. It may
+    /// carry the canonical form, so the verbatim prefix is stripped here to
+    /// keep the pointer (and everything reading `root()`) in plain form.
+    pub(crate) fn relocate_root(
+        &self,
+        to: PathBuf,
+        journal: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        let to = strip_verbatim(&to);
+        self.persist(&to)?;
+        // The pointer now names the new root: the journal has served its
+        // purpose. A failure here does not undo a persisted pointer. The
+        // next migration retires this record only after checking that its
+        // destination is still the authoritative root; cleanup errors block
+        // that next move instead of applying this journal to another target.
+        if let Some(journal) = journal {
+            if let Err(e) = std::fs::remove_file(journal) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("[phl] 迁移已提交但记录未能清除（可稍后手动删除）: {e}");
+                }
+            }
+        }
+        *self.0.root.write().expect("phl root lock") = to.clone();
+        self.0.provisional.store(false, Ordering::SeqCst);
+        Ok(to)
+    }
+
     fn set(&self, root: PathBuf) -> Result<PathBuf, String> {
         self.persist(&root)?;
-        *self.root.write().expect("phl root lock") = root.clone();
-        self.provisional.store(false, Ordering::SeqCst);
+        *self.0.root.write().expect("phl root lock") = root.clone();
+        self.0.provisional.store(false, Ordering::SeqCst);
         Ok(root)
     }
 
     /// The pointer is written *before* the in-memory root moves: a failed
     /// persist leaves the current root in charge rather than a state that
-    /// forgets itself on the next restart.
+    /// forgets itself on the next restart. tmp+rename, like every other
+    /// durable record here: a pointer interrupted mid-write is a torn path
+    /// that would boot into the wrong root — worse than the old one.
     fn persist(&self, root: &Path) -> Result<(), String> {
-        let Some(pointer) = &self.pointer else {
+        let Some(pointer) = &self.0.pointer else {
             return Ok(());
         };
         if let Some(parent) = pointer.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("无法创建配置目录: {e}"))?;
         }
-        std::fs::write(pointer, root.to_string_lossy().as_bytes())
-            .map_err(|e| format!("无法记录数据目录: {e}"))
+        let tmp = pointer.with_extension("json.tmp");
+        std::fs::write(&tmp, root.to_string_lossy().as_bytes())
+            .map_err(|e| format!("无法记录数据目录: {e}"))?;
+        std::fs::rename(&tmp, pointer).map_err(|e| format!("无法记录数据目录: {e}"))?;
+        Ok(())
     }
 }
 
@@ -419,7 +469,7 @@ mod tests {
         std::env::set_var("PHL_ROOT", &dir);
         let state = PhlState::load();
         assert_eq!(state.root(), dir, "env root wins");
-        assert!(state.pointer.is_none());
+        assert!(state.0.pointer.is_none());
         assert!(
             state.sibling_file("processes.json").is_none(),
             "no pointer → run-state files cannot land next to the real one"

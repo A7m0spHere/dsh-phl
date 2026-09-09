@@ -36,6 +36,8 @@ export interface MoveSummary {
   moved: string[]
   bytes: number
   cancelled: boolean
+  /** Present only after the backend has committed the authoritative root. */
+  root?: string | null
 }
 
 /**
@@ -97,7 +99,7 @@ export async function moveRootData(
         })
       }
     }
-    return { moved: kinds, bytes: sizes.reduce((a, b) => a + b, 0), cancelled: false }
+    return { moved: kinds, bytes: sizes.reduce((a, b) => a + b, 0), cancelled: false, root: to }
   }
   const channel = new Channel<MoveProgress>()
   channel.onmessage = onProgress
@@ -134,4 +136,15 @@ export async function migrationStatus(): Promise<MigrationJournal | null> {
 /** Undo a non-committed migration: everything that arrived moves back. */
 export async function migrationUndo(): Promise<MoveSummary> {
   return invoke<MoveSummary>('storage_migration_undo')
+}
+
+/**
+ * Finish a migration whose data all arrived (the journal is committed) but
+ * whose root-pointer switch never was — the restart entry for exactly that
+ * state. The backend re-points the pointer from the journal and clears it;
+ * the answer is the new authoritative root, or `null` in browser mode.
+ */
+export async function migrationFinish(): Promise<string | null> {
+  if (!isDesktop) return null
+  return invoke<string>('storage_migration_finish')
 }

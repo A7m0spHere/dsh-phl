@@ -95,6 +95,51 @@ describe('instance lifecycle', () => {
     expect(mocks.toast).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
   })
 
+  it('shows a surviving process as running and stoppable after an aborted launch', async () => {
+    // R3: the backend could not confirm termination after a cancel, so it
+    // kept the registration. The UI must present a *running, stoppable*
+    // instance — not a failed start with no stop entry, which is how a live
+    // DSH used to silently escape PHL's management.
+    useInstanceStore.setState({ states: {} })
+    const { KeptRunningError } = await import('@/services/repository')
+    mocks.launch.mockRejectedValue(
+      new KeptRunningError(4321, 3180, '启动已取消，但进程 4321 在终止后仍然存活'),
+    )
+    await useInstanceStore.getState().launch('test')
+    const s = useInstanceStore.getState().stateOf('test')
+    expect(s.status).toBe('running')
+    expect(s.pid).toBe(4321)
+    expect(useInstanceStore.getState().byId('test')!.port).toBe(3180)
+    expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ kind: 'warn' }))
+    // The stop entry is live: stop reaches the backend and clears the card.
+    mocks.stop.mockResolvedValue(undefined)
+    expect(await useInstanceStore.getState().stop('test')).toBe(true)
+    expect(useInstanceStore.getState().stateOf('test').status).toBe('stopped')
+  })
+
+  it('does not resurrect a kept process whose exit preceded the launch error', async () => {
+    useInstanceStore.setState({ states: {} })
+    const { KeptRunningError } = await import('@/services/repository')
+    mocks.launch.mockImplementation(async () => {
+      mocks.onExit!({ instanceId: 'test', pid: 4321, code: 0 })
+      throw new KeptRunningError(4321, 3180, 'termination unconfirmed')
+    })
+    await useInstanceStore.getState().launch('test')
+    expect(useInstanceStore.getState().stateOf('test').status).toBe('stopped')
+    expect(useInstanceStore.getState().portsInUse().has(3180)).toBe(false)
+    expect(mocks.toast).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'warn' }))
+  })
+
+  it('observes a kept process exiting after the launch error', async () => {
+    useInstanceStore.setState({ states: {} })
+    const { KeptRunningError } = await import('@/services/repository')
+    mocks.launch.mockRejectedValue(new KeptRunningError(4321, 3180, 'termination unconfirmed'))
+    await useInstanceStore.getState().launch('test')
+    mocks.onExit!({ instanceId: 'test', pid: 4321, code: 1 })
+    expect(useInstanceStore.getState().stateOf('test').status).toBe('stopped')
+    expect(useInstanceStore.getState().portsInUse().has(3180)).toBe(false)
+  })
+
   it('keeps a durable abnormal-exit mark so a crash outlives its toast', () => {
     // Found in the 2026-09-08 desktop alpha pass: a process that reaches
     // ready and then dies folded the state back to stopped with only a

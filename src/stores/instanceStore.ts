@@ -1,6 +1,6 @@
 import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
-import { repository, Cancelled, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
+import { repository, Cancelled, KeptRunningError, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
 import { adoptProcesses, isDesktop, onInstanceExited, openDshWebUi } from '@/lib/desktop'
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
@@ -293,7 +293,30 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         action: { label: '打开', run: () => void get().openWebUi(id) },
       })
     } catch (err) {
-      if (err instanceof Cancelled) {
+      if (err instanceof KeptRunningError) {
+        const exited = exitedDuringLaunch.get(id)
+        if (exited?.pid === err.pid) {
+          patch(exited.code === 0 ? STOPPED : {
+            status: 'stopped',
+            lastExit: { code: exited.code, at: Date.now(), ranFor: 0 },
+          })
+          ui.toast({ kind: 'info', title: `${instance.name} 已确认退出` })
+          return
+        }
+        // R3: the DSH process is alive but termination could not be
+        // confirmed, so the backend kept it registered on `err.port`.
+        // Presenting it as running is what preserves a working stop entry —
+        // a generic error state would strand a live process with no button.
+        patch({ status: 'running', progress: 1, pid: err.pid, startedAt: Date.now() })
+        get().updateInstance(id, { port: err.port, lastRunAt: new Date().toISOString() })
+        ui.toast({
+          kind: 'warn',
+          title: `${instance.name} 未能确认退出，已保留为运行中`,
+          message: `${err.detail} 端口 ${err.port} 仍被占用；可直接重试停止。`,
+          duration: 9000,
+          action: { label: '停止', run: () => void get().stop(id) },
+        })
+      } else if (err instanceof Cancelled) {
         patch(STOPPED)
         ui.toast({ kind: 'info', title: `已取消启动 ${instance.name}` })
       } else if (err instanceof LaunchError) {

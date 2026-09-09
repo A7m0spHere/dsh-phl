@@ -15,6 +15,7 @@ import {
   freeSpace,
   migrationStatus,
   migrationUndo,
+  migrationFinish,
   moveRootData,
   type MigrationJournal,
   rootDataSummary,
@@ -178,6 +179,24 @@ export function SettingsPage() {
    * new one — edits fail with "实例不存在", and a delete reports success while
    * the real directory survives, unreachable, in the old location.
    */
+  const refreshRootView = async (next: string) => {
+    setRootDraft(next)
+    await Promise.all([
+      useInstanceStore.getState().reload(),
+      useCatalogStore.getState().load(),
+      useApiConfigStore.getState().load(),
+    ]).catch((err) => {
+      ui.toast({ kind: 'error', title: '新目录读取失败', message: parseThrownError(err).message })
+    })
+    void measureDiskUsage()
+    void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
+  }
+
+  const mirrorCommittedRoot = async (root: string) => {
+    settings.setRoot(root)
+    await refreshRootView(root)
+  }
+
   const switchRootTo = async (next: string): Promise<boolean> => {
     // The backend has to adopt the path before the UI moves: a local-only
     // switch would leave the field pointing at one directory while every read
@@ -192,22 +211,7 @@ export function SettingsPage() {
       setRootDraft(settings.root)
       return false
     }
-    setRootDraft(next)
-    await Promise.all([
-      useInstanceStore.getState().reload(),
-      useCatalogStore.getState().load(),
-      useApiConfigStore.getState().load(),
-    ]).catch((err) => {
-      ui.toast({
-        kind: 'error',
-        title: '新目录读取失败',
-        message: parseThrownError(err).message,
-      })
-    })
-    // The per-instance sizes and the orphan scan are keyed to the old root's
-    // ids and directories; re-run them now that the list describes the new one.
-    void measureDiskUsage()
-    void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
+    await refreshRootView(useSettingsStore.getState().root)
     return true
   }
 
@@ -240,13 +244,48 @@ export function SettingsPage() {
    * so the half-moved directories are never a silent dead end.
    */
   const [openJournal, setOpenJournal] = useState<MigrationJournal | null>(null)
-  const [journalBusy, setJournalBusy] = useState<'resume' | 'undo' | null>(null)
+  const [journalBusy, setJournalBusy] = useState<'resume' | 'undo' | 'finish' | null>(null)
   useEffect(() => {
     if (section !== 'storage') return
     void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
   }, [section])
 
   const clearJournal = () => void setOpenJournal(null)
+
+  /**
+   * The committed journal: every directory has arrived at the new root, but
+   * the pointer switch never completed (crash or failed commit between the
+   * two). The backend finishes it from the journal's own record — never from
+   * a path the UI re-sends — and the reload below re-reads the lists from
+   * the adopted root.
+   */
+  const finishCommittedMigration = async () => {
+    if (!openJournal) return
+    setJournalBusy('finish')
+    try {
+      const adopted = await migrationFinish()
+      if (adopted) {
+        // The pointer is already the backend's; this mirrors it into the UI
+        // store and re-reads instances/catalog/API from the adopted root.
+        await mirrorCommittedRoot(adopted)
+      }
+      ui.toast({
+        kind: 'success',
+        title: '数据目录已切换',
+        message: '迁移早已完成数据搬运，目录指针现已指向新目录。',
+      })
+      clearJournal()
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '完成切换失败',
+        message: parseThrownError(err).message,
+        duration: 8000,
+      })
+    } finally {
+      setJournalBusy(null)
+    }
+  }
 
   const undoOpenMigration = async () => {
     if (!openJournal) return
@@ -292,16 +331,9 @@ export function SettingsPage() {
         void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
         return
       }
-      if (!(await switchRootTo(to))) {
-        // The data is already in `to`; leaving the root behind would strand it.
-        ui.toast({
-          kind: 'error',
-          title: '数据已迁移，但目录未切换',
-          message: `数据已在 ${to}，PHL 却没能把数据目录切过去。请到本页把路径手动改成它，否则列表会指向已经搬空的旧目录。`,
-          duration: 12000,
-        })
-        return
-      }
+      if (!summary.root) throw new Error('迁移结果缺少已提交的数据目录，请重启 PHL 重新读取目录状态。')
+      await mirrorCommittedRoot(summary.root)
+      clearJournal()
       ui.toast({
         kind: 'success',
         title: '数据迁移完成',
@@ -715,31 +747,56 @@ export function SettingsPage() {
         {section === 'storage' && (
           <>
             {openJournal && !migration && (
-              <PageSection title="未完成的迁移">
-                <Notice tone="warn" title={`旧目录 → 新目录的数据搬运尚未结束`}>
-                  <div className="mt-1 break-all text-sm">
-                    {openJournal.from} → {openJournal.to}（{openJournal.entries.filter((e) => e.state === 'moved').length}/{openJournal.entries.length} 个目录已到达，
-                    {formatBytes(openJournal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
-                    可从中断处继续，或将已复制的数据原路退回。
-                  </div>
-                  <div className="mt-2.5 flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={() => void beginMigration(openJournal.from, openJournal.to)}
-                    >
-                      继续迁移
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={journalBusy !== null}
-                      onClick={() => void undoOpenMigration()}
-                    >
-                      {journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
-                    </Button>
-                  </div>
-                </Notice>
+              <PageSection
+                title={openJournal.committed ? '待确认的迁移' : '未完成的迁移'}
+              >
+                {openJournal.committed ? (
+                  // The recovery entry for R1's window: the journal says every
+                  // directory arrived, yet the pointer still names the old
+                  // root. One click commits the switch; nothing is re-copied.
+                  <Notice tone="warn" title="数据已全部到达新目录，迁移记录尚未清理">
+                    <div className="mt-1 break-all text-sm">
+                      {openJournal.from} → {openJournal.to}（{openJournal.entries.length}/
+                      {openJournal.entries.length} 个目录已到达）。确认后将使用新目录并清理记录，不会重新搬运数据。
+                    </div>
+                    <div className="mt-2.5 flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={journalBusy !== null}
+                        onClick={() => void finishCommittedMigration()}
+                      >
+                        {journalBusy === 'finish' ? '切换中…' : '完成切换'}
+                      </Button>
+                    </div>
+                  </Notice>
+                ) : (
+                  <Notice tone="warn" title={`旧目录 → 新目录的数据搬运尚未结束`}>
+                    <div className="mt-1 break-all text-sm">
+                      {openJournal.from} → {openJournal.to}（{openJournal.entries.filter((e) => e.state === 'moved').length}/{openJournal.entries.length} 个目录已到达，
+                      {formatBytes(openJournal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
+                      可从中断处继续，或将已复制的数据原路退回。
+                    </div>
+                    <div className="mt-2.5 flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={journalBusy !== null}
+                        onClick={() => void beginMigration(openJournal.from, openJournal.to)}
+                      >
+                        继续迁移
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={journalBusy !== null}
+                        onClick={() => void undoOpenMigration()}
+                      >
+                        {journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
+                      </Button>
+                    </div>
+                  </Notice>
+                )}
               </PageSection>
             )}
             <PageSection

@@ -49,14 +49,20 @@ export default function App() {
       .then(async () => {
         // An interrupted root migration is the one state a restart must not
         // silently ignore: half the data lives in a different directory
-        // until the user chooses 继续 or 撤销 (O-06).
+        // until the user chooses 继续 or 撤销 (O-06). A *committed* journal
+        // whose pointer switch never landed is the other recovery shape —
+        // the data is complete at the new root, one click adopts it.
         const journal = await migrationStatus()
         if (!journal) return
         const ui = useUIStore.getState()
         ui.toast({
           kind: 'warn',
-          title: '检测到未完成的数据目录迁移',
-          message: '部分数据仍在新目录中。前往「设置 → 存储」可从中断处继续，或将已复制的数据原路退回。',
+          title: journal.committed
+            ? '检测到待确认的数据目录迁移'
+            : '检测到未完成的数据目录迁移',
+          message: journal.committed
+            ? '数据已全部到达新目录。前往「设置 → 存储」确认目录并清理迁移记录。'
+            : '部分数据仍在新目录中。前往「设置 → 存储」可从中断处继续，或将已复制的数据原路退回。',
           duration: 10_000,
           action: {
             label: '去处理',
