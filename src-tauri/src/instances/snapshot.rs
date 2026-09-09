@@ -1,5 +1,11 @@
 //! Point-in-time copies of an instance's `dsh-home`: create under a staging
 //! name, restore by copy-swap with the previous tree as backup, delete.
+//!
+//! A restore replaces the home's plugins and configuration and nothing else.
+//! The snapshot records which DSH version and Runtime the instance referenced,
+//! but the instance keeps its current binding: re-pointing a live instance at
+//! a version that may since have been deleted would trade a recoverable state
+//! for an unrunnable one. The UI says so instead of implying a full rollback.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +19,8 @@ use super::copy::SkipRule;
 use super::copy::{copy_tree_with_progress, LinkPolicy};
 use super::{
     build_record, home_of, instance_dir, instances_root, load_manifest, profile_root_of,
-    reject_external_write, sanitize_segment, scan_plugins, CloneProgress, InstanceRecord,
+    reject_external_write, sanitize_segment, scan_plugins, CloneProgress, InstanceManifest,
+    InstanceRecord,
 };
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, PhlState};
@@ -30,7 +37,10 @@ pub struct SnapshotFile {
     pub id: String,
     pub label: String,
     pub created_at: String,
-    /// The environment at snapshot time — a restore brings these back.
+    /// The environment at snapshot time, recorded so a snapshot can be judged
+    /// against the instance it came from. A restore deliberately does NOT
+    /// re-point these: it replaces the dsh-home only, and the instance keeps
+    /// the DSH and Runtime it currently references (see the module doc).
     pub version_id: String,
     pub runtime_id: String,
     pub plugin_count: usize,
@@ -116,6 +126,45 @@ pub async fn create_instance_snapshot(
     result
 }
 
+/// Undo the debris of an interrupted restore.
+///
+/// The swap renames the live home aside before the restored copy is placed, so
+/// a crash between the two leaves the instance with *no* home and the only
+/// copy under a hidden name; a crash after the swap leaves a stale backup. Both
+/// are repaired here rather than refused, because the alternative is telling
+/// the user their data is gone. Safe to call when there is nothing to do.
+pub(crate) async fn recover_interrupted_restore(
+    dir: &Path,
+    manifest: &InstanceManifest,
+) -> Result<(), String> {
+    let current = home_of(dir, manifest);
+    let backup = dir.join(".phl-old-dsh-home");
+    let staging = dir.join(".phl-restore");
+    if !backup.exists() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Ok(());
+    }
+    if current.exists() {
+        // The swap finished; only the cleanup was interrupted.
+        let _ = tokio::fs::remove_dir_all(&backup).await;
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Ok(());
+    }
+    tokio::fs::rename(&backup, &current).await.map_err(|e| {
+        format!(
+            "检测到中断的快照还原，但无法把 {} 放回 {}：{e}",
+            backup.display(),
+            current.display()
+        )
+    })?;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    eprintln!(
+        "[phl] 已回滚中断的快照还原，{} 已放回原位",
+        current.display()
+    );
+    Ok(())
+}
+
 pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     flag: &Arc<AtomicBool>,
     processes: &Processes,
@@ -127,6 +176,7 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     let dir = instance_dir(root, &id)?;
     let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
+    recover_interrupted_restore(&dir, &manifest).await?;
 
     // Snapshotting reads the home; for an external instance that is the
     // user's own directory, and copying it *out* into the instance tree is
@@ -262,6 +312,10 @@ pub(crate) async fn restore_snapshot_inner(
     // that would stamp PHL's copy over the user's own directory — the one
     // operation adoption explicitly forbids.
     reject_external_write(&manifest, &id, "还原快照并覆盖")?;
+    // An interrupted earlier restore is repaired before this one reasons about
+    // the live home: without it, a half-swapped instance looks like one with
+    // no dsh-home at all and this command would refuse to help.
+    recover_interrupted_restore(&dir, &manifest).await?;
 
     let snap_dir = snapshot_dir(&dir, snapshot_id)?;
     let raw = tokio::fs::read_to_string(snap_dir.join("snapshot.json"))

@@ -829,7 +829,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
               <EmptyState
                 compact
                 title="还没有快照"
-                description="快照会记录当前 DSH 版本、Runtime、插件与配置，用于回滚或复现问题。"
+                description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），不会改变实例引用的 DSH 与 Runtime。"
                 action={
                   <Button size="sm" variant="secondary" onClick={actions.snapshot}>
                     创建第一个快照
@@ -859,7 +859,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                           const ok = await confirm({
                             title: `回滚到「${snap.label}」`,
                             message: '当前 dsh-home 里的插件与配置会被快照内容整体替换。',
-                            detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。`,
+                            detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。回滚不改变实例当前引用的 DSH 版本与 Runtime。`,
                             confirmLabel: '回滚',
                           })
                           if (ok) await restoreSnapshot(instance.id, snap.id)

@@ -1764,6 +1764,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_interrupted_restore_is_rolled_back_instead_of_refused() {
+        // The swap renames the live home aside before the restored copy is
+        // placed. A crash in between leaves no home at all, and the next
+        // restore used to refuse ("实例缺少 dsh-home") — stranding the only
+        // copy under a hidden name (2026-09-09 review, P2).
+        let root = temp_root("snap-interrupted");
+        let record = create_instance_inner(root.as_path(), manifest("snap-int1", "Interrupted"))
+            .await
+            .unwrap();
+        let dir = root.join("instances").join("snap-int1");
+        let home = dir.join("dsh-home");
+        std::fs::write(home.join("keep.txt"), "live").unwrap();
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let processes = Processes::default();
+        let snap = run_snapshot_create(&flag, &processes, root.as_path(), "snap-int1", &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(record.manifest.id, "snap-int1");
+
+        // Simulate the crash: the live home is aside, staging exists, and
+        // nothing has been placed back over it.
+        std::fs::create_dir_all(dir.join(".phl-restore/dsh-home")).unwrap();
+        std::fs::rename(&home, dir.join(".phl-old-dsh-home")).unwrap();
+        assert!(!home.exists());
+
+        let restored = restore_snapshot_inner(root.as_path(), "snap-int1", &snap.id, &processes)
+            .await
+            .expect("an interrupted restore must be repaired, not refused");
+        assert!(home.exists(), "the instance gets its home back");
+        assert!(
+            !dir.join(".phl-old-dsh-home").exists(),
+            "the backup is retired once the home is back"
+        );
+        assert!(
+            !dir.join(".phl-restore").exists(),
+            "the interrupted staging tree is removed"
+        );
+        assert!(restored.plugins.len() <= 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn snapshot_create_restore_delete_roundtrip() {
         let root = temp_root("snap");
         let record = create_instance_inner(root.as_path(), manifest("snap-a1b2", "Snapped"))
