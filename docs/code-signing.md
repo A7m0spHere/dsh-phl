@@ -40,5 +40,32 @@
 - `certificateThumbprint` + `timestampUrl` + `digestAlgorithm`：证书已装进 Windows 证书存储时使用；
 - `signCommand`：交给外部签名器（SignPath、`signtool` 包装脚本等）签名。
 
-CI 侧（`.github/workflows/release.yml`）在拿到证书后增加一步签名即可；在证书就位前不要开启，
-否则构建会因找不到证书而失败。
+## 已经接好的部分（默认关闭）
+
+- `src-tauri/tauri.conf.json` → `bundle.windows.signCommand` 指向 `scripts/sign-windows.ps1`，
+  Tauri 会把每个产出的二进制（应用 exe、NSIS 安装程序）以 `%1` 传给它；
+- `scripts/sign-windows.ps1` 从环境变量读取凭据（`PHL_SIGN_PFX_BASE64` / `PHL_SIGN_PFX_PASSWORD`，
+  或 `PHL_SIGN_PFX_PATH`，或 `PHL_SIGN_THUMBPRINT`），用 `signtool` 签名并复核；
+  **没有凭据时只打印一行说明并退出 0**，所以本地未签名的构建照常可用；
+- `.github/workflows/release.yml` 的「Configure Windows signing」步骤由仓库变量
+  `WINDOWS_SIGNING=true` 控制：开启后把 `WINDOWS_CERTIFICATE`（base64 PFX）与
+  `WINDOWS_CERTIFICATE_PASSWORD` 注入 runner，并设置 `PHL_SIGN_REQUIRED=1`——
+  此时证书缺失会让发布**失败**，而不是静默发出未签名包。
+
+### 两个已经踩过的坑（改配置前必读）
+
+- **脚本路径要写 `../scripts/sign-windows.ps1`**：Tauri 打包器执行签名命令时的工作目录是
+  `src-tauri`，而它只把**在当前目录下确实存在**的相对参数转成绝对路径。写成 `scripts/...`
+  不会被转换，pwsh 找不到脚本并以非 0 退出，构建报 `failed to run pwsh`。
+- **不要用 `-Command`**：`%1` 会被追加到命令字符串尾部（`... exit 0 D:\...\dsh-phl.exe`），
+  PowerShell 直接 ParserError。必须用 `-File`，`%1` 才是独立参数。
+
+### 拿到证书后要做的三步
+
+1. 把 PFX 转成 base64 存进仓库 Secrets：`WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD`；
+2. 新建仓库变量 `WINDOWS_SIGNING` = `true`；
+3. 打下一个版本标签。流水线会签名并用 `signtool verify /pa` 复核后才创建 Release。
+
+本地想试签：设置同样的环境变量后跑 `npm run app:build`。
+
+申请 SignPath Foundation 的材料见 [code-signing-policy.md](./code-signing-policy.md)。

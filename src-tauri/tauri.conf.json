@@ -55,6 +55,17 @@
         "installMode": "both",
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": true
+      },
+      "signCommand": {
+        "cmd": "pwsh",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../scripts/sign-windows.ps1",
+          "%1"
+        ]
       }
     }
   }
