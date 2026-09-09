@@ -193,10 +193,16 @@ fn read_package_version(raw: &str) -> Option<String> {
 /// The `MAJOR.MINOR.PATCH` gate mirrors `runtimes::system_node_version`:
 /// shims that print anything else report nothing rather than noise.
 pub(crate) fn probe_node() -> (Option<String>, Option<String>) {
-    let output = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok();
+    let mut command = std::process::Command::new("node");
+    command.arg("--version");
+    // Discovery runs on every page load; without this Windows flashes a
+    // console window each time (only console-subsystem binaries get one).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::launch::CREATE_NO_WINDOW);
+    }
+    let output = command.output().ok();
     let Some(output) = output else {
         return (None, None);
     };

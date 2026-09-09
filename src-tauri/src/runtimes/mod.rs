@@ -143,10 +143,16 @@ pub async fn list_installed_runtimes(
 #[tauri::command]
 pub async fn system_node_version() -> Option<String> {
     tokio::task::spawn_blocking(|| {
-        let output = std::process::Command::new("node")
-            .arg("--version")
-            .output()
-            .ok()?;
+        let mut command = std::process::Command::new("node");
+        command.arg("--version");
+        // A console program opens a console window unless told not to; this
+        // probe runs on every refresh, so it must stay silent.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
+        }
+        let output = command.output().ok()?;
         if !output.status.success() {
             return None;
         }
