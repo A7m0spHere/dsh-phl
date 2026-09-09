@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-09 许可证：**选定 MIT。** 新增 `LICENSE`（Copyright (c) 2026 A7m0spHere）；`package.json` 与 `src-tauri/Cargo.toml` 声明 `MIT`；README 的许可证章节由「尚未选定、勿再分发」改为 MIT 说明；`THIRD_PARTY_NOTICES.md` 顶部注明本项目许可证，第三方清单保持不变。O-15 记录的「许可证维持发布前由维护者决定」到此关闭。
+
 2026-09-09 接手复核与完善：确认 V1–V4 现有实现和回归有效，并补上后端拒绝重复启动未确认进程、迟到取消不得掩盖插件提交/恢复结果、最终固定 DSH_HOME 防止 Windows 大小写覆盖。最终 gate 全绿：前端 92 项，Rust 349 项通过 / 6 忽略。公开预览仍未放行：凭据/快照/WebUI 的其他历史问题以及真实安装验收未因本次四项修复而关闭。具体证据与产物记录见 [接手复核](docs/preview-release-v-reverification-2026-09-09.md)。
 
 2026-09-09 V1–V4 复验关闭：**上一轮点名的四项已覆盖到实现与失败时序回归，但这不代表全项目已无已知缺陷，公开预览仍为 NO-GO。** V1 使用独立插件事务日志，Prepared / RollingBack / Committed 决定恢复，早写的包 marker 不再证明提交；V2 区分 Alive/Unknown/Exited；V3 核对迁移 journal 的 from/to，前端只同步后端已提交的根；V4 保留 child 的持续退出监听并处理前端早到退出事件。该修复提交的原始基线为 Rust 346 通过 / 6 忽略、前端 88 通过。旧审查中的凭据覆盖、快照绑定与 WebUI 代次等问题仍需独立收口；真实桌面与干净 Windows 安装验收、Rust 依赖审计也尚未完成。接手后的增量完善与最终验证见 [V1–V4 复验记录](docs/preview-release-v-reverification-2026-09-09.md)。

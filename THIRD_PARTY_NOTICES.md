@@ -1,5 +1,7 @@
 # 第三方声明 / THIRD_PARTY_NOTICES
 
+PHL 自身以 [MIT 许可证](./LICENSE) 发布。以下为随包分发的第三方组件及其许可证。
+
 PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Cargo.lock` （license 字段读取自本地 npm/cargo 缓存）生成；发布前请用 `cargo about` 或 `npm ls` 重新生成并复核。各组件的许可证以其上游声明的完整文本为准。
 
 ## 前端 npm 依赖

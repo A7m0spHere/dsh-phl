@@ -202,8 +202,10 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 
 ## 许可证
 
-本项目尚未选定开源许可证（alpha 阶段，仓库中暂无 `LICENSE` 文件；选定是发布前由
-维护者决定的事项）。在许可证确定前，请勿将本仓库代码再分发或用于生产。
+[MIT](./LICENSE) © 2026 A7m0spHere
+
+可自由使用、修改、分发与商用，只需保留版权与许可声明。软件按「原样」提供，不附带任何担保。
+随包依赖的许可证见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
 ## 下一步
 
