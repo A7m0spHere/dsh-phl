@@ -73,6 +73,19 @@ jobs:
             }
           }
 
+      # Signing is opt-in: the step is skipped unless the repository variable
+      # WINDOWS_SIGNING is set to "true", and the certificate itself only ever
+      # exists as a secret. PHL_SIGN_REQUIRED makes a half-configured release
+      # fail here instead of publishing an unsigned installer.
+      - name: Configure Windows signing (skipped unless enabled)
+        if: ${{ vars.WINDOWS_SIGNING == 'true' }}
+        shell: pwsh
+        run: |
+          "PHL_SIGN_PFX_BASE64=${{ secrets.WINDOWS_CERTIFICATE }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PHL_SIGN_PFX_PASSWORD=${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PHL_SIGN_REQUIRED=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Windows signing configured"
+
       - run: npm run app:build
         shell: bash
 
