@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-09 发布就绪：**代码与供应链检查已就绪，实机验收按「维护者自测通过、问题走 issue」记账。** `cargo audit`（513 个 crate）**0 个漏洞**，7 条警告均为传递依赖的 unmaintained / unsound（`glib` 仅 Linux 目标编译），不引入豁免；安装包在 `acdb74e` 上重建（2,978,500 字节，SHA-256 `5B72B49F…7837`）。CI：`96546fc`、`cb04137` 全绿；`b8a8c91` 的 Rust job 一次 `cargo test --workspace` 失败但同代码在下一提交通过，本地连跑 10 轮全绿，判为 runner 偶发（再次出现需取日志定位）。正式发布由标签 `v0.1.0-alpha.1` 触发 `.github/workflows/release.yml`。详见 [发布就绪记录](docs/preview-release-readiness-2026-09-09.md)。
+
 2026-09-09 P2 收口：**首轮 review 点名「公开发包前应一并修复」的四项 P2 已处理完毕。** P2-1 凭据与配置的提交顺序改为「先记旧值、失败回滚」，错误文案不再说谎；P2-2 快照明确**只替换 dsh-home**，不再暗示回滚版本绑定（按 review 允许的第二条路径）；P2-3 新增中断还原的自动回滚（备份放回、退役、清暂存）；P2-4 WebUI 窗口地址与请求不一致时先 navigate 再聚焦。门禁全绿：Rust workspace **352 项通过 / 6 忽略**（桌面库 316）、前端 **92 项 / 15 文件**。放行剩余条件仍为真机安装验收、故障注入与 `cargo audit`，以及在本轮修复之上重建安装包。详见 [P2 收口记录](docs/preview-release-p2-round-2026-09-09.md)。
 
 2026-09-09 许可证：**选定 MIT。** 新增 `LICENSE`（Copyright (c) 2026 A7m0spHere）；`package.json` 与 `src-tauri/Cargo.toml` 声明 `MIT`；README 的许可证章节由「尚未选定、勿再分发」改为 MIT 说明；`THIRD_PARTY_NOTICES.md` 顶部注明本项目许可证，第三方清单保持不变。O-15 记录的「许可证维持发布前由维护者决定」到此关闭。
