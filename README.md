@@ -8,6 +8,25 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**。它解决的问题
 
 > 独立实现，与 DeepSeek 官方无隶属关系。产品模型与交互质量参考了 PCL、Prism Launcher、DSHBox 等成熟设计，代码与全部资源均为独立实现（见[实现边界](#参考与实现边界)）。
 
+## 下载与安装
+
+| | |
+|---|---|
+| 最新版本 | [v0.1.0-alpha.2](https://github.com/A7m0spHere/dsh-phl/releases)（alpha 预览，prerelease） |
+| 安装包 | `PHL_0.1.0-alpha.2_x64-setup.exe`（Windows x64） |
+| 系统要求 | Windows 10/11 x64；WebView2 已内置，无需单独安装 |
+
+安装包**尚未做代码签名**，首次下载与运行会看到 SmartScreen 提示——这是缺少签名与信誉，不是检测到病毒。
+点「保留」继续，下载后先核对 SHA-256（Release 附带同名 `.sha256`）。完整说明见
+[安装与安全提示](#安装与安全提示)。
+
+## 首次运行：从零到一个跑起来的实例
+
+1. **版本** —— 下载一个 DSH 版本（走 GitHub Releases，自动 sha512 校验）。
+2. **运行时** —— 下载一个 Node Runtime（nodejs.org dist，SHASUMS256 校验），或直接使用系统 Node。
+3. **新建实例** —— 选版本与运行时，填名称与端口，完成。
+4. **启动** —— 实例页点「启动」，端口就绪后自动打开 WebUI；停止即终止整棵进程树。
+
 ## 真实界面
 
 <p align="center">
@@ -34,7 +53,11 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**。它解决的问题
 | Runtime Manager | ✅ 真实：nodejs.org dist 目录（支持 npmmirror 镜像），SHASUMS256 校验后解包 |
 | Process / Port、真实启动 | ✅ 真实：`dsh web --port` 启动、端口探测与自动分配、进程树终止、崩溃事件、启动日志 |
 
-## 环境要求
+## 从源码构建
+
+只想安装使用，看上面的[下载与安装](#下载与安装)即可；下面是开发与自行构建的路径。
+
+### 环境要求
 
 桌面端需要 Rust 工具链（前端本身不需要）：
 
@@ -45,7 +68,7 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**。它解决的问题
 | Visual Studio C++ 生成工具 | 勾选「使用 C++ 的桌面开发」 |
 | WebView2 | Windows 11 已内置，无需安装 |
 
-## 运行
+### 运行
 
 Windows 上可以直接双击：
 
@@ -222,5 +245,6 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 身份接管、后端资源互斥与任务中心。剩余：受管 Source Build 管线（路线图），以及持续的
 真机打磨。实例模板为静态产品内容（形状预设），不需要后端模块。
 
-当前为 alpha；公开预览尚未放行，放行条件与进度以
-[PHL_OPTIMIZATION_ROADMAP.md](./PHL_OPTIMIZATION_ROADMAP.md) 为准。
+当前为 **alpha 预览**：已在 [Releases](https://github.com/A7m0spHere/dsh-phl/releases) 提供安装包，
+界面与数据格式仍可能变化，暂不提供自动更新。问题与建议请提
+[Issue](https://github.com/A7m0spHere/dsh-phl/issues)。

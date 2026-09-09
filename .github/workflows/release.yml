@@ -100,14 +100,27 @@ jobs:
             Copy-Item $_.FullName dist-release/
           }
 
+      # The body is composed here rather than at author time: docs/release-notes.md
+      # is written per release, docs/install-note.md is stable, and GitHub
+      # prepends whatever we pass to the generated changelog.
+      - name: Compose the release body
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          $notes = Get-Content docs/release-notes.md -Raw
+          $install = Get-Content docs/install-note.md -Raw
+          $sep = [char]10 + [char]10
+          [IO.File]::WriteAllText("dist-release/release-body.md", $notes + $sep + $install, (New-Object Text.UTF8Encoding($false)))
+          Write-Host "release body lines: $((Get-Content dist-release/release-body.md).Count)"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           # Alpha line publishes as prerelease until 0.1.0 proper.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          # The install note comes first: GitHub prepends `body` to the
-          # generated changelog, so downloaders see why the browser warns and
-          # how to verify the hash before the commit list.
-          body_path: docs/install-note.md
+          # The composed body comes first: GitHub prepends it to the generated
+          # changelog, so readers see what changed and how to verify the
+          # download before the raw commit list.
+          body_path: dist-release/release-body.md
           generate_release_notes: true
           files: dist-release/*
