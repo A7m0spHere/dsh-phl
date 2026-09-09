@@ -2,7 +2,21 @@
 
 ## 判定
 
-**代码与供应链检查已就绪；真机验收由维护者自测通过（有问题的走 issue 跟踪）。**
+**已发布：`v0.1.0-alpha.1`（prerelease），2026-09-09 13:05 UTC。**
+<https://github.com/A7m0spHere/dsh-phl/releases/tag/v0.1.0-alpha.1>
+
+发布流水线在干净 runner 上重跑了版本校验、`npm test`、`npm run build`、`cargo test --workspace`、
+bundle 输入检查与 `npm run app:build`，全部通过后创建 Release。
+
+Release 资产（runner 重建，哈希与本地不同）：
+
+```text
+PHL_0.1.0-alpha.1_x64-setup.exe   2,973,765 字节
+SHA-256 3D6FD01DE6C8A7BB112C1B123EAA7949E73F1504DB0BD2417D4A9962A2E49AEB
+（Release 附带同名 .sha256 文件，下载后应以此校验）
+```
+
+代码与供应链检查已就绪；真机验收由维护者自测通过（有问题的走 issue 跟踪）。
 
 此前放行清单里的每一项要么已关闭，要么已明确移交：
 
