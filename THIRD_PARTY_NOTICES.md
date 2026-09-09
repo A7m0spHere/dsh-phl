@@ -535,7 +535,12 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 ## 品牌与素材
 
 应用内的标识、图标与配色体系均在本仓库内定义；未使用第三方项目的 Logo 或品牌资产。
-图标由 `scripts/make-icon.mjs` 从本仓库内的源图生成。
+
+应用标识（鲸鱼尾鳍）的母版由仓库作者用图像生成工具产出后，经提取轮廓、只保留最大连通区域、
+二值化并重新羽化，压成**单一颜色 `#4D6BFE` 的平涂模板**，存放于 `src-tauri/icons/master/`，
+全套图标由 `scripts/make-icon.mjs` 生成。仅借用 DeepSeek 的品牌蓝作为配色：
+**PHL 不是 DeepSeek 官方产品，与 DeepSeek 无隶属关系**，发布物中应注明「非官方」。
+详见 `src-tauri/icons/master/PROVENANCE.md`。
 
 ## 设计与数据源（非分发依赖）
 

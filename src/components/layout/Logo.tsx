@@ -1,24 +1,31 @@
+import markUrl from '@/assets/phl-mark.png'
 import { cn } from '@/lib/cn'
 
 /**
- * PHL's mark: three offset bars inside a rounded square — several isolated
- * environments stacked in one container. Drawn here rather than shipped as an
- * asset so it inherits the accent colour and stays crisp at any size.
+ * PHL's mark: a whale tail — the instance surfacing out of its own isolated
+ * environment. The artwork is a flat single-colour stencil (see
+ * `src-tauri/icons/master/PROVENANCE.md`), so it is painted as a CSS mask over
+ * the accent colour: the shape stays crisp at any size and still follows the
+ * user's theme. Regenerate the mask with `npm run icon -- --mark`.
  */
 export function Logo({ size = 20, className }: { size?: number; className?: string }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className={cn('shrink-0', className)}
+    <span
+      role="img"
       aria-label="PHL"
-    >
-      <rect x="1.5" y="1.5" width="21" height="21" rx="6" className="fill-accent" />
-      <rect x="6" y="6.5" width="12" height="3" rx="1.5" fill="hsl(var(--c-accent-on))" opacity="0.95" />
-      <rect x="6" y="11" width="8.5" height="3" rx="1.5" fill="hsl(var(--c-accent-on))" opacity="0.7" />
-      <rect x="6" y="15.5" width="5" height="3" rx="1.5" fill="hsl(var(--c-accent-on))" opacity="0.45" />
-    </svg>
+      className={cn('inline-block shrink-0 bg-accent', className)}
+      style={{
+        width: size,
+        height: size,
+        maskImage: `url(${markUrl})`,
+        WebkitMaskImage: `url(${markUrl})`,
+        maskSize: 'contain',
+        WebkitMaskSize: 'contain',
+        maskRepeat: 'no-repeat',
+        WebkitMaskRepeat: 'no-repeat',
+        maskPosition: 'center',
+        WebkitMaskPosition: 'center',
+      }}
+    />
   )
 }

@@ -113,7 +113,7 @@ src-tauri/               桌面壳
 ├── capabilities/  权限声明（仅开放自绘标题栏所需的窗口能力）
 └── tauri.conf.json
 
-scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 同一套几何）
+scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 共用同一母版）
 ```
 
 抽象方向：
@@ -174,7 +174,8 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 > explicitly reviewed.
 
 未复制、移植或机械改写上述任何项目的源码，未使用其 UI 素材、图标或专有视觉资产。
-应用内的标识、图标与配色体系均在本仓库内定义。
+应用内的标识、图标与配色体系均在本仓库内定义：应用标识是仓库作者产出并压成单色的
+鲸鱼尾鳍，只借用 DeepSeek 的品牌蓝 `#4D6BFE` 作为配色，**PHL 与 DeepSeek 官方无隶属关系**。
 
 ## 安全
 

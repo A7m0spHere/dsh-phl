@@ -71,6 +71,30 @@ fn reveal(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Gives the window the icon frame that matches this display's scaling.
+///
+/// Windows draws the taskbar button from the *window* icon, and Tauri can only
+/// set one: the single frame it decoded out of `icons/icon.ico`, which is the
+/// 16×16 one. A 125% display asks the taskbar for 20×20, so that bitmap gets
+/// upscaled and the mark smears. Clearing the window icon instead (the first
+/// attempt) only moved the problem — Windows then falls back to the icon
+/// embedded in the executable, which Explorer serves from its icon cache, and
+/// that cache still held the pre-whale artwork. Setting the right frame
+/// explicitly sidesteps both the upscale and the cache.
+fn apply_taskbar_icon(window: &tauri::WebviewWindow) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let png: &[u8] = if scale >= 1.5 {
+        include_bytes!("../icons/24x24.png")
+    } else if scale >= 1.25 {
+        include_bytes!("../icons/20x20.png")
+    } else {
+        include_bytes!("../icons/16x16.png")
+    };
+    if let Ok(icon) = tauri::image::Image::from_bytes(png) {
+        let _ = window.set_icon(icon);
+    }
+}
+
 /// Called by the frontend after the user confirms the exit dialog.
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle) {
@@ -289,6 +313,12 @@ pub fn run() {
                 if let Some(path) = state.sibling_file("processes.json") {
                     registry.bind(path);
                 }
+            }
+            // The main window's taskbar icon: hand it the frame that matches
+            // this display's scaling instead of letting Tauri's 16px one be
+            // upscaled (see apply_taskbar_icon).
+            if let Some(window) = app.get_webview_window("main") {
+                apply_taskbar_icon(&window);
             }
             // Safety net: if the frontend fails to boot it can never call
             // `app_ready`, and a permanently invisible window looks like a

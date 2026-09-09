@@ -105,6 +105,8 @@ pub async fn open_or_focus_webui(
         .resizable(true)
         .build()
         .map_err(|e| format!("无法打开 WebUI 窗口: {e}"))?;
+    // Same taskbar-icon treatment as the main window (see lib.rs).
+    crate::apply_taskbar_icon(&window);
     let _ = window.set_focus();
     Ok(())
 }

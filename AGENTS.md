@@ -31,6 +31,24 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
 - 可以参考：产品理念、UX 模式、实例模型、通用架构、已被验证的功能设计。
 - 不可以：复制 PCL 或其他项目的源代码、UI 素材、图标与专有视觉资产；不做机械改写或翻译式移植。
 - 图标使用 lucide-react（ISC），应用标识与配色体系在本仓库内自行定义。
+- 应用标识（鲸鱼尾鳍）的母版在 `src-tauri/icons/master/`，由 `npm run icon` 生成全套
+  PNG 阶梯、`icon.ico`（9 档）与 `icon.icns`；**小尺寸是重画而非缩放**：≤32px 去掉内部负空间
+  并给标记更多画布，≤20px 用 alpha gamma + 边缘对比度压缩把抗锯齿边缘压硬（半透明像素从约 1/4
+  降到 3–5%）。小尺寸策略由 `--small=` 选择，**四种模式都保留**，可随时回退：
+  `soft`（最早的发虚版）/ `crisp`（用户确认过的那版）/ `hard`（当前默认，最硬）/
+  `median`（二值化 + 中值 + 羽化，实测反而更糊，仅留档）。
+  字节级回滚：`src-tauri/icons/snapshots/` 下是已确认版本的快照，
+  `node scripts/restore-icon-snapshot.mjs <name>` 一键还原。
+  注意两条已踩过的坑：**形态学加粗（dilate）**会把两片尾鳍之间的缺口堵死，16px 变成一团蓝块；
+  **开运算（erode+dilate）**会把尾鳍尖端削钝而并不减少发虚，两样都不要再用。
+  应用内 `Logo.tsx` 用同一母版做 CSS mask，颜色跟随主题 accent。
+  改图标只改母版并重跑命令，不要在别处手写图形；母版来源与「非官方」边界见
+  `src-tauri/icons/master/PROVENANCE.md`。
+- **Windows 任务栏图标要按 DPI 自己挑**：Tauri 只会从 `icon.ico` 里解出一张（16×16）设为
+  窗口图标，125% 缩放下任务栏要 20px，于是被放大成糊的。清空窗口图标也不行——系统会回退到
+  exe 内嵌图标，而那个由 Explorer 的图标缓存管，缓存里可能还是上一版图形。
+  `lib.rs` 的 `apply_taskbar_icon` 按窗口 `scale_factor` 从生成的 PNG 阶梯里选 16/20/24 那档
+  直接设上去。改窗口/任务栏图标时不要删掉这个调用，也不要删 Cargo.toml 的 `image-png` 特性。
 
 ## 架构约定
 
