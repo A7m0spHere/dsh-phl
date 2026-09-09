@@ -74,6 +74,45 @@ pub(crate) async fn disabled_plugin_ids(instance_root: &Path) -> std::collection
         .collect()
 }
 
+/// Only the fields installation changes are snapshotted. Restoring this
+/// state must not replace unrelated plugins or user configuration in a patch.
+pub(crate) async fn plugin_registration_state(
+    profile: &Path,
+    registry_id: &str,
+) -> Result<Option<bool>, String> {
+    let text = match tokio::fs::read_to_string(patch_path(profile)).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("无法备份插件注册状态: {e}")),
+    };
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    Ok(mount_rows(&lines).into_iter().find_map(|row| {
+        let matches = ["id", "name"].iter().any(|key| {
+            row_value(&lines, row.range, key)
+                == Some(serde_yaml::Value::String(registry_id.to_owned()))
+        });
+        matches.then(|| {
+            row_value(&lines, row.range, "disabled") == Some(serde_yaml::Value::Bool(true))
+        })
+    }))
+}
+
+pub(crate) async fn restore_plugin_registration_state(
+    profile: &Path,
+    registry_id: &str,
+    previous: Option<bool>,
+) -> Result<(), String> {
+    // Do not turn a transient read error into an empty patch on recovery.
+    let _ = plugin_registration_state(profile, registry_id).await?;
+    match previous {
+        Some(disabled) => {
+            register_cordis_patch(profile, registry_id, Some(disabled)).await?;
+            set_plugin_disabled(profile, registry_id, disabled).await
+        }
+        None => remove_plugin_block(profile, registry_id).await,
+    }
+}
+
 pub(crate) async fn declared_plugin_ids(profile: &Path) -> std::collections::HashMap<String, bool> {
     let lines = read_patch_lines(profile).await;
     let mut out = std::collections::HashMap::new();
@@ -325,7 +364,10 @@ pub async fn set_plugin_enabled(
         None,
         &locks,
         &tasks,
-        move |_| async move { set_plugin_disabled(&profile, &registry_id, !enabled).await },
+        move |_| async move {
+            super::install::recover_profile_transaction(&profile).await?;
+            set_plugin_disabled(&profile, &registry_id, !enabled).await
+        },
     )
     .await
 }
@@ -350,14 +392,18 @@ pub async fn uninstall_plugin(
         &locks,
         &tasks,
         move |_| async move {
+            super::install::recover_profile_transaction(&profile).await?;
             remove_plugin_block(&profile, &registry_id).await?;
-            let dir = profile.join("node_modules").join(&registry_id);
-            crate::paths::ensure_under_root(&profile.join("node_modules"), &dir)?;
+            let nm = profile.join("node_modules");
+            let dir = nm.join(&registry_id);
+            crate::paths::ensure_under_root(&nm, &dir)?;
             if dir.exists() {
                 tokio::fs::remove_dir_all(&dir)
                     .await
                     .map_err(|e| e.to_string())?;
             }
+            // Recovery above consumes verified backups before unregistering;
+            // never guess ownership from flattened package names here.
             Ok(())
         },
     )

@@ -36,10 +36,19 @@ pub struct PersistedProcess {
     pub exe_path: String,
 }
 
+/// Query failures are not evidence that a process exited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProcessState {
+    Alive,
+    Exited,
+    #[default]
+    Unknown,
+}
+
 /// What a pid probe found at adoption time.
 #[derive(Clone, Debug, Default)]
 pub struct Probe {
-    pub alive: bool,
+    pub state: ProcessState,
     /// `None` when the query itself failed (protected process, no rights).
     pub exe_path: Option<String>,
     pub created_at_ms: Option<i64>,
@@ -68,7 +77,7 @@ pub(crate) fn normalize_exe(raw: &str) -> String {
 }
 
 pub fn decide(rec: &PersistedProcess, probe: &Probe) -> Adoption {
-    if !probe.alive {
+    if probe.state == ProcessState::Exited {
         return Adoption::Forget {
             reason: "进程已退出".into(),
             keep_running: false,
@@ -123,94 +132,140 @@ pub(crate) async fn latest_launch_log(logs_dir: &Path) -> Option<PathBuf> {
 
 /* ------------------------------ persisted map ------------------------------ */
 
+/// One lock for the whole state: the entries, the bound path, and the
+/// commit that snapshots them. Splitting `entries` and `path` into separate
+/// mutexes (as this used to be) let two instances' remember/forget race:
+/// A took a stale snapshot, B took the fresh one and wrote it, then A's
+/// write landed and erased B's live registration — the on-disk registry
+/// silently diverged from what this session was actually managing, and the
+/// next boot could not take over every surviving child (R4). Mutating the
+/// map and committing the snapshot happen inside the SAME critical section,
+/// so every disk state is exactly some committed order of the mutations.
 #[derive(Default)]
 pub struct Registry {
-    entries: Mutex<HashMap<String, PersistedProcess>>,
-    path: Mutex<Option<PathBuf>>,
+    state: Mutex<RegistryState>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    entries: HashMap<String, PersistedProcess>,
+    path: Option<PathBuf>,
+    /// Monotonic per-commit counter feeding the temp-file name: the lock
+    /// already serializes writers, but a rename that fails could otherwise
+    /// leave a file whose name the NEXT writer's rename would pick up — a
+    /// stale snapshot promoted onto disk out of order.
+    commit_seq: u64,
 }
 
 impl Registry {
     /// Bind to the file and load whatever a previous run left behind. Called
     /// once at setup, before any command can see the state.
     pub(crate) fn bind(&self, path: PathBuf) {
-        *self.path.lock().expect("registry path") = Some(path.clone());
+        let mut st = self.state.lock().expect("registry lock");
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Ok(list) = serde_json::from_str::<Vec<PersistedProcess>>(&raw) {
-                let mut entries = self.entries.lock().expect("registry lock");
                 for rec in list {
-                    entries.insert(rec.instance_id.clone(), rec);
+                    st.entries.insert(rec.instance_id.clone(), rec);
                 }
             }
         }
+        st.path = Some(path);
     }
 
     pub(crate) fn remember(&self, rec: PersistedProcess) {
-        self.entries
-            .lock()
-            .expect("registry lock")
-            .insert(rec.instance_id.clone(), rec);
-        self.persist();
+        self.commit(|st| {
+            st.entries.insert(rec.instance_id.clone(), rec);
+        });
     }
 
     pub(crate) fn forget(&self, instance_id: &str) {
-        if self
-            .entries
-            .lock()
-            .expect("registry lock")
-            .remove(instance_id)
-            .is_some()
-        {
-            self.persist();
-        }
+        self.commit_if(|st| st.entries.remove(instance_id).is_some());
     }
 
     pub(crate) fn forget_pid(&self, instance_id: &str, pid: u32) {
-        let mut entries = self.entries.lock().expect("registry lock");
-        if entries.get(instance_id).is_some_and(|r| r.pid == pid) {
-            entries.remove(instance_id);
-            drop(entries);
-            self.persist();
-        }
+        self.commit_if(|st| {
+            if st.entries.get(instance_id).is_some_and(|r| r.pid == pid) {
+                st.entries.remove(instance_id);
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// What we recorded for an instance, for identity checks that happen
     /// outside adoption (stopping a process, watching an adopted one).
     pub(crate) fn record_of(&self, instance_id: &str) -> Option<PersistedProcess> {
-        self.entries
+        self.state
             .lock()
             .expect("registry lock")
+            .entries
             .get(instance_id)
             .cloned()
     }
 
     pub(crate) fn snapshot(&self) -> Vec<PersistedProcess> {
-        self.entries
+        self.state
             .lock()
             .expect("registry lock")
+            .entries
             .values()
             .cloned()
             .collect()
     }
 
-    /// tmp+rename like every other durable record: a torn registry file must
-    /// not make all running children unmanageable.
-    fn persist(&self) {
-        let path = self.path.lock().expect("registry path").clone();
-        let Some(path) = path else { return };
-        let entries: Vec<PersistedProcess> = self
-            .entries
-            .lock()
-            .expect("registry lock")
-            .values()
-            .cloned()
-            .collect();
-        let Ok(body) = serde_json::to_string_pretty(&entries) else {
+    /// Apply a mutation and commit it as one serialized operation.
+    fn commit(&self, mutate: impl FnOnce(&mut RegistryState)) {
+        let mut st = self.state.lock().expect("registry lock");
+        mutate(&mut st);
+        self.commit_locked(&mut st);
+    }
+
+    /// As [`commit`], but a no-op predicate skips the persist: an idempotent
+    /// forget that removed nothing must not rewrite the file.
+    fn commit_if(&self, mutate: impl FnOnce(&mut RegistryState) -> bool) {
+        let mut st = self.state.lock().expect("registry lock");
+        if !mutate(&mut st) {
             return;
-        };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, body).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
         }
+        self.commit_locked(&mut st);
+    }
+
+    fn commit_locked(&self, st: &mut RegistryState) {
+        st.commit_seq += 1;
+        if let Err(e) = Self::persist_locked(st) {
+            // Loud and specific: the memory rows are this session's truth,
+            // so nothing live becomes unmanaged *now* — but a failed commit
+            // is exactly what the next boot's adoption would miss, and the
+            // log line says which instance ids are at risk.
+            let ids: Vec<&str> = st.entries.keys().map(|s| s.as_str()).collect();
+            eprintln!(
+                "[phl][registry] 进程登记落盘失败（{e}）；内存仍管理 {}，重启接管可能不完整: {ids:?}",
+                ids.len()
+            );
+        }
+    }
+
+    /// tmp+rename like every other durable record: a torn registry file must
+    /// not make all running children unmanageable. Unique temp name per
+    /// commit; both outcomes are reported by the caller.
+    fn persist_locked(st: &RegistryState) -> Result<(), String> {
+        let Some(path) = &st.path else { return Ok(()) };
+        let body = serde_json::to_string_pretty(&st.entries.values().collect::<Vec<_>>())
+            .map_err(|e| e.to_string())?;
+        let tmp = path.with_file_name(format!(
+            "{}.{}.{}.tmp",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "registry".into()),
+            std::process::id(),
+            st.commit_seq
+        ));
+        std::fs::write(&tmp, body).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("替换 {} 失败: {e}", path.display())
+        })
     }
 }
 
@@ -228,14 +283,21 @@ pub(crate) fn probe_process(pid: u32) -> Probe {
     #[cfg(not(windows))]
     {
         // A cheap portable approximation: signal 0 probes liveness only.
-        let alive = std::process::Command::new("kill")
+        let state = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|s| s.success());
+            .map(|s| {
+                if s.success() {
+                    ProcessState::Alive
+                } else {
+                    ProcessState::Unknown
+                }
+            })
+            .unwrap_or(ProcessState::Unknown);
         Probe {
-            alive,
+            state,
             exe_path: None,
             created_at_ms: None,
         }
@@ -244,7 +306,7 @@ pub(crate) fn probe_process(pid: u32) -> Probe {
 
 #[cfg(windows)]
 mod win {
-    use super::Probe;
+    use super::{Probe, ProcessState};
 
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const STILL_ACTIVE: u32 = 259;
@@ -259,6 +321,7 @@ mod win {
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
         fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetLastError() -> u32;
         fn GetExitCodeProcess(handle: *mut core::ffi::c_void, exit_code: *mut u32) -> i32;
         fn QueryFullProcessImageNameW(
             handle: *mut core::ffi::c_void,
@@ -287,15 +350,25 @@ mod win {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
-                return out; // cannot open → treat as gone
+                // Invalid pid is proof of absence. Access denied and every
+                // other failure keep the default Unknown state.
+                if GetLastError() == 87 {
+                    out.state = ProcessState::Exited;
+                }
+                return out;
             }
             let mut code: u32 = 0;
             let ok = GetExitCodeProcess(handle, &mut code);
-            if ok == 0 || code != STILL_ACTIVE {
+            if ok == 0 {
                 CloseHandle(handle);
                 return out;
             }
-            out.alive = true;
+            if code != STILL_ACTIVE {
+                out.state = ProcessState::Exited;
+                CloseHandle(handle);
+                return out;
+            }
+            out.state = ProcessState::Alive;
             let mut buf = [0u16; 32768];
             let mut size = buf.len() as u32;
             if QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) != 0 {
@@ -320,6 +393,17 @@ mod win {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_unknown_query_is_not_proof_of_exit() {
+        assert!(!matches!(
+            decide(&rec(1), &Probe::default()),
+            Adoption::Forget {
+                keep_running: false,
+                ..
+            }
+        ));
+    }
+
     fn rec(pid: u32) -> PersistedProcess {
         PersistedProcess {
             instance_id: "main".into(),
@@ -332,7 +416,7 @@ mod tests {
 
     fn probe(exe: Option<&str>, created: Option<i64>) -> Probe {
         Probe {
-            alive: true,
+            state: ProcessState::Alive,
             exe_path: exe.map(str::to_string),
             created_at_ms: created,
         }
@@ -343,7 +427,7 @@ mod tests {
         let out = decide(
             &rec(1),
             &Probe {
-                alive: false,
+                state: ProcessState::Exited,
                 ..Default::default()
             },
         );
@@ -464,6 +548,119 @@ mod tests {
         let after_reload = Registry::default();
         after_reload.bind(path);
         assert!(after_reload.snapshot().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R4's invariant under concurrent churn: two instances' remember/forget
+    /// interleave freely, and the file must always end up describing exactly
+    /// the committed order of those mutations. With the old split lock, a
+    /// stale snapshot could land *after* a fresh one and erase a live row —
+    /// here, the final commits decide the disk, so no interleaving can lose
+    /// a survivor.
+    #[test]
+    fn concurrent_commits_never_lose_a_newer_registration() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("phl-reg-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("processes.json");
+        let reg = Arc::new(Registry::default());
+        reg.bind(path.clone());
+
+        let mut handles = Vec::new();
+        for t in 0..4u32 {
+            let r = Arc::clone(&reg);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..50u32 {
+                    let id = format!("inst-{t}-{i}");
+                    r.remember(PersistedProcess {
+                        instance_id: id.clone(),
+                        pid: 10_000 + t * 100 + i,
+                        port: 3000,
+                        started_at_ms: 0,
+                        exe_path: "x".into(),
+                    });
+                    r.forget(&id);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(
+            reg.snapshot().is_empty(),
+            "all churned rows are gone from memory"
+        );
+        let reloaded = Registry::default();
+        reloaded.bind(path);
+        assert!(
+            reloaded.snapshot().is_empty(),
+            "…and the disk agrees — no stale snapshot resurrected a forgotten row"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The survivor half of R4: rows registered by racing threads must ALL
+    /// be on disk afterwards, because every commit writes a snapshot taken
+    /// under the same lock it mutated.
+    #[test]
+    fn concurrent_registers_all_reach_the_disk() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("phl-reg-race2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("processes.json");
+        let reg = Arc::new(Registry::default());
+        reg.bind(path.clone());
+
+        let mut handles = Vec::new();
+        for t in 0..4u32 {
+            let r = Arc::clone(&reg);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..40u32 {
+                    r.remember(PersistedProcess {
+                        instance_id: format!("live-{t}-{i}"),
+                        pid: 20_000 + t * 100 + i,
+                        port: 3000,
+                        started_at_ms: 0,
+                        exe_path: "x".into(),
+                    });
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let reloaded = Registry::default();
+        reloaded.bind(path);
+        assert_eq!(
+            reloaded.snapshot().len(),
+            160,
+            "every concurrent registration is on disk"
+        );
+        assert_eq!(reg.snapshot().len(), reloaded.snapshot().len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temp name is per commit, so a write that outlives its own rename
+    /// failure cannot be picked up by a later commit's rename.
+    #[test]
+    fn a_failed_rename_leaves_no_stale_tmp_behind() {
+        let dir = std::env::temp_dir().join(format!("phl-reg-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("processes.json");
+        let reg = Registry::default();
+        reg.bind(path.clone());
+        reg.remember(rec(1111));
+        // The committed file exists; no `.tmp` residue survived the rename.
+        assert!(path.exists());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "temp files must not linger: {left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

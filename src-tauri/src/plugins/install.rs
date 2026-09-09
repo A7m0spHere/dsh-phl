@@ -11,7 +11,12 @@ use base64::Engine;
 use tauri::ipc::Channel;
 use tauri::State;
 
-use super::cordis::{patch_path, register_cordis_patch, set_plugin_disabled};
+#[cfg(test)]
+use super::cordis::patch_path;
+use super::cordis::{
+    plugin_registration_state, register_cordis_patch, restore_plugin_registration_state,
+    set_plugin_disabled,
+};
 use super::resolve::{registry_id_of, resolve_source, sanitize_pkg_path};
 use super::{
     cancelled, compute_trust, sanitize_cache_name, source_kind, PluginInstallOutcome,
@@ -101,6 +106,9 @@ async fn run_plugin_install(
     let registry_id = registry_id_of(source);
     let registry_id = sanitize_pkg_path(&registry_id)?;
 
+    // Local recovery must work even when the registry or network is offline.
+    recover_profile_transaction(instance_root).await?;
+
     task.set_phase("resolving");
     let resolved = resolve_source(source, requested_version, registry_base, on_progress).await?;
     if cancelled(flag) {
@@ -158,14 +166,8 @@ async fn run_plugin_install(
     // Unpack into a staging dir, then move into node_modules/<registry_id>.
     let node_modules = instance_root.join("node_modules");
     let staging = node_modules.join(format!(".phl-tmp-{}", sanitize_cache_name(&registry_id)));
-    let backup = node_modules.join(format!(".phl-old-{}", sanitize_cache_name(&registry_id)));
     let dest = node_modules.join(&registry_id);
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-
-    // Whether the swap put a previous copy into `backup`. Read from disk
-    // before the swap; kept in scope so the commit phase below can undo it.
-    let had_previous = dest.exists();
 
     task.set_phase("extracting");
     let install_result = async {
@@ -186,24 +188,26 @@ async fn run_plugin_install(
                 .await
                 .map_err(|e| format!("无法创建插件目录: {e}"))?;
         }
-        // Only now is there something to put in place. An install over an
-        // existing plugin is an *update*, and a failed or cancelled extract
-        // must leave the previous copy alone — the instance record still
-        // points at it, and cordis.patch.yml still references it.
-        let swapped_away = had_previous && tokio::fs::rename(&dest, &backup).await.is_ok();
-        match tokio::fs::rename(&staging, &dest).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if swapped_away {
-                    let _ = tokio::fs::rename(&backup, &dest).await;
-                }
-                Err(format!("无法放置插件目录: {e}"))
-            }
+        begin_transaction(instance_root, &registry_id).await?;
+        let backup = transaction_dir(instance_root).join("backup");
+        if dest.exists() {
+            tokio::fs::rename(&dest, &backup)
+                .await
+                .map_err(|e| format!("无法备份旧插件: {e}"))?;
         }
+        tokio::fs::rename(&staging, &dest)
+            .await
+            .map_err(|e| format!("无法放置插件目录: {e}"))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&staging).await;
-    install_result?;
+    if let Err(e) = install_result {
+        let recovery = recover_profile_transaction(instance_root).await;
+        return Err(match recovery {
+            Ok(()) => e,
+            Err(r) => format!("{e}；恢复未完成: {r}"),
+        });
+    }
 
     let trust = compute_trust(source, &resolved);
     if trust == "unverified" {
@@ -245,28 +249,25 @@ async fn run_plugin_install(
     // backup and the pre-commit patch file are kept until every step below
     // has succeeded; a failure rolls both back.
     task.set_phase("committing");
-    let patch_before = tokio::fs::read(patch_path(instance_root)).await.ok();
-    if let Err(e) = commit_install(dest.as_path(), &marker, instance_root, &registry_id).await {
-        let recovery = rollback_install(
-            instance_root,
-            &node_modules,
-            &dest,
-            &backup,
-            patch_before.as_deref(),
-            had_previous,
-        )
-        .await
-        .map(|()| "已恢复原来的插件".to_string())
-        .unwrap_or_else(|_| {
-            format!(
-                "恢复未完成，旧版本保留在 {}，请重试或手动处理",
-                backup.display()
-            )
-        });
+    let commit_result = async {
+        commit_install(dest.as_path(), &marker, instance_root, &registry_id).await?;
+        mark_transaction_committed(instance_root).await
+    }
+    .await;
+    if let Err(e) = commit_result {
+        let recovery = recover_profile_transaction(instance_root)
+            .await
+            .map(|()| "已恢复原来的插件".to_string())
+            .unwrap_or_else(|_| {
+                format!(
+                    "恢复未完成，旧版本保留在 {}，请重试或手动处理",
+                    transaction_dir(instance_root).display()
+                )
+            });
         let _ = tokio::fs::remove_file(&part_path).await;
         return Err(format!("安装提交失败，{recovery}：{e}"));
     }
-    let _ = tokio::fs::remove_dir_all(&backup).await;
+    recover_profile_transaction(instance_root).await?;
     let _ = tokio::fs::remove_file(&part_path).await;
 
     Ok(PluginInstallOutcome {
@@ -409,6 +410,7 @@ fn stderr_tail(bytes: &[u8]) -> String {
 /// is attempted even when the previous one failed; if the backup could not
 /// be restored, it is left in place rather than deleted — a recoverable
 /// `.phl-old-*` directory beats a silently lost previous version.
+#[cfg(test)]
 async fn rollback_install(
     instance_root: &Path,
     node_modules: &Path,
@@ -449,6 +451,265 @@ async fn rollback_install(
         }
     }
     outcome
+}
+
+const TRANSACTION_DIR: &str = ".phl-plugin-txn";
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+enum TransactionPhase {
+    Prepared,
+    RollingBack,
+    Committed,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PluginTransaction {
+    version: u32,
+    registry_id: String,
+    had_previous: bool,
+    /// None = not registered; Some(true) = registered and disabled.
+    registration_before: Option<bool>,
+    phase: TransactionPhase,
+}
+
+fn transaction_dir(profile: &Path) -> std::path::PathBuf {
+    profile.join(TRANSACTION_DIR)
+}
+
+async fn save_transaction(profile: &Path, transaction: &PluginTransaction) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let dir = transaction_dir(profile);
+    let tmp = dir.join("journal.json.tmp");
+    let bytes = serde_json::to_vec(transaction).map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+    file.sync_all().await.map_err(|e| e.to_string())?;
+    drop(file);
+    tokio::fs::rename(&tmp, dir.join("journal.json"))
+        .await
+        .map_err(|e| format!("无法保存插件事务: {e}"))
+}
+
+async fn read_transaction(profile: &Path) -> Result<PluginTransaction, String> {
+    let raw = tokio::fs::read(transaction_dir(profile).join("journal.json"))
+        .await
+        .map_err(|e| format!("无法读取插件事务，已保留备份: {e}"))?;
+    let transaction: PluginTransaction =
+        serde_json::from_slice(&raw).map_err(|e| format!("插件事务损坏，已保留备份: {e}"))?;
+    if transaction.version != 1 || sanitize_pkg_path(&transaction.registry_id).is_err() {
+        return Err("不支持的插件事务，已保留备份".into());
+    }
+    Ok(transaction)
+}
+
+async fn begin_transaction(profile: &Path, registry_id: &str) -> Result<(), String> {
+    let registration_before = plugin_registration_state(profile, registry_id).await?;
+    let dir = transaction_dir(profile);
+    tokio::fs::create_dir(&dir)
+        .await
+        .map_err(|e| format!("无法创建插件事务目录: {e}"))?;
+    let transaction = PluginTransaction {
+        version: 1,
+        registry_id: registry_id.to_owned(),
+        had_previous: profile.join("node_modules").join(registry_id).exists(),
+        registration_before,
+        phase: TransactionPhase::Prepared,
+    };
+    // No package or patch mutation is permitted before this save succeeds.
+    save_transaction(profile, &transaction).await
+}
+
+async fn mark_transaction_committed(profile: &Path) -> Result<(), String> {
+    let mut transaction = read_transaction(profile).await?;
+    transaction.phase = TransactionPhase::Committed;
+    save_transaction(profile, &transaction).await
+}
+
+async fn remove_tree_if_present(path: &Path) -> Result<(), String> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("无法清理 {}，恢复记录已保留: {e}", path.display())),
+    }
+}
+
+async fn finish_transaction(profile: &Path) -> Result<(), String> {
+    let dir = transaction_dir(profile);
+    // The journal is deleted last. Interrupted cleanup can never leave the
+    // only backup with no record explaining who owns it and whether committed.
+    remove_tree_if_present(&dir.join("backup")).await?;
+    remove_tree_if_present(&dir.join("reject")).await?;
+    match tokio::fs::remove_file(dir.join("journal.json.tmp")).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    tokio::fs::remove_file(dir.join("journal.json"))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::remove_dir(&dir).await.map_err(|e| e.to_string())
+}
+
+/// Must run under the instance resource lock, before any plugin mutation.
+/// Recovery touches only this plugin's registration/disabled flag; another
+/// plugin's settings, including edits made while PHL was stopped, survive.
+pub(crate) async fn recover_profile_transaction(profile: &Path) -> Result<(), String> {
+    let dir = transaction_dir(profile);
+    if dir.exists() {
+        crate::paths::ensure_under_root(profile, &dir)?;
+        if !dir.join("journal.json").exists() {
+            // A crash before the first journal commit cannot have moved a
+            // package. Likewise final cleanup may have removed only journal.
+            if dir.join("backup").exists() || dir.join("reject").exists() {
+                return Err(format!(
+                    "插件事务缺少记录，已保留 {}，请手动恢复",
+                    dir.display()
+                ));
+            }
+            remove_tree_if_present(&dir).await?;
+        } else {
+            let mut transaction = read_transaction(profile).await?;
+            let nm = profile.join("node_modules");
+            let dest = nm.join(&transaction.registry_id);
+            crate::paths::ensure_under_root(&nm, &dest)?;
+            let backup = dir.join("backup");
+            if transaction.phase == TransactionPhase::Committed {
+                if !dest.is_dir() {
+                    return Err("已提交插件的目录缺失，保留事务与备份，请手动恢复".into());
+                }
+                finish_transaction(profile).await?;
+            } else {
+                // Persist BEFORE touching either copy. After a recovery crash,
+                // backup absent + previous=true means the old dest is already
+                // back (or the original swap never started): never delete it.
+                if transaction.phase != TransactionPhase::RollingBack {
+                    transaction.phase = TransactionPhase::RollingBack;
+                    save_transaction(profile, &transaction).await?;
+                }
+                if transaction.had_previous {
+                    if backup.exists() {
+                        if dest.exists() {
+                            remove_tree_if_present(&dir.join("reject")).await?;
+                            tokio::fs::rename(&dest, dir.join("reject"))
+                                .await
+                                .map_err(|e| format!("无法移开未提交插件: {e}"))?;
+                        }
+                        tokio::fs::rename(&backup, &dest)
+                            .await
+                            .map_err(|e| format!("无法恢复旧插件，备份已保留: {e}"))?;
+                    } else if !dest.is_dir() {
+                        return Err("旧插件及其备份均缺失，保留事务待手动恢复".into());
+                    }
+                } else {
+                    remove_tree_if_present(&dest).await?;
+                }
+                restore_plugin_registration_state(
+                    profile,
+                    &transaction.registry_id,
+                    transaction.registration_before,
+                )
+                .await?;
+                finish_transaction(profile).await?;
+            }
+        }
+    }
+    recover_legacy_backups(profile).await
+}
+
+async fn recover_legacy_backups(profile: &Path) -> Result<(), String> {
+    let nm = profile.join("node_modules");
+    let mut entries = match tokio::fs::read_dir(&nm).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(flat) = name.strip_prefix(".phl-old-") else {
+            continue;
+        };
+        let backup = entry.path();
+        crate::paths::ensure_under_root(&nm, &backup)?;
+        let mut registry_id = None;
+        for (file, field) in [("phl-plugin.json", "registryId"), ("package.json", "name")] {
+            if let Ok(raw) = tokio::fs::read(backup.join(file)).await {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                    if let Some(id) = value.get(field).and_then(|v| v.as_str()) {
+                        if sanitize_pkg_path(id).is_ok() && sanitize_cache_name(id) == flat {
+                            registry_id = Some(id.to_owned());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let id = registry_id.ok_or_else(|| {
+            format!(
+                "无法确认旧插件备份 {} 的归属，已保留，请手动恢复",
+                backup.display()
+            )
+        })?;
+        let dest = nm.join(&id);
+        crate::paths::ensure_under_root(&nm, &dest)?;
+        recover_interrupted_swap(&nm, &dest, &backup).await?;
+    }
+    Ok(())
+}
+
+/// Reconcile legacy residue without trusting the package's early marker.
+/// The old enabled flag was never persisted by that format, so keep its
+/// current Cordis state; recover the old package conservatively.
+///
+/// A backup always wins over a landing copy: old package markers were
+/// written before dependencies and Cordis, and cannot prove a commit.
+async fn recover_interrupted_swap(
+    node_modules: &Path,
+    dest: &Path,
+    backup: &Path,
+) -> Result<(), String> {
+    if !backup.exists() {
+        return Ok(());
+    }
+    if !dest.exists() {
+        return match tokio::fs::rename(backup, dest).await {
+            Ok(()) => {
+                eprintln!(
+                    "[phl] 检测到中断的插件升级，已将旧版本放回 {}",
+                    dest.display()
+                );
+                Ok(())
+            }
+            Err(e) => Err(format!(
+                "存在旧插件备份 {} 但无法放回 {}：{e}（请重试；备份不会被删除）",
+                backup.display(),
+                dest.display()
+            )),
+        };
+    }
+    // The uncommitted landing copy cannot be trusted over the backup.
+    let aside = node_modules.join(".phl-interrupted");
+    let _ = tokio::fs::remove_dir_all(&aside).await;
+    tokio::fs::rename(dest, &aside).await.map_err(|e| {
+        format!(
+            "检测到未提交的插件升级残留 {} 但无法移开：{e}（请重试）",
+            dest.display()
+        )
+    })?;
+    if let Err(e) = tokio::fs::rename(backup, dest).await {
+        // Put the reject back rather than leave `dest` empty; the backup
+        // survives, so a retry re-observes exactly this state.
+        let _ = tokio::fs::rename(&aside, dest).await;
+        return Err(format!(
+            "旧插件备份 {} 无法放回 {}：{e}（请重试）",
+            backup.display(),
+            dest.display()
+        ));
+    }
+    let _ = tokio::fs::remove_dir_all(&aside).await;
+    eprintln!("[phl] 检测到未提交的插件升级，已恢复旧版本并丢弃未提交的新包");
+    Ok(())
 }
 
 /* ------------------------------ tests ------------------------------ */
@@ -581,6 +842,354 @@ mod tests {
         .expect("fresh-install rollback should fully clean up");
         assert!(!f["dest"].exists());
         assert!(!patch_path(&f["instance"]).exists());
+    }
+
+    /* ------------------- interrupted-swap recovery (R2) ------------------- */
+
+    async fn transaction_fixture(tag: &str, previous: bool) -> std::path::PathBuf {
+        let profile = temp_root(tag);
+        let dest = profile.join("node_modules/dsh-foo");
+        std::fs::create_dir_all(profile.join("node_modules")).unwrap();
+        if previous {
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::write(dest.join("old.js"), "complete old package").unwrap();
+            register_cordis_patch(&profile, "dsh-foo", Some(true))
+                .await
+                .unwrap();
+        }
+        begin_transaction(&profile, "dsh-foo").await.unwrap();
+        profile
+    }
+
+    fn simulate_landing(profile: &Path, previous: bool) {
+        let dest = profile.join("node_modules/dsh-foo");
+        if previous {
+            std::fs::rename(&dest, transaction_dir(profile).join("backup")).unwrap();
+        }
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("new.js"), "new package").unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_every_precommit_cut_restores_old_package_and_disabled_state() {
+        // 0: journal only; 1: old renamed; 2: new landed; 3: early marker;
+        // 4: Cordis was enabled but final commit was not durably recorded.
+        for cut in 0..=4 {
+            let profile = transaction_fixture(&format!("txn-cut-{cut}"), true).await;
+            let dest = profile.join("node_modules/dsh-foo");
+            if cut >= 1 {
+                std::fs::rename(&dest, transaction_dir(&profile).join("backup")).unwrap();
+            }
+            if cut >= 2 {
+                std::fs::create_dir_all(&dest).unwrap();
+                std::fs::write(dest.join("new.js"), "incomplete dependencies").unwrap();
+            }
+            if cut >= 3 {
+                std::fs::write(dest.join("phl-plugin.json"), r#"{"version":"2.0.0"}"#).unwrap();
+            }
+            if cut >= 4 {
+                set_plugin_disabled(&profile, "dsh-foo", false)
+                    .await
+                    .unwrap();
+            }
+            // Another plugin edited while PHL was stopped must survive.
+            register_cordis_patch(&profile, "unrelated", Some(true))
+                .await
+                .unwrap();
+            recover_profile_transaction(&profile).await.unwrap();
+            recover_profile_transaction(&profile).await.unwrap();
+            assert!(dest.join("old.js").exists(), "cut {cut}");
+            assert!(!dest.join("new.js").exists(), "cut {cut}");
+            assert_eq!(
+                plugin_registration_state(&profile, "dsh-foo")
+                    .await
+                    .unwrap(),
+                Some(true)
+            );
+            assert_eq!(
+                plugin_registration_state(&profile, "unrelated")
+                    .await
+                    .unwrap(),
+                Some(true)
+            );
+            assert!(!transaction_dir(&profile).exists());
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_recovery_crash_after_old_restore_is_idempotent() {
+        let profile = transaction_fixture("txn-rollback-cut", true).await;
+        simulate_landing(&profile, true);
+        set_plugin_disabled(&profile, "dsh-foo", false)
+            .await
+            .unwrap();
+        let mut transaction = read_transaction(&profile).await.unwrap();
+        transaction.phase = TransactionPhase::RollingBack;
+        save_transaction(&profile, &transaction).await.unwrap();
+        let dir = transaction_dir(&profile);
+        let dest = profile.join("node_modules/dsh-foo");
+        std::fs::rename(&dest, dir.join("reject")).unwrap();
+        std::fs::rename(dir.join("backup"), &dest).unwrap();
+        // Re-enter after the old package was restored, but before patch restore.
+        recover_profile_transaction(&profile).await.unwrap();
+        assert!(dest.join("old.js").exists());
+        assert!(!dest.join("new.js").exists());
+        assert_eq!(
+            plugin_registration_state(&profile, "dsh-foo")
+                .await
+                .unwrap(),
+            Some(true)
+        );
+        assert!(!dir.exists());
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_only_final_commit_retires_old_backup() {
+        let profile = transaction_fixture("txn-committed", true).await;
+        simulate_landing(&profile, true);
+        let dest = profile.join("node_modules/dsh-foo");
+        std::fs::write(
+            dest.join("package.json"),
+            r#"{"name":"dsh-foo","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        commit_install(
+            &dest,
+            &serde_json::json!({"version":"2.0.0"}),
+            &profile,
+            "dsh-foo",
+        )
+        .await
+        .unwrap();
+        mark_transaction_committed(&profile).await.unwrap();
+        recover_profile_transaction(&profile).await.unwrap();
+        assert!(dest.join("new.js").exists());
+        assert!(!dest.join("old.js").exists());
+        assert_eq!(
+            plugin_registration_state(&profile, "dsh-foo")
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        assert!(!transaction_dir(&profile).exists());
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_failed_fresh_install_removes_only_its_registration() {
+        let profile = transaction_fixture("txn-fresh", false).await;
+        simulate_landing(&profile, false);
+        register_cordis_patch(&profile, "dsh-foo", None)
+            .await
+            .unwrap();
+        register_cordis_patch(&profile, "unrelated", Some(true))
+            .await
+            .unwrap();
+        recover_profile_transaction(&profile).await.unwrap();
+        assert!(!profile.join("node_modules/dsh-foo").exists());
+        assert_eq!(
+            plugin_registration_state(&profile, "dsh-foo")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            plugin_registration_state(&profile, "unrelated")
+                .await
+                .unwrap(),
+            Some(true)
+        );
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_patch_restore_failure_retains_journal_and_restored_old_package() {
+        let profile = transaction_fixture("txn-patch-failure", true).await;
+        simulate_landing(&profile, true);
+        std::fs::remove_file(patch_path(&profile)).unwrap();
+        std::fs::create_dir(patch_path(&profile)).unwrap();
+        assert!(recover_profile_transaction(&profile).await.is_err());
+        assert!(profile.join("node_modules/dsh-foo/old.js").exists());
+        assert_eq!(
+            read_transaction(&profile).await.unwrap().phase,
+            TransactionPhase::RollingBack
+        );
+        std::fs::remove_dir(patch_path(&profile)).unwrap();
+        recover_profile_transaction(&profile).await.unwrap();
+        assert_eq!(
+            plugin_registration_state(&profile, "dsh-foo")
+                .await
+                .unwrap(),
+            Some(true)
+        );
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_committed_cleanup_interruption_never_rolls_back_new_package() {
+        let profile = transaction_fixture("txn-cleanup-cut", true).await;
+        simulate_landing(&profile, true);
+        mark_transaction_committed(&profile).await.unwrap();
+        // A hard exit after backup cleanup but before journal removal.
+        std::fs::remove_dir_all(transaction_dir(&profile).join("backup")).unwrap();
+        recover_profile_transaction(&profile).await.unwrap();
+        assert!(profile.join("node_modules/dsh-foo/new.js").exists());
+        assert!(!transaction_dir(&profile).exists());
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_backup_without_identity_is_preserved_and_blocks_mutation() {
+        let f = fixture("legacy-unknown", true);
+        assert!(recover_profile_transaction(&f["instance"]).await.is_err());
+        assert!(f["backup"].join("old.js").exists());
+        assert!(f["dest"].join("new.js").exists());
+    }
+
+    /// The crash window this recovery exists for: the old copy was renamed to
+    /// `.phl-old-*` and the process died before the new package landed. The
+    /// retry must move the OLD copy back — the pre-fix code deleted the
+    /// backup here, and a then-failing install left no copy of the plugin.
+    #[tokio::test]
+    async fn interrupted_swap_restores_the_old_copy_when_dest_is_gone() {
+        // `true`: the old package sits in the backup. Then `dest` disappears
+        // — the state a crash between the two renames of the swap leaves.
+        let f = fixture("recover-missing", true);
+        std::fs::remove_dir_all(&f["dest"]).unwrap();
+        recover_interrupted_swap(&f["node_modules"], &f["dest"], &f["backup"])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(f["dest"].join("old.js")).unwrap(),
+            b"old code",
+            "the old package is back at its real path"
+        );
+        assert!(!f["backup"].exists(), "restored by rename, not deleted");
+    }
+
+    /// The new package landed but never committed (no marker): the backup is
+    /// the only trustworthy copy — restore it, and the uncommitted landing is
+    /// discarded only once the restore has succeeded.
+    #[tokio::test]
+    async fn uncommitted_landing_restores_the_old_copy_then_rejects_the_new() {
+        let f = fixture("recover-uncommitted", true);
+        recover_interrupted_swap(&f["node_modules"], &f["dest"], &f["backup"])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(f["dest"].join("old.js")).unwrap(),
+            b"old code"
+        );
+        assert!(
+            !f["dest"].join("new.js").exists(),
+            "the uncommitted copy is gone"
+        );
+        assert!(!f["backup"].exists());
+        assert!(
+            !f["node_modules"].join(".phl-interrupted").exists(),
+            "the reject is discarded only after the restore"
+        );
+    }
+
+    /// The legacy marker was written before dependencies and Cordis, so even
+    /// a valid marker cannot authorize discarding the only complete old copy.
+    #[tokio::test]
+    async fn legacy_marker_does_not_prove_commit_or_retire_backup() {
+        let f = fixture("recover-committed", true);
+        std::fs::write(f["dest"].join("phl-plugin.json"), r#"{"version":"2.0.0"}"#).unwrap();
+        recover_interrupted_swap(&f["node_modules"], &f["dest"], &f["backup"])
+            .await
+            .unwrap();
+        assert!(
+            f["dest"].join("old.js").exists(),
+            "an early marker cannot prove dependency and Cordis commit"
+        );
+        assert!(!f["dest"].join("new.js").exists());
+    }
+
+    /// A torn marker is NOT a commit — half-written JSON reads as
+    /// uncommitted, and the old copy wins until the retry commits cleanly.
+    #[tokio::test]
+    async fn a_torn_marker_does_not_count_as_committed() {
+        let f = fixture("recover-torn", true);
+        std::fs::write(f["dest"].join("phl-plugin.json"), b"{\"version\":\"2").unwrap();
+        recover_interrupted_swap(&f["node_modules"], &f["dest"], &f["backup"])
+            .await
+            .unwrap();
+        assert!(f["dest"].join("old.js").exists());
+        assert!(!f["dest"].join("new.js").exists());
+    }
+
+    /// No residue at all: recovery is inert, the normal swap applies.
+    #[tokio::test]
+    async fn no_backup_leaves_nothing_to_recover() {
+        let f = fixture("recover-none", false);
+        recover_interrupted_swap(&f["node_modules"], &f["dest"], &f["backup"])
+            .await
+            .unwrap();
+        assert!(f["dest"].join("new.js").exists());
+    }
+
+    /// A writable directory on a volume *other* than `%TEMP%`, or `None` on a
+    /// single-volume machine (then the cross-device rename cannot be proven
+    /// and the test skips — same convention as the storage undo tests).
+    fn other_volume_dir(tag: &str) -> Option<std::path::PathBuf> {
+        let temp = std::env::temp_dir();
+        let temp_prefix = temp.components().next()?;
+        for letter in b'C'..=b'Z' {
+            let root = std::path::PathBuf::from(format!("{}:\\", letter as char));
+            if !root.is_dir() || root.components().next() == Some(temp_prefix) {
+                continue;
+            }
+            let probe = root.join(format!("phl-plugin-{tag}-{}", std::process::id()));
+            if std::fs::create_dir_all(&probe).is_ok() {
+                return Some(probe);
+            }
+        }
+        None
+    }
+
+    /// The failure path of the restore itself: recovery never trades the only
+    /// old copy for an error. The backup lives on a different volume, so the
+    /// `dest` landing rename fails exactly as it would for a wedged disk
+    /// (EXDEV / ERROR_NOT_SAME_DEVICE) — the old copy must survive untouched.
+    #[tokio::test]
+    async fn a_blocked_restore_keeps_the_backup_and_reports() {
+        let f = fixture("recover-xdev", true);
+        std::fs::remove_dir_all(&f["dest"]).unwrap();
+        let Some(other) = other_volume_dir("xdev") else {
+            eprintln!("[phl] 只有一个卷，跳过跨卷恢复失败测试");
+            return;
+        };
+        // Precondition stated, not assumed: a rename must genuinely fail
+        // between these two roots, otherwise the injection proves nothing.
+        let probe_src = f["node_modules"].join("xdev-probe");
+        std::fs::write(&probe_src, b"x").unwrap();
+        if std::fs::rename(&probe_src, other.join("xdev-probe")).is_ok() {
+            let _ = std::fs::rename(other.join("xdev-probe"), &probe_src);
+            let _ = std::fs::remove_file(&probe_src);
+            let _ = std::fs::remove_dir_all(&other);
+            eprintln!("[phl] 两个根之间可以重命名，跳过跨卷恢复失败测试");
+            return;
+        }
+        let _ = std::fs::remove_file(&probe_src);
+
+        let far_backup = other.join("dsh-far-backup");
+        std::fs::create_dir_all(&far_backup).unwrap();
+        std::fs::write(far_backup.join("old.js"), "old code").unwrap();
+        std::fs::remove_dir_all(&f["backup"]).unwrap();
+
+        let err = recover_interrupted_swap(&f["node_modules"], &f["dest"], &far_backup)
+            .await
+            .unwrap_err();
+        assert!(err.contains("放回"), "{err}");
+        assert!(
+            far_backup.join("old.js").exists(),
+            "the only copy of the old plugin survives the failed restore"
+        );
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     #[tokio::test]

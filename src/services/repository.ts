@@ -56,6 +56,25 @@ export class Cancelled extends Error {
   }
 }
 
+/**
+ * The launch was cancelled or timed out, but the backend could **not**
+ * confirm the DSH process exited, so it kept the instance registered (R3).
+ * Surfacing this as a distinct error — rather than a plain `Cancelled` — lets
+ * the store present the instance as running with a retryable stop entry
+ * instead of a stranded failed start. The backend tracks the real pid, so
+ * stop-by-instance-id still terminates it.
+ */
+export class KeptRunningError extends Error {
+  constructor(
+    public pid: number,
+    public port: number,
+    public detail: string,
+  ) {
+    super(detail)
+    this.name = 'KeptRunningError'
+  }
+}
+
 let transferSeq = 0
 
 /**

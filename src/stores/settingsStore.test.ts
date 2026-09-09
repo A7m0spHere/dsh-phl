@@ -56,4 +56,10 @@ describe('setRootVerified', () => {
     expect(mocks.setPhlRoot).not.toHaveBeenCalled()
     expect(useSettingsStore.getState().root).toBe('E:/PHL')
   })
+
+  it('mirrors an already committed backend root without issuing another root write', () => {
+    useSettingsStore.getState().setRoot('D:/PHL/')
+    expect(useSettingsStore.getState().root).toBe('D:/PHL')
+    expect(mocks.setPhlRoot).not.toHaveBeenCalled()
+  })
 })

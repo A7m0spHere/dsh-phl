@@ -1,8 +1,6 @@
 //! Storage-level operations on the whole data root: free-space queries and
-//! moving the root's data between drives. Like every other command, the root
-//! is always an explicit argument — Rust keeps no opinion about where PHL
-//! lives, so "moving" is copying trees plus the frontend re-pointing its
-//! per-call root afterwards.
+//! moving the root's data between drives. The backend commits the root
+//! pointer after data arrives; the frontend only mirrors that committed root.
 //!
 //! A migration is resumable, not a one-shot gamble. A journal file lives
 //! beside the root pointer (outside both roots, so neither the old nor the
@@ -11,7 +9,11 @@
 //! rows is the normal case the design assumes: a restart finds the journal,
 //! shows a resume/undo entry, and either re-runs from where the record says
 //! or rolls the half-copied directories back. The root pointer is only ever
-//! re-pointed after a fully committed migration.
+//! re-pointed after a fully committed migration — and the commit happens
+//! inside `move_root_data` itself: the pointer moves first, the journal goes
+//! with it (one `relocate_root`). A crash can therefore never find the data
+//! already relocated *and* the journal gone; the committed-journal-with-stale-
+//! pointer window is finished by 完成切换 (`storage_migration_finish`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,6 +121,15 @@ pub struct MoveSummary {
     pub moved: Vec<String>,
     pub bytes: u64,
     pub cancelled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveOutcome {
+    #[serde(flatten)]
+    summary: MoveSummary,
+    /// Only present after the durable pointer and in-memory root agree.
+    root: Option<String>,
 }
 
 /* ------------------------------ journal ------------------------------ */
@@ -458,9 +469,10 @@ pub async fn move_root_data(
     from: String,
     to: String,
     on_progress: Channel<MoveProgress>,
-) -> Result<MoveSummary, String> {
+) -> Result<MoveOutcome, String> {
     let flag = transfers.take(&transfer_id);
     let journal_path = phl.sibling_file(JOURNAL_NAME);
+    let phl = phl.shared();
     let result = crate::resources::guarded(
         transfer_id.clone(),
         "root-migration",
@@ -470,6 +482,9 @@ pub async fn move_root_data(
         &locks,
         &tasks,
         |task| async move {
+            if let Some(path) = journal_path.as_deref() {
+                retire_completed_migration(&phl, path, Path::new(&from), Path::new(&to))?;
+            }
             let r = move_root_inner(
                 &flag,
                 &task,
@@ -484,19 +499,130 @@ pub async fn move_root_data(
             if crate::versions::cancelled(&flag) {
                 return Err("cancelled".into());
             }
-            // A fully committed migration has served its purpose; only
-            // unfinished ones need to survive into the next boot.
-            if r.as_ref().is_ok_and(|s| !s.cancelled) {
-                if let Some(ref p) = journal_path {
-                    let _ = tokio::fs::remove_file(p).await;
-                }
-            }
-            r
+            // A committed migration is finished *here*: the root pointer is
+            // re-pointed at the new root inside this same DataRoot-guarded
+            // operation, and only then does the journal go (one
+            // `relocate_root`). Deleting the record before the pointer moves
+            // is the window where a crash strands the data at `to` with no
+            // recovery entry; committing both here closes it. A pointer
+            // commit that fails leaves the journal in place — already
+            // committed, so the next boot offers 完成切换 (see
+            // `storage_migration_finish`).
+            let summary = r?;
+            complete_move(&phl, journal_path.as_deref(), Path::new(&to), summary)
         },
     )
     .await;
     transfers.release(&transfer_id);
     result
+}
+
+fn same_location(a: &Path, b: &Path) -> bool {
+    let normalized = |p: &Path| {
+        crate::paths::strip_verbatim(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    };
+    let (a, b) = (normalized(a), normalized(b));
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+/// A journal deletion can fail after its root was committed. It is safe to
+/// retire that metadata for a new move only when both the authoritative root
+/// and the requested source are the previous destination. Never apply an old
+/// migration's successful summary to a different pair of directories.
+fn retire_completed_migration(
+    phl: &PhlState,
+    path: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<(), String> {
+    let Some(j) = read_journal(path)? else {
+        return Ok(());
+    };
+    if j.committed
+        && same_location(&phl.root(), Path::new(&j.to))
+        && same_location(from, &phl.root())
+        && !(same_location(from, Path::new(&j.from)) && same_location(to, Path::new(&j.to)))
+    {
+        std::fs::remove_file(path).map_err(|e| {
+            format!("上次迁移已完成，但迁移记录无法清理；请检查配置目录权限后重试: {e}")
+        })?;
+    }
+    Ok(())
+}
+
+fn complete_move(
+    phl: &PhlState,
+    journal_path: Option<&Path>,
+    to: &Path,
+    summary: MoveSummary,
+) -> Result<MoveOutcome, String> {
+    let root = if summary.cancelled {
+        None
+    } else {
+        let target = match journal_path {
+            Some(path) => {
+                let j = read_journal(path)?.ok_or("迁移记录缺失，无法确认目标目录")?;
+                if !j.committed || !same_location(Path::new(&j.to), to) {
+                    return Err("迁移记录与目标不一致，未切换数据目录".into());
+                }
+                PathBuf::from(j.to)
+            }
+            None => std::fs::canonicalize(to).map_err(|e| e.to_string())?,
+        };
+        Some(
+            phl.relocate_root(target, journal_path)?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    Ok(MoveOutcome { summary, root })
+}
+
+/// The finish step itself: the data of a committed migration is complete at
+/// `to`, only the pointer commit is missing. Takes the state by reference so
+/// it is testable without a Tauri `State`, and returns the adopted root.
+fn finish_committed_migration(phl: &PhlState, path: &Path) -> Result<String, String> {
+    let journal = read_journal(path)?.ok_or_else(|| "迁移记录不存在，无法确认".to_string())?;
+    if !journal.committed {
+        return Err("迁移尚未完成数据搬运，请继续迁移或撤销".into());
+    }
+    let to = phl.relocate_root(PathBuf::from(&journal.to), Some(path))?;
+    Ok(to.to_string_lossy().into_owned())
+}
+
+/// Finish a migration whose data fully arrived (committed journal) but whose
+/// root-pointer commit never happened — the narrow crash/failure window
+/// between the last directory landing and `move_root_data`'s own
+/// `relocate_root`. Re-pointing the pointer is the backend's job, so this
+/// runs the identical commit rather than trusting the UI to re-send a path.
+#[tauri::command]
+pub async fn storage_migration_finish(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
+    phl: State<'_, PhlState>,
+) -> Result<String, String> {
+    let Some(path) = phl.sibling_file(JOURNAL_NAME) else {
+        return Err("没有迁移记录可确认".into());
+    };
+    crate::resources::guarded(
+        crate::resources::next_task_id("root-migration-finish"),
+        "root-migration-finish",
+        "完成未确认的数据目录迁移",
+        vec![crate::resources::Resource::DataRoot],
+        None,
+        &locks,
+        &tasks,
+        move |_task| async move { finish_committed_migration(&phl, &path) },
+    )
+    .await
 }
 
 async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
@@ -538,7 +664,11 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
         None => None,
     };
     let mut journal = match existing {
-        Some(j) if j.committed => {
+        Some(j)
+            if j.committed
+                && same_location(Path::new(&j.from), &from)
+                && same_location(Path::new(&j.to), &to) =>
+        {
             let (moved, bytes) = j.moved_kinds();
             return Ok(MoveSummary {
                 moved,
@@ -546,7 +676,13 @@ async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
                 cancelled: false,
             });
         }
-        Some(j) if j.from == from.to_string_lossy() && j.to == to.to_string_lossy() => j,
+        Some(j)
+            if !j.committed
+                && same_location(Path::new(&j.from), &from)
+                && same_location(Path::new(&j.to), &to) =>
+        {
+            j
+        }
         Some(j) => {
             return Err(crate::errors::coded(
                 crate::errors::ErrCode::State,
@@ -1657,5 +1793,231 @@ mod tests {
         assert!(!result.cancelled);
         assert_eq!(result.moved, vec!["config"]);
         assert_eq!(result.bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn stale_committed_journal_cannot_report_a_different_move_as_success() {
+        let root = TestRoot::new();
+        let a = root.0.join("a");
+        let b = root.0.join("b");
+        let c = root.0.join("c");
+        let journal = root.0.join(JOURNAL_NAME);
+        std::fs::create_dir_all(a.join("config")).unwrap();
+        std::fs::write(a.join("config/sentinel"), b"preserved").unwrap();
+        move_with_journal(&no_cancel(), &journal, &a, &b)
+            .await
+            .unwrap();
+        let result = move_with_journal(&no_cancel(), &journal, &b, &c).await;
+        assert!(
+            result.is_err(),
+            "a stale A -> B journal must not report B -> C as complete"
+        );
+        assert!(b.join("config/sentinel").exists());
+        assert!(!c.join("config/sentinel").exists());
+        assert!(journal.exists());
+    }
+
+    #[tokio::test]
+    async fn a_finished_root_can_retire_its_journal_and_really_move_again() {
+        let root = TestRoot::new();
+        let a = root.0.join("a");
+        let b = root.0.join("b");
+        let c = root.0.join("c");
+        let journal = root.0.join(JOURNAL_NAME);
+        let state = PhlState::with_pointer(Some(root.0.join("root.json")));
+        std::fs::create_dir_all(a.join("config")).unwrap();
+        std::fs::write(a.join("config/sentinel"), b"preserved").unwrap();
+        move_with_journal(&no_cancel(), &journal, &a, &b)
+            .await
+            .unwrap();
+        // Commit the pointer while retaining the journal, as after a cleanup failure.
+        state.relocate_root(b.clone(), None).unwrap();
+        retire_completed_migration(&state, &journal, &b, &c).unwrap();
+        assert!(!journal.exists());
+        let summary = move_with_journal(&no_cancel(), &journal, &b, &c)
+            .await
+            .unwrap();
+        let outcome = complete_move(&state, Some(&journal), &c, summary).unwrap();
+        assert!(same_location(Path::new(outcome.root.as_ref().unwrap()), &c));
+        assert!(same_location(&state.root(), &c));
+        assert_eq!(
+            std::fs::read(c.join("config/sentinel")).unwrap(),
+            b"preserved"
+        );
+        assert!(!b.join("config").exists());
+        assert!(!journal.exists());
+    }
+
+    #[tokio::test]
+    async fn an_unadopted_completed_journal_cannot_be_retired_for_another_move() {
+        let root = TestRoot::new();
+        let a = root.0.join("a");
+        let b = root.0.join("b");
+        let c = root.0.join("c");
+        let journal = root.0.join(JOURNAL_NAME);
+        let state = PhlState::with_pointer(Some(root.0.join("root.json")));
+        std::fs::create_dir_all(a.join("config")).unwrap();
+        state.relocate_root(a.clone(), None).unwrap();
+        move_with_journal(&no_cancel(), &journal, &a, &b)
+            .await
+            .unwrap();
+        retire_completed_migration(&state, &journal, &b, &c).unwrap();
+        assert!(
+            journal.exists(),
+            "pointer must be adopted before retiring its recovery entry"
+        );
+        assert!(move_with_journal(&no_cancel(), &journal, &b, &c)
+            .await
+            .is_err());
+        let summary = MoveSummary {
+            moved: vec![],
+            bytes: 0,
+            cancelled: false,
+        };
+        assert!(complete_move(&state, Some(&journal), &c, summary).is_err());
+        assert!(same_location(&state.root(), &a));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn locked_completed_journal_blocks_the_next_move_without_losing_data() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = TestRoot::new();
+        let a = root.0.join("a");
+        let b = root.0.join("b");
+        let c = root.0.join("c");
+        let journal = root.0.join(JOURNAL_NAME);
+        let state = PhlState::with_pointer(Some(root.0.join("root.json")));
+        std::fs::create_dir_all(a.join("config")).unwrap();
+        std::fs::write(a.join("config/sentinel"), b"preserved").unwrap();
+        move_with_journal(&no_cancel(), &journal, &a, &b)
+            .await
+            .unwrap();
+        state.relocate_root(b.clone(), None).unwrap();
+        // Permit reads, deny delete-sharing: reproduce journal cleanup failure.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&journal)
+            .unwrap();
+        let err = retire_completed_migration(&state, &journal, &b, &c).unwrap_err();
+        assert!(err.contains("迁移记录无法清理"));
+        assert!(b.join("config/sentinel").exists());
+        assert!(!c.exists());
+        assert!(journal.exists());
+        drop(held);
+        retire_completed_migration(&state, &journal, &b, &c).unwrap();
+        assert!(!journal.exists());
+    }
+
+    #[test]
+    fn a_cancelled_move_does_not_return_or_commit_a_new_root() {
+        let root = TestRoot::new();
+        let pointer = root.0.join("root.json");
+        let state = PhlState::with_pointer(Some(pointer.clone()));
+        let summary = MoveSummary {
+            moved: vec![],
+            bytes: 0,
+            cancelled: true,
+        };
+        let outcome = complete_move(&state, None, &root.0.join("missing"), summary).unwrap();
+        assert!(outcome.root.is_none());
+        assert!(!pointer.exists());
+    }
+
+    /* ------------------------- R1: pointer + journal ------------------------- */
+
+    /// The relocation commit is one operation: the pointer names the new
+    /// root *and* the journal goes, so the state "data arrived, journal
+    /// deleted, pointer still old" — which used to be the wrapper's deletion
+    /// order and had no recovery entry — cannot be produced.
+    #[test]
+    fn relocate_root_moves_the_pointer_and_clears_the_journal_together() {
+        let dir = TestRoot::new();
+        let pointer = dir.0.join("state").join("root.json");
+        let journal_path = dir.0.join(JOURNAL_NAME);
+        let mut j = MigrationJournal::fresh(Path::new("C:\\old-root"), Path::new("C:\\new-root"));
+        j.set("config", EntryState::Moved, 1);
+        j.committed = true;
+        j.save(&journal_path).unwrap();
+
+        let state = PhlState::with_pointer(Some(pointer.clone()));
+        let adopted = state
+            .relocate_root(PathBuf::from(&j.to), Some(&journal_path))
+            .unwrap();
+        assert_eq!(adopted, PathBuf::from("C:\\new-root"));
+        assert_eq!(
+            std::fs::read_to_string(&pointer).unwrap(),
+            "C:\\new-root",
+            "the persisted pointer names the new root"
+        );
+        assert!(
+            !journal_path.exists(),
+            "the journal is cleared in the same commit"
+        );
+        let rebooted = PhlState::with_pointer(Some(pointer));
+        assert_eq!(
+            rebooted.root(),
+            PathBuf::from("C:\\new-root"),
+            "the next boot reads the new root"
+        );
+    }
+
+    /// When the commit fails, the order inside `relocate_root` matters: the
+    /// journal must SURVIVE an un-writable pointer — it is the recovery
+    /// entry (`storage_migration_finish`) for exactly this state.
+    #[test]
+    fn a_failed_pointer_commit_keeps_the_journal_and_the_old_root() {
+        let dir = TestRoot::new();
+        // A pointer whose parent is a *file* makes every write fail.
+        let blocker = dir.0.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let journal_path = dir.0.join(JOURNAL_NAME);
+        let mut j = MigrationJournal::fresh(Path::new("C:\\old-root"), Path::new("C:\\new-root"));
+        j.committed = true;
+        j.save(&journal_path).unwrap();
+
+        let state = PhlState::with_pointer(Some(blocker.join("root.json")));
+        assert!(state
+            .relocate_root(PathBuf::from(&j.to), Some(&journal_path))
+            .is_err());
+        assert!(
+            journal_path.exists(),
+            "the journal survives the failed commit — the restart keeps its entry"
+        );
+        assert_eq!(
+            state.root(),
+            crate::paths::default_root(),
+            "the in-memory root did not move on a failed commit"
+        );
+    }
+
+    #[test]
+    fn finish_only_adopts_a_committed_journal() {
+        let dir = TestRoot::new();
+        let pointer = dir.0.join("root.json");
+        let journal_path = dir.0.join(JOURNAL_NAME);
+
+        // An unfinished journal is refused, pointer untouched, journal kept.
+        let state = PhlState::with_pointer(Some(pointer.clone()));
+        let mut open =
+            MigrationJournal::fresh(Path::new("C:\\old-root"), Path::new("C:\\new-root"));
+        open.set("config", EntryState::Moved, 1);
+        open.save(&journal_path).unwrap();
+        assert!(finish_committed_migration(&state, &journal_path).is_err());
+        assert_eq!(state.root(), crate::paths::default_root());
+        assert!(journal_path.exists());
+
+        // A committed one adopts the journal's `to`, whatever the UI thinks.
+        let mut done = open.clone();
+        done.committed = true;
+        done.save(&journal_path).unwrap();
+        let adopted = finish_committed_migration(&state, &journal_path).unwrap();
+        assert_eq!(adopted, "C:\\new-root");
+        assert_eq!(state.root(), PathBuf::from("C:\\new-root"));
+        assert!(!journal_path.exists(), "finishing clears the journal");
+
+        // No journal left behind means there is nothing to confirm.
+        assert!(finish_committed_migration(&state, &journal_path).is_err());
     }
 }

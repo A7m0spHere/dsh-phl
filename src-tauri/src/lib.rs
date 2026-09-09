@@ -232,6 +232,7 @@ macro_rules! phl_command_handler {
             storage::move_root_data,
             storage::storage_migration_status,
             storage::storage_migration_undo,
+            storage::storage_migration_finish,
             repair::repair_instance,
             verify::verify_instance,
             diagnostics::run_diagnostics,
