@@ -101,7 +101,7 @@ async function installPlugin(
     })
     return { version: outcome.version, registryId: outcome.registryId }
   } catch (err) {
-    if (signal.aborted) throw new Cancelled()
+    if (parseThrownError(err).message === 'cancelled') throw new Cancelled()
     throw err instanceof Error ? err : new Error(String(err))
   } finally {
     signal.removeEventListener('abort', onAbort)

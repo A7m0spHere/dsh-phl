@@ -3,7 +3,7 @@
  *
  *   node scripts/restore-icon-snapshot.mjs crisp-20px-approved
  *
- * Snapshots live in src-tauri/icons/candidates/snapshots/<name>/ and are the
+ * Snapshots live in src-tauri/icons/snapshots/<name>/ and are the
  * byte-exact rollback path when a small-size experiment turns out worse.
  */
 import { copyFileSync, existsSync, readdirSync, statSync } from 'node:fs'

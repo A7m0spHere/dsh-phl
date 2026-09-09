@@ -61,7 +61,10 @@ pub async fn install_plugin(
         &locks,
         &tasks,
         |task| async move {
-            let r = run_plugin_install(
+            // The pipeline owns cancellation boundaries. A late cancel must
+            // not turn an already committed install or failed recovery into
+            // a false "cancelled" result.
+            run_plugin_install(
                 &flag,
                 &task,
                 &plugin_id,
@@ -71,14 +74,7 @@ pub async fn install_plugin(
                 &profile,
                 &on_progress,
             )
-            .await;
-            // A user abort must surface as `cancelled` regardless of which
-            // step noticed the flag first — the task registry maps that exact
-            // string to a cancellation, and anything else to a failure.
-            if cancelled(&flag) {
-                return Err("cancelled".into());
-            }
-            r
+            .await
         },
     )
     .await;

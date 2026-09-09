@@ -195,6 +195,7 @@ pub async fn launch_instance(
     let _held = locks
         .acquire(&[crate::resources::Resource::Instance(instance_id.clone())])
         .map_err(|e| crate::errors::coded(crate::errors::ErrCode::Busy, e.to_string()))?;
+    ensure_launch_available(&processes, &registry, &instance_id, probe_process)?;
     let cancel = launches.take(&transfer_id);
     let result = run_launch(
         &app,
@@ -218,6 +219,66 @@ pub async fn launch_instance(
     .await;
     launches.release(&transfer_id);
     result
+}
+
+/// The UI can be stale after an uncertain adoption or a failed cancellation.
+/// Check the registration under the instance lock before any startup writes:
+/// another spawn must not overwrite the handle of an unconfirmed process.
+fn ensure_launch_available(
+    processes: &Processes,
+    registry: &Registry,
+    id: &str,
+    probe: impl FnOnce(u32) -> registry::Probe,
+) -> Result<(), String> {
+    let record = registry.record_of(id);
+    let entry = processes.entry_of(id).or_else(|| {
+        record.as_ref().map(|r| ProcessEntry {
+            pid: r.pid,
+            port: r.port,
+        })
+    });
+    let Some(entry) = entry else { return Ok(()) };
+    let observed = probe(entry.pid);
+    let reused = observed.state == ProcessState::Alive
+        && record.as_ref().is_some_and(|r| {
+            r.pid == entry.pid
+                && matches!(
+                    decide(r, &observed),
+                    Adoption::Forget {
+                        keep_running: true,
+                        ..
+                    }
+                )
+                && observed.exe_path.is_some()
+                && observed.created_at_ms.is_some()
+        });
+    if observed.state == ProcessState::Exited || reused {
+        processes.remove_if_pid(id, entry.pid);
+        registry.forget_pid(id, entry.pid);
+        return Ok(());
+    }
+    // Also reserve a durable-only record so the kept-alive UI's stop action
+    // reaches this PID. stop_permission still refuses unknown identities.
+    processes.set(
+        id,
+        ProcessEntry {
+            pid: entry.pid,
+            port: entry.port,
+        },
+    );
+    Err(crate::errors::coded(
+        crate::errors::ErrCode::State,
+        format!(
+            "kept-alive {} {}：该实例仍有未退出或无法确认退出的进程登记，未重复启动；请先重试停止",
+            entry.pid, entry.port,
+        ),
+    ))
+}
+
+fn set_isolated_home(command: &mut tokio::process::Command, home: &Path) {
+    // Must run after all instance/provider environment injection. On Windows
+    // Command treats DSH_HOME and dsh_home as the same key.
+    command.env("DSH_HOME", home);
 }
 
 /// How long to wait for a force-killed process to be confirmed gone before
@@ -720,7 +781,7 @@ async fn run_launch(
     // except DSH_HOME: it IS the isolation boundary, and an instance env that
     // quietly redirected it would point the process into some other instance.
     for (key, value) in &env {
-        if key != "DSH_HOME" {
+        if !key.eq_ignore_ascii_case("DSH_HOME") {
             command.env(key, value);
         }
     }
@@ -743,6 +804,7 @@ async fn run_launch(
             }
         }
     }
+    set_isolated_home(&mut command, &dsh_home);
     command
         .current_dir(&workspace)
         .stdout(std::process::Stdio::from(
@@ -950,6 +1012,96 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::path::PathBuf;
+
+    #[test]
+    fn uncertain_or_live_registration_blocks_a_second_launch() {
+        for state in [ProcessState::Alive, ProcessState::Unknown] {
+            let processes = Processes::default();
+            let registry = Registry::default();
+            let rec = PersistedProcess {
+                instance_id: "inst".into(),
+                pid: 123,
+                port: 3099,
+                started_at_ms: 1000,
+                exe_path: "node.exe".into(),
+            };
+            registry.remember(rec.clone());
+            // Covers a durable record that boot could not adopt into memory.
+            let err = ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+                state,
+                exe_path: Some("node.exe".into()),
+                created_at_ms: Some(1000),
+            })
+            .unwrap_err();
+            assert!(err.contains("kept-alive 123 3099"));
+            assert_eq!(registry.record_of("inst").unwrap(), rec);
+            assert_eq!(
+                processes.entry_of("inst").unwrap().pid,
+                123,
+                "the retry-stop entry must reach the preserved record"
+            );
+            processes.set(
+                "inst",
+                ProcessEntry {
+                    pid: 123,
+                    port: 3099,
+                },
+            );
+            assert!(ensure_launch_available(&processes, &registry, "inst", |_| {
+                registry::Probe::default()
+            })
+            .is_err());
+            assert_eq!(processes.entry_of("inst").unwrap().pid, 123);
+            ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+                state: ProcessState::Exited,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(processes.entry_of("inst").is_none());
+            assert!(registry.record_of("inst").is_none());
+        }
+    }
+
+    #[test]
+    fn reused_registration_is_forgotten_without_touching_the_other_process() {
+        let processes = Processes::default();
+        let registry = Registry::default();
+        registry.remember(PersistedProcess {
+            instance_id: "inst".into(),
+            pid: 123,
+            port: 3099,
+            started_at_ms: 1000,
+            exe_path: "node.exe".into(),
+        });
+        ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
+            state: ProcessState::Alive,
+            exe_path: Some("unrelated.exe".into()),
+            created_at_ms: Some(2000),
+        })
+        .unwrap();
+        assert!(registry.record_of("inst").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn isolated_home_wins_over_instance_and_provider_case_variants() {
+        let mut command = tokio::process::Command::new("node");
+        command
+            .env("DSH_HOME", "initial")
+            .env("dsh_home", "other-instance")
+            .env("Dsh_Home", "provider-value");
+        set_isolated_home(&mut command, Path::new("C:/isolated-instance/dsh-home"));
+        let values: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("DSH_HOME"))
+            .collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0].1.unwrap(),
+            std::ffi::OsStr::new("C:/isolated-instance/dsh-home")
+        );
+    }
 
     #[tokio::test]
     async fn termination_faults_keep_rows_until_exit_is_observed() {

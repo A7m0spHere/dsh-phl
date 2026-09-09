@@ -4,7 +4,9 @@
 
 ## 1. 结论与产品方向
 
-2026-09-09 V1–V4 复验关闭：**上一轮点名的四项均已关闭（实现 + 覆盖失败时序的回归测试）；公开预览的剩余条件只剩真机与供应链检查，代码侧没有已知阻塞。** V1 插件安装改为真正的事务日志（.phl-plugin-txn/journal.json：包交换前落盘 Prepared，依赖 / Cordis / 启用状态全部成功后才持久化 Committed；恢复按 phase 放回旧包，旧格式残留走「备份优先」，早写的 marker 不再能证明提交）；V2 探测改为三值 Alive/Unknown/Exited，只有观测到退出才清登记；V3 move_root_inner 核对 journal 的 from/to，目的地不匹配的 committed 记录被拒绝，不再把旧的 A→B 摘要当成新迁移的成功；V4 保留进程交给 observe_child_exit（三处），退出后清登记并发一次通知，前端补了「退出事件早于启动错误」的竞态用例。门禁全绿：Rust workspace **346 项通过 / 0 失败 / 6 忽略**（桌面库 310）、前端 **88 项 / 14 文件**、bridge 无缺失。未完成的放行条件：真实断电/硬退出注入、干净 Windows 安装与首启卸载验收、cargo audit（工具未装）、以及在本轮修复之上重建安装包。详见 [V1–V4 复验记录](docs/preview-release-v-reverification-2026-09-09.md)。
+2026-09-09 接手复核与完善：确认 V1–V4 现有实现和回归有效，并补上后端拒绝重复启动未确认进程、迟到取消不得掩盖插件提交/恢复结果、最终固定 DSH_HOME 防止 Windows 大小写覆盖。最终 gate 全绿：前端 92 项，Rust 349 项通过 / 6 忽略。公开预览仍未放行：凭据/快照/WebUI 的其他历史问题以及真实安装验收未因本次四项修复而关闭。具体证据与产物记录见 [接手复核](docs/preview-release-v-reverification-2026-09-09.md)。
+
+2026-09-09 V1–V4 复验关闭：**上一轮点名的四项已覆盖到实现与失败时序回归，但这不代表全项目已无已知缺陷，公开预览仍为 NO-GO。** V1 使用独立插件事务日志，Prepared / RollingBack / Committed 决定恢复，早写的包 marker 不再证明提交；V2 区分 Alive/Unknown/Exited；V3 核对迁移 journal 的 from/to，前端只同步后端已提交的根；V4 保留 child 的持续退出监听并处理前端早到退出事件。该修复提交的原始基线为 Rust 346 通过 / 6 忽略、前端 88 通过。旧审查中的凭据覆盖、快照绑定与 WebUI 代次等问题仍需独立收口；真实桌面与干净 Windows 安装验收、Rust 依赖审计也尚未完成。接手后的增量完善与最终验证见 [V1–V4 复验记录](docs/preview-release-v-reverification-2026-09-09.md)。
 
 2026-09-09 修复审核验收：**未通过，公开预览仍为 NO-GO。** R4 并发旧快照覆盖已关闭，R1 原提交顺序已修复，但 R2 仍把提交第一步写入的插件 marker 当作完整提交、可能删除唯一旧包；R3 仍将进程查询失败视为退出，并缺少 kept-alive 后续监听。补充隔离回归实际复现插件旧包删除及残留 committed journal 导致下一次迁移假成功（2 项失败）。原有 gate 全绿（85 前端、331 Rust / 6 忽略）不覆盖这些失败场景。以下“R1–R4 已修复”是修复轮自报，验收以 [本轮复验报告](docs/preview-release-reacceptance-2026-09-09.md) 为准。
 
