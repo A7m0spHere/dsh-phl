@@ -334,16 +334,20 @@ pub(crate) fn recreate_link(dst: &Path, target: &Path, as_dir: bool) -> Result<(
     #[cfg(windows)]
     {
         if as_dir {
-            let junction = std::process::Command::new("cmd")
+            let mut command = std::process::Command::new("cmd");
+            command
                 .args(["/C", "mklink", "/J"])
                 .arg(dst)
                 .arg(target)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .stderr(std::process::Stdio::null());
+            // cmd.exe is a console program: without this it flashes a black
+            // window every time a clone recreates a directory link. This is
+            // already a windows-only block, so no second cfg gate is needed.
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
+            let junction = command.status().map(|s| s.success()).unwrap_or(false);
             if junction {
                 return Ok(());
             }

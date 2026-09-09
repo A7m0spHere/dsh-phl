@@ -190,6 +190,16 @@
     --c-accent-on: 220 20% 10%;
   }
 
+  /* ---------------- titlebar ----------------
+     Under this width the six tab labels no longer fit next to the window
+     controls; the controls are the part that must never be clipped, so the
+     labels step aside (the icons stay, with the tab still highlighted). */
+  @media (max-width: 860px) {
+    [data-titlebar-label] {
+      display: none;
+    }
+  }
+
   /* ---------------- density ---------------- */
   [data-density='compact'] {
     --row-h: 24px;

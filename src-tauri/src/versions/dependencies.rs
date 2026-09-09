@@ -53,10 +53,14 @@ pub(crate) fn find_npm_cli(node_program: &Path) -> Option<PathBuf> {
         // System node: `node` on PATH. Ask it where it actually lives —
         // once, on a blocking thread via the caller? this fn is sync and the
         // call is cheap next to an npm install.
-        let out = std::process::Command::new("node")
-            .args(["-p", "process.execPath"])
-            .output()
-            .ok()?;
+        let mut command = std::process::Command::new("node");
+        command.args(["-p", "process.execPath"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
+        }
+        let out = command.output().ok()?;
         if !out.status.success() {
             return None;
         }
