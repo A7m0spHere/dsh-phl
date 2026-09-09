@@ -88,6 +88,14 @@ src-tauri/target/release/bundle/nsis/PHL_<version>_x64-setup.exe   安装程序�
 npm run icon
 ```
 
+## 安装与安全提示
+
+从 Release 下载的安装包**尚未做代码签名**，浏览器与 SmartScreen 会提示「通常不会下载 …」——这是缺少签名与信誉，
+不是检测到病毒。点「保留」继续下载，**下载后先核对 SHA-256**（Release 附带同名 `.sha256`），
+运行时若出现「Windows 已保护你的电脑」，选「更多信息 → 仍要运行」。
+
+各签名方案的对比与 PHL 的候选路径见 [docs/code-signing.md](./docs/code-signing.md)。
+
 ## 桌面端形态
 
 - **无边框窗口** + 自绘标题栏：主导航、下载指示、主题切换与窗口按钮在同一条 44px 的栏里。
