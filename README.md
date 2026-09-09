@@ -1,10 +1,30 @@
-# dsh-phl / PHL
+# PHL · dsh-phl
 
-> **PHL — DSH Instance & Runtime Manager**
-> 一个独立实现的、PCL 风格的 DeepSeek Harness 实例与运行时管理器。
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="PHL —— 一台机器上并存多个互相隔离的 DSH 实例">
+</p>
 
-桌面端的实例、版本、运行时、插件、API 配置与进程管理已经是**真实实现**（Rust 管线，真实读写磁盘与启停进程）。
-浏览器模式（`npm run dev`）下一切数据来自 Mock Repository，方便纯 UI 开发。
+PHL 是 DeepSeek Harness 的**实例与运行时管理器**。它解决的问题很具体：一台机器上要同时用几个不同版本的 DSH，而每个版本的运行时、插件与配置又必须互不干扰。
+
+> 独立实现，与 DeepSeek 官方无隶属关系。产品模型与交互质量参考了 PCL、Prism Launcher、DSHBox 等成熟设计，代码与全部资源均为独立实现（见[实现边界](#参考与实现边界)）。
+
+## 真实界面
+
+<p align="center">
+  <img src="./assets/readme/app.png" width="100%" alt="PHL 桌面端「版本」页：真实拉取到的 DSH 版本列表，含标签、日期、大小与更新说明">
+</p>
+
+上面是桌面端的实际界面（`npm run app:dev`）。桌面端的数据来自 Rust 管线，会真实读写磁盘、真实下载与校验、真实拉起与终止进程；浏览器模式（`npm run dev`）下一切数据来自 Mock Repository，便于纯 UI 开发。
+
+## 一个实例是怎么起来的
+
+<p align="center">
+  <img src="./assets/readme/how-it-works.svg" width="100%" alt="流程图：版本目录、运行时目录与插件注册表汇入一个实例；实例持有独立的 DSH_HOME、固定的 web profile 与探测或自动分配的端口；随后以 dsh web --port 启动并打开 WebUI">
+</p>
+
+每个实例固定自己的 DSH 版本、Runtime 与插件：启动时以实例自己的 `DSH_HOME` 拉起 `dsh web --port`，端口探测或自动分配，停止即终止整棵进程树。
+
+## 哪些是真的
 
 | 模块 | 状态 |
 |---|---|
@@ -13,8 +33,6 @@
 | Instance Manager | ✅ 真实：磁盘上的 `instance.json`，重启不丢、删除即清理、插件列表由磁盘反推 |
 | Runtime Manager | ✅ 真实：nodejs.org dist 目录（支持 npmmirror 镜像），SHASUMS256 校验后解包 |
 | Process / Port、真实启动 | ✅ 真实：`dsh web --port` 启动、端口探测与自动分配、进程树终止、崩溃事件、启动日志 |
-
----
 
 ## 环境要求
 
@@ -64,7 +82,7 @@ src-tauri/target/release/bundle/nsis/PHL_<version>_x64-setup.exe   安装程序�
 
 安装程序装完会在开始菜单创建快捷方式；也可以直接把 `PHL.exe` 发送到桌面快捷方式。
 
-首次生成应用图标（已提交生成脚本，图标本身由脚本产出）：
+首次生成应用图标（母版已提交，图标由脚本产出）：
 
 ```bash
 npm run icon
@@ -193,3 +211,6 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 已全部真实接入，另有：数据目录迁移的断点日志（继续/撤销）、PHL 重启后对仍在运行进程的
 身份接管、后端资源互斥与任务中心。剩余：受管 Source Build 管线（路线图），以及持续的
 真机打磨。实例模板为静态产品内容（形状预设），不需要后端模块。
+
+当前为 alpha；公开预览尚未放行，放行条件与进度以
+[PHL_OPTIMIZATION_ROADMAP.md](./PHL_OPTIMIZATION_ROADMAP.md) 为准。
