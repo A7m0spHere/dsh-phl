@@ -92,5 +92,9 @@ jobs:
         with:
           # Alpha line publishes as prerelease until 0.1.0 proper.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # The install note comes first: GitHub prepends `body` to the
+          # generated changelog, so downloaders see why the browser warns and
+          # how to verify the hash before the commit list.
+          body_path: docs/install-note.md
           generate_release_notes: true
           files: dist-release/*
