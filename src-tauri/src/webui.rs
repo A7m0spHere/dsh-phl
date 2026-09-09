@@ -61,6 +61,13 @@ fn ensure_loopback(raw: &str) -> Result<Url, String> {
     }
 }
 
+/// Whether an existing window still points at the requested address. A window
+/// outlives the process it was opened for, so "the window exists" is never the
+/// same question as "the window is current".
+fn needs_renavigation(current: Option<&Url>, requested: &Url) -> bool {
+    current != Some(requested)
+}
+
 /* ------------------------------ commands ------------------------------- */
 
 /// Open (or focus) the embedded WebUI window for one instance. Idempotent by
@@ -83,6 +90,15 @@ pub async fn open_or_focus_webui(
     let label = label_of(&id);
 
     if let Some(window) = app.get_webview_window(&label) {
+        // The label identifies the instance, not the launch. A restart reuses
+        // the window for a new port and a new token, so focusing it without
+        // correcting the address would keep showing the previous session's
+        // URL — and its credentials (2026-09-09 review, P2).
+        if needs_renavigation(window.url().ok().as_ref(), &parsed) {
+            window
+                .navigate(parsed.clone())
+                .map_err(|e| format!("无法更新 WebUI 窗口地址: {e}"))?;
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -151,6 +167,18 @@ mod tests {
         // name — and the userinfo rule refuses it before the host is read.
         assert!(ensure_loopback("http://localhost@evil.example/").is_err());
         assert!(ensure_loopback("http://user:pw@127.0.0.1:3080/").is_err());
+    }
+
+    #[test]
+    fn a_restarted_instance_reuses_the_window_but_not_the_url() {
+        let old = ensure_loopback("http://127.0.0.1:3080/?token=old").unwrap();
+        let new = ensure_loopback("http://127.0.0.1:3099/?token=new").unwrap();
+        // Same address: focusing is enough.
+        assert!(!needs_renavigation(Some(&old), &old));
+        // New port and token after a restart: the window must be re-navigated.
+        assert!(needs_renavigation(Some(&old), &new));
+        // The window's address could not be read: treat it as stale.
+        assert!(needs_renavigation(None, &new));
     }
 
     #[test]

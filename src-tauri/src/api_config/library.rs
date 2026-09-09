@@ -83,6 +83,45 @@ fn migrate_stored_keys(
     Ok(migrated)
 }
 
+/// Puts the credential store back the way it was before this save touched it.
+///
+/// The store write has to happen before the file commit — a file that names a
+/// key the store does not hold is worse than a stale one — but the previous
+/// value must not be lost when that commit fails. Each entry is the previous
+/// secret, or `None` when the store could not be read and nothing can be put
+/// back. Returns the ids that could not be restored.
+fn restore_credentials(
+    creds: &dyn CredentialStore,
+    previous: &[(String, Option<Option<String>>)],
+) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (id, prev) in previous {
+        let ok = match prev {
+            Some(Some(secret)) => creds.set(id, secret).is_ok(),
+            Some(None) => creds.delete(id).is_ok(),
+            None => false,
+        };
+        if !ok {
+            failed.push(id.clone());
+        }
+    }
+    failed
+}
+
+/// The error text for a save that failed after the store may have been
+/// touched: name the providers whose key is now uncertain, so the user knows
+/// to type it again instead of trusting a message that says nothing changed.
+fn save_failure(what: &str, e: &str, unrestored: &[String]) -> String {
+    if unrestored.is_empty() {
+        format!("{what}，旧配置与凭据保持不变: {e}")
+    } else {
+        format!(
+            "{what}: {e}；以下供应商的密钥可能已被新值覆盖，请重新输入: {}",
+            unrestored.join("、")
+        )
+    }
+}
+
 #[tauri::command]
 pub async fn save_api_config(
     phl: State<'_, PhlState>,
@@ -127,10 +166,28 @@ pub(crate) async fn save_api_config_at(
 
     // Keys typed in the UI go to the credential store, never to disk. A
     // store failure must not fall back to writing plaintext: the save fails
-    // and the old file stands. The step is purely additive — an entry for a
-    // provider the old file does not know about is orphaned at worst.
-    let _migrated = migrate_stored_keys(&mut config, creds)
-        .map_err(|e| format!("无法将密钥写入系统凭据管理器，未保存: {e}"))?;
+    // and the old file stands. Before the store is touched, remember every
+    // secret this save replaces, so a later failure can put them back — the
+    // store step runs first, and "nothing changed" has to stay true.
+    let mut previous: Vec<(String, Option<Option<String>>)> = Vec::new();
+    for p in &config.providers {
+        let typed = p
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|k| !k.is_empty());
+        if typed {
+            previous.push((p.id.clone(), creds.get(&p.id).ok()));
+        }
+    }
+    if let Err(e) = migrate_stored_keys(&mut config, creds) {
+        let unrestored = restore_credentials(creds, &previous);
+        return Err(save_failure(
+            "无法将密钥写入系统凭据管理器，未保存",
+            &e,
+            &unrestored,
+        ));
+    }
 
     config.updated_at = crate::versions::now_iso();
     let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -143,12 +200,19 @@ pub(crate) async fn save_api_config_at(
     // not leave a half file that reads as "no config library". A failed
     // commit leaves the OLD file and every credential it references intact.
     let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, body)
-        .await
-        .map_err(|e| format!("API 配置写入失败，旧配置与凭据保持不变: {e}"))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| format!("API 配置写入失败，旧配置与凭据保持不变: {e}"))?;
+    let commit = async {
+        tokio::fs::write(&tmp, &body)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::rename(&tmp, path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+    if let Err(e) = commit {
+        let unrestored = restore_credentials(creds, &previous);
+        return Err(save_failure("API 配置写入失败", &e, &unrestored));
+    }
 
     // Cleanup phase: providers removed from the library take their
     // credentials with them — but only now that the removal is committed.
@@ -170,29 +234,37 @@ pub(crate) async fn save_api_config_at(
 mod tests {
     use super::*;
     use crate::api_config::Provider;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// Records every store operation so ordering assertions do not need the
-    /// real credential manager (and cannot touch it).
+    /// real credential manager (and cannot touch it), and holds the secrets so
+    /// a rollback can be asserted against real values.
     #[derive(Clone, Default)]
     struct FakeStore {
         ops: Arc<Mutex<Vec<String>>>,
         fail_set: Arc<Mutex<Vec<String>>>,
+        secrets: Arc<Mutex<HashMap<String, String>>>,
     }
 
     impl CredentialStore for FakeStore {
-        fn get(&self, _id: &str) -> Result<Option<String>, String> {
-            Ok(None) // the save path never reads
+        fn get(&self, id: &str) -> Result<Option<String>, String> {
+            Ok(self.secrets.lock().unwrap().get(id).cloned())
         }
-        fn set(&self, id: &str, _secret: &str) -> Result<(), String> {
+        fn set(&self, id: &str, secret: &str) -> Result<(), String> {
             self.ops.lock().unwrap().push(format!("set {id}"));
             if self.fail_set.lock().unwrap().iter().any(|f| f == id) {
                 return Err("fake store refusal".into());
             }
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), secret.to_string());
             Ok(())
         }
         fn delete(&self, id: &str) -> Result<(), String> {
             self.ops.lock().unwrap().push(format!("delete {id}"));
+            self.secrets.lock().unwrap().remove(id);
             Ok(())
         }
     }
@@ -275,6 +347,39 @@ mod tests {
         let stored: ApiConfig =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(stored.providers.len(), 1);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_puts_the_previous_key_back() {
+        // The store is written before the file commits, so a failed commit used
+        // to leave the OLD configuration pointing at the NEW secret while the
+        // error claimed nothing had changed (2026-09-09 review, P2).
+        let path = temp_path("key-rollback");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&config_with(&["kept"])).unwrap(),
+        )
+        .unwrap();
+        // A directory occupying the temp name makes the commit fail on every
+        // platform, and only after the store has already been written.
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let store = FakeStore::default();
+        store
+            .secrets
+            .lock()
+            .unwrap()
+            .insert("kept".into(), "sk-old".into());
+
+        let mut next = config_with(&["kept"]);
+        next.providers[0].api_key = Some("sk-new".into());
+        let err = save_api_config_at(&path, &store, next).await.unwrap_err();
+        assert!(err.contains("旧配置与凭据保持不变"), "{err}");
+        assert_eq!(
+            store.get("kept").unwrap().as_deref(),
+            Some("sk-old"),
+            "a failed commit must not leave the new key in the store"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
