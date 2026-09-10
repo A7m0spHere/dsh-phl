@@ -2,7 +2,7 @@
   "name": "dsh-phl",
   "private": true,
   "license": "MIT",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "type": "module",
   "description": "PHL — an independent, PCL-inspired instance & runtime manager for DeepSeek Harness",
   "scripts": {
