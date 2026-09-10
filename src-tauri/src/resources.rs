@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -241,6 +241,8 @@ impl Tasks {
             id,
             inner: self.inner.clone(),
             flag,
+            finished: Arc::new(AtomicBool::new(false)),
+            live: Arc::new(AtomicUsize::new(1)),
         })
     }
 
@@ -265,16 +267,41 @@ impl Tasks {
 }
 
 /// Clonable handle on one registry row; all clones update the same entry.
-/// A clone dropped while the row is still `Running` records it as failed —
-/// an operation that vanished mid-flight (panic, process exit) is never left
-/// displayed as still running. [`guarded`] deliberately calls `finish` after
-/// the body's clone drops, so a completed task's real outcome always wins
-/// over the transient abandon marker.
-#[derive(Clone)]
+/// The last handle dropping while the row is still `Running` records the task
+/// as failed — an operation that vanished mid-flight (panic, process exit) is
+/// never left displayed as still running. Intermediate clones never write
+/// that marker: bodies like `remove_tree_progress` hand a clone to
+/// `spawn_blocking`, and it drops on the pool thread while `guarded`'s
+/// continuation (which calls [`Task::finish`]) is merely queued — marking the
+/// row there made a task-centre poll in that window show a successful
+/// operation as "被中断". [`guarded`] still calls `finish` after the body's
+/// clone drops, so a real failure message always overwrites whatever the row
+/// held.
 pub struct Task {
     id: String,
     inner: Arc<Mutex<HashMap<String, TaskInfo>>>,
     flag: Option<Arc<AtomicBool>>,
+    /// Set by [`finish`] before it writes the row: a late drop of a clone
+    /// that outlived the outcome must never resurrect the abandon marker.
+    finished: Arc<AtomicBool>,
+    /// Live handles of this row; the abandon marker belongs to the last one.
+    /// Kept in sync by the manual [`Clone`] impl (`fetch_add` on clone,
+    /// `fetch_sub` on drop) — the derive cannot increment the counter, and
+    /// without that the first dropped clone would believe itself to be last.
+    live: Arc<AtomicUsize>,
+}
+
+impl Clone for Task {
+    fn clone(&self) -> Self {
+        self.live.fetch_add(1, Ordering::SeqCst);
+        Task {
+            id: self.id.clone(),
+            inner: self.inner.clone(),
+            flag: self.flag.clone(),
+            finished: self.finished.clone(),
+            live: self.live.clone(),
+        }
+    }
 }
 
 impl Task {
@@ -319,6 +346,9 @@ impl Task {
     /// either the flag or an explicit registry request), or Failed with the
     /// error message attached.
     pub fn finish(&self, outcome: Result<(), String>) {
+        // Mark completion before touching the registry: a later `Drop` of any
+        // clone (possibly on another thread) must skip the abandon marker.
+        self.finished.store(true, Ordering::SeqCst);
         // Read the external flag before locking the task map. Calling
         // `cancel_observed()` while holding `inner` would try to lock the same
         // non-reentrant mutex again now that that method also observes registry
@@ -361,6 +391,17 @@ impl Task {
 
 impl Drop for Task {
     fn drop(&mut self) {
+        // A task that already recorded its outcome is never abandoned,
+        // whoever drops a handle last (see the struct docs).
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        // Only the last handle can mean "the operation vanished": an
+        // intermediate clone dropping mid-run (e.g. one carried into
+        // `spawn_blocking`) must leave the row alone.
+        if self.live.fetch_sub(1, Ordering::SeqCst) > 1 {
+            return;
+        }
         if let Some(info) = self.inner.lock().expect("tasks").get_mut(&self.id) {
             if info.state == TaskState::Running {
                 info.state = TaskState::Failed;
@@ -635,6 +676,62 @@ mod tests {
         .await;
         assert!(out.is_err());
         assert_eq!(tasks.list()[0].state, TaskState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn an_early_clone_drop_never_shows_a_live_task_as_abandoned() {
+        // Regression: bodies like `remove_tree_progress` clone the handle into
+        // `spawn_blocking`, so the clone drops on a pool thread while the row
+        // is still `Running` — the moment the blocking call resolves, before
+        // `guarded` records the outcome. A task-centre poll landing in that
+        // window used to read the transient abandon marker and show a
+        // successful delete as "任务在执行中被中断".
+        let (locks, tasks) = (ResourceLocks::default(), Tasks::default());
+        let seen = tasks.clone();
+        guarded(
+            "t5".into(),
+            "version-remove",
+            "删除版本 0.1.5",
+            vec![Resource::Version("0.1.5".into())],
+            None,
+            &locks,
+            &tasks,
+            move |task| async move {
+                let detached = task.clone();
+                drop(detached);
+                let rows = seen.list();
+                assert_eq!(
+                    rows[0].state,
+                    TaskState::Running,
+                    "an in-flight task must never read as abandoned mid-run"
+                );
+                assert!(rows[0].error.is_none());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tasks.list()[0].state, TaskState::Done);
+    }
+
+    #[test]
+    fn a_handle_that_never_finished_still_reads_as_abandoned() {
+        // The panic/abort safety net must survive the fix above: a task that
+        // vanishes without `finish` is still recorded as failed.
+        let tasks = Tasks::default();
+        let task = tasks
+            .begin(
+                TaskInfo::new("t6".into(), "version-remove", "删除版本".into(), &[]),
+                None,
+            )
+            .unwrap();
+        drop(task);
+        let rows = tasks.list();
+        assert_eq!(rows[0].state, TaskState::Failed);
+        assert!(rows[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("被中断")));
     }
 
     #[test]

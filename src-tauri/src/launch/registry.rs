@@ -16,7 +16,7 @@
 //! The decision function is pure over an injected [`Probe`] so it can be
 //! unit-tested without spawning long-lived processes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -150,6 +150,14 @@ pub struct Registry {
 struct RegistryState {
     entries: HashMap<String, PersistedProcess>,
     path: Option<PathBuf>,
+    /// Instance ids this process has deliberately removed (a confirmed exit,
+    /// an adoption forget). Because a durable commit now *merges* the on-disk
+    /// table instead of snapshotting only this process's `entries`, these ids
+    /// are the ones the merge must strip from disk rather than let a stale
+    /// second PHL process's row re-materialise. Every id ever `remember`ed or
+    /// loaded in `bind` is implicitly "known live" (it is in `entries`) and
+    /// needs no tombstone; only removals do.
+    tombstones: HashSet<String>,
     /// Monotonic per-commit counter feeding the temp-file name: the lock
     /// already serializes writers, but a rename that fails could otherwise
     /// leave a file whose name the NEXT writer's rename would pick up — a
@@ -174,18 +182,35 @@ impl Registry {
 
     pub(crate) fn remember(&self, rec: PersistedProcess) {
         self.commit(|st| {
+            // Managing a live row supersedes any earlier forget of the same id
+            // in this process: a stop→start cycle tombstones then re-remembers,
+            // and the merge (entries insert first, tombstone removal second)
+            // would otherwise delete the freshly-live registration from disk.
+            st.tombstones.remove(&rec.instance_id);
             st.entries.insert(rec.instance_id.clone(), rec);
         });
     }
 
     pub(crate) fn forget(&self, instance_id: &str) {
-        self.commit_if(|st| st.entries.remove(instance_id).is_some());
+        self.commit_if(|st| {
+            // Only a row this process actually held becomes a tombstone. An
+            // id we never knew belongs to another PHL process sharing this
+            // root — removing it from disk would be the very corruption the
+            // merge exists to prevent.
+            if st.entries.remove(instance_id).is_some() {
+                st.tombstones.insert(instance_id.to_string());
+                true
+            } else {
+                false
+            }
+        });
     }
 
     pub(crate) fn forget_pid(&self, instance_id: &str, pid: u32) {
         self.commit_if(|st| {
             if st.entries.get(instance_id).is_some_and(|r| r.pid == pid) {
                 st.entries.remove(instance_id);
+                st.tombstones.insert(instance_id.to_string());
                 true
             } else {
                 false
@@ -246,12 +271,62 @@ impl Registry {
         }
     }
 
-    /// tmp+rename like every other durable record: a torn registry file must
-    /// not make all running children unmanageable. Unique temp name per
-    /// commit; both outcomes are reported by the caller.
+    /// Serialize and merge the durable registry across processes.
+    ///
+    /// The whole read-modify-write runs under an exclusive lock on a sidecar
+    /// `.lock` file, so two PHL processes sharing one data root can never
+    /// interleave and erase each other's rows. We read whatever is currently
+    /// on disk (which may hold registrations the *other* process made since
+    /// this one booted), layer our live rows over it, and drop only the ids we
+    /// ourselves removed (our tombstones). The result is swapped in with
+    /// tmp+rename as before — a torn registry file must not make every running
+    /// child unmanageable.
     fn persist_locked(st: &RegistryState) -> Result<(), String> {
+        use fs2::FileExt;
         let Some(path) = &st.path else { return Ok(()) };
-        let body = serde_json::to_string_pretty(&st.entries.values().collect::<Vec<_>>())
+        let lock_path = path.with_file_name(format!(
+            "{}.lock",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "registry".into())
+        ));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("打开登记锁文件失败: {e}"))?;
+        lock.lock_exclusive()
+            .map_err(|e| format!("锁定登记文件失败: {e}"))?;
+        // The lock is released when `lock` drops at the end of this scope
+        // (fs2 unlocks on `Drop`), so every early return below still unwinds
+        // the critical section — the merge never leaves the file wedged.
+        Self::merge_and_write(st, path)
+    }
+
+    /// The locked body: fold the on-disk rows, our live rows, and our
+    /// tombstones into the next snapshot and atomically replace `path`.
+    fn merge_and_write(st: &RegistryState, path: &Path) -> Result<(), String> {
+        // Start from what is on disk now — another process's live rows live
+        // here and must survive this commit.
+        let mut merged: HashMap<String, PersistedProcess> = match std::fs::read_to_string(path) {
+            Ok(raw) => serde_json::from_str::<Vec<PersistedProcess>>(&raw)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|rec| (rec.instance_id.clone(), rec))
+                .collect(),
+            // No file yet (first commit) or unreadable: fall back to our own
+            // view; a corrupt file is rebuilt from live state, not kept.
+            Err(_) => HashMap::new(),
+        };
+        for (id, rec) in &st.entries {
+            merged.insert(id.clone(), rec.clone());
+        }
+        for id in &st.tombstones {
+            merged.remove(id);
+        }
+        let body = serde_json::to_string_pretty(&merged.values().collect::<Vec<_>>())
             .map_err(|e| e.to_string())?;
         let tmp = path.with_file_name(format!(
             "{}.{}.{}.tmp",
@@ -639,6 +714,95 @@ mod tests {
             "every concurrent registration is on disk"
         );
         assert_eq!(reg.snapshot().len(), reloaded.snapshot().len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dual-launch fix at its boundary: a commit must not erase a row it
+    /// never knew about. Here registry "B" (a second PHL process sharing one
+    /// data root) writes a live child straight to disk after "A" booted; when
+    /// A next commits, the old whole-table snapshot would silently drop B's
+    /// row and strand that child unmanageable. With the read-modify-write
+    /// merge, B's registration survives — and A's own deliberate removal still
+    /// takes effect (its tombstones are not resurrected).
+    #[test]
+    fn a_commit_preserves_another_process_registration() {
+        let dir = std::env::temp_dir().join(format!("phl-reg-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("processes.json");
+
+        let a = Registry::default();
+        a.bind(path.clone());
+        a.remember(rec(1001)); // A's own child, instance "main"
+
+        // B boots on the same file, then registers a *different* child that A
+        // has never seen (simulating the other manager's live process).
+        let b = Registry::default();
+        b.bind(path.clone());
+        b.remember(PersistedProcess {
+            instance_id: "other".into(),
+            pid: 2002,
+            port: 3000,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+
+        // A commits again — must keep B's "other" row on disk.
+        a.remember(PersistedProcess {
+            instance_id: "main-two".into(),
+            pid: 1003,
+            port: 3001,
+            started_at_ms: 0,
+            exe_path: "x".into(),
+        });
+
+        let reloaded = Registry::default();
+        reloaded.bind(path.clone());
+        let snap = reloaded.snapshot();
+        let mut ids: Vec<&str> = snap.iter().map(|r| r.instance_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["main", "main-two", "other"],
+            "A's commit merged in B's foreign row instead of overwriting it"
+        );
+
+        // A forgets its own row: the merge must honour that tombstone and NOT
+        // resurrect "main" from a stale disk copy, while still leaving B's row.
+        a.forget("main");
+        let reloaded = Registry::default();
+        reloaded.bind(path);
+        let snap = reloaded.snapshot();
+        let ids: Vec<&str> = snap.iter().map(|r| r.instance_id.as_str()).collect();
+        assert!(ids.contains(&"other"), "B's row must survive A's forget");
+        assert!(!ids.contains(&"main"), "A's own tombstoned row stays gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stop→start case: a process that forgot a child and then manages it
+    /// again under the same id must end with that row ON disk. Without
+    /// `remember` clearing the stale tombstone, the merge (insert entries, then
+    /// remove tombstones) would delete the just-relaunched registration and the
+    /// next boot could not adopt the live child — the exact loss this whole
+    /// registry exists to prevent.
+    #[test]
+    fn remember_after_forget_clears_the_stale_tombstone() {
+        let dir = std::env::temp_dir().join(format!("phl-reg-resurrect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("processes.json");
+
+        let reg = Registry::default();
+        reg.bind(path.clone());
+        reg.remember(rec(1001)); // start
+        reg.forget("main"); // stop → tombstone
+        reg.remember(rec(2002)); // start again, same id
+
+        let reloaded = Registry::default();
+        reloaded.bind(path);
+        let rows = reloaded.snapshot();
+        assert_eq!(rows.len(), 1, "the relaunched child must be on disk");
+        assert_eq!(rows[0].pid, 2002);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
