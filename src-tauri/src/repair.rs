@@ -33,7 +33,7 @@ const LOCAL_ACTIONS: &[&str] = &["recreate-workspace", "recreate-skeleton", "cle
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResidueItem {
-    /// Which domain the leftover belongs to: `versions` | `runtimes` | `cache`.
+    /// Which domain the leftover belongs to: `versions` | `runtimes` | `instances` | `cache`.
     pub kind: String,
     pub path: String,
     /// Bytes, best-effort.
@@ -123,7 +123,26 @@ pub(crate) async fn scan_residue_with(
         }
     }
 
-    // 2. Legacy staging names from the pre-transactional installers.
+    // 2. Interrupted creates and pack installs: hidden staging trees that no
+    //    scanner lists (see `paths::is_hidden_tree_name`). Left unswept they
+    //    would be gigabytes of silently wasted disk; listed here they follow
+    //    the same grace rule as `.phl-txn` children — a create/pack install
+    //    still running owns its staging dir, so fresh items are reported
+    //    stale=false and never removed.
+    for path in staging_instance_dirs(root).await {
+        let probe = path.clone();
+        let size = tokio::task::spawn_blocking(move || crate::instances::dir_size(&probe))
+            .await
+            .unwrap_or(0);
+        out.push(ResidueItem {
+            kind: "instances".into(),
+            path: path.to_string_lossy().into_owned(),
+            size,
+            stale: is_stale(&path, cutoff),
+        });
+    }
+
+    // 3. Legacy staging names from the pre-transactional installers.
     let legacy_prefixes = [".phl-new-", ".phl-old-"];
     if let Ok(mut entries) = tokio::fs::read_dir(root.join("runtimes")).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -145,7 +164,7 @@ pub(crate) async fn scan_residue_with(
         }
     }
 
-    // 3. Orphaned `.part` download fragments: a finished or cancelled
+    // 4. Orphaned `.part` download fragments: a finished or cancelled
     // download always renames or removes them, so one left behind means PHL
     // died mid-download.
     if let Ok(mut entries) = tokio::fs::read_dir(root.join("cache")).await {
@@ -161,6 +180,48 @@ pub(crate) async fn scan_residue_with(
                 size: path.metadata().map(|m| m.len()).unwrap_or(0),
                 stale: is_stale(&path, cutoff),
             });
+        }
+    }
+    out
+}
+
+/// Every hidden staging tree an interrupted create/clone/pack-install or a
+/// crashed snapshot create can leave inside the `instances/` domain:
+/// `instances/.phl-new-*`, `instances/.phl-pack-*` and, per instance,
+/// `instances/<id>/snapshots/.phl-new-*`. These names have no recovery role
+/// (a retry's own `remove_dir_all(staging)` is their recovery path), unlike
+/// `.phl-restore` / `.phl-old-dsh-home` inside an instance dir — those are
+/// live restore-transaction state handled by
+/// `snapshot::recover_interrupted_restore` and deliberately stay out here.
+async fn staging_instance_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(root.join("instances")).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !path.is_dir() {
+            continue;
+        }
+        if name.starts_with(".phl-new-") || name.starts_with(".phl-pack-") {
+            out.push(path);
+            continue;
+        }
+        if name.starts_with('.') {
+            continue; // not ours to enumerate
+        }
+        let Ok(mut snaps) = tokio::fs::read_dir(path.join("snapshots")).await else {
+            continue;
+        };
+        while let Ok(Some(s)) = snaps.next_entry().await {
+            let sp = s.path();
+            let sname = sp.file_name().map(|n| n.to_string_lossy().into_owned());
+            if sp.is_dir() && sname.is_some_and(|n| n.starts_with(".phl-new-")) {
+                out.push(sp);
+            }
         }
     }
     out
@@ -292,6 +353,25 @@ pub(crate) async fn sweep_txn(root: &Path, cutoff: std::time::SystemTime) -> Res
                 .map_err(|e| format!("无法清理 {}: {e}", path.display()))?;
             removed += 1;
         }
+        // The transaction parent is a persistent empty shell once every tree
+        // inside it has been consumed — remove it best-effort. A non-empty
+        // parent (a fresh tree a running install still owns) fails harmlessly
+        // here and stays visible through the residue scan.
+        let _ = tokio::fs::remove_dir(&base).await;
+    }
+
+    // Hidden staging trees from interrupted creates, pack installs and
+    // snapshot copies: stale ones are safe to remove by construction (their
+    // owning transaction is over — a retry cleans them itself), fresh ones
+    // belong to a live install and survive the sweep.
+    for path in staging_instance_dirs(root).await {
+        if !is_stale(&path, cutoff) {
+            continue;
+        }
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|e| format!("无法清理 {}: {e}", path.display()))?;
+        removed += 1;
     }
     Ok(removed)
 }
@@ -501,6 +581,66 @@ mod tests {
         let residue = scan_residue_inner(&root).await.unwrap();
         assert!(residue.iter().any(|r| r.kind == "cache" && r.size == 128));
         assert!(residue.iter().any(|r| r.path.ends_with(".phl-old-node-22")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn interrupted_instance_staging_is_residue_and_sweepable() {
+        let root = temp_root("instance-staging");
+        let instances = root.join("instances");
+        // A create/clone that died between the manifest write and the
+        // promote rename, and a pack install staging tree.
+        let clone = instances.join(".phl-new-clone-9");
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(clone.join("instance.json"), "{}").unwrap();
+        let pack = instances.join(".phl-pack-inst-7");
+        std::fs::create_dir_all(&pack).unwrap();
+        // A snapshot create that died after its snapshot.json, still under the
+        // hidden staging name.
+        let snap = instances
+            .join("inst-1")
+            .join("snapshots")
+            .join(".phl-new-snap-5");
+        std::fs::create_dir_all(&snap).unwrap();
+        // Business objects that must survive every sweep: a healthy instance
+        // and a live restore transaction's backup tree *inside* an instance.
+        let healthy = instances.join("inst-2");
+        std::fs::create_dir_all(&healthy).unwrap();
+        std::fs::write(healthy.join("instance.json"), "{}").unwrap();
+        let backup = instances.join("inst-3").join(".phl-old-dsh-home");
+        std::fs::create_dir_all(&backup).unwrap();
+
+        let residue = scan_residue_inner(&root).await.unwrap();
+        for name in [".phl-new-clone-9", ".phl-pack-inst-7", ".phl-new-snap-5"] {
+            let item = residue
+                .iter()
+                .find(|r| r.path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name} must be reported as residue: {residue:?}"));
+            assert_eq!(item.kind, "instances");
+            assert!(!item.stale, "everything created now is fresh");
+        }
+        assert!(
+            !residue
+                .iter()
+                .any(|r| r.path.ends_with(".phl-old-dsh-home")),
+            "restore-transaction state carries recovery meaning and is not residue"
+        );
+        assert!(
+            !residue.iter().any(|r| r.path.ends_with("inst-2")),
+            "a healthy instance is never residue"
+        );
+
+        // The default (one-hour-ago) cutoff leaves every fresh tree alone...
+        cleanup_txn(&root).await.unwrap();
+        assert!(clone.exists() && pack.exists() && snap.exists());
+        // ...a future cutoff marks all stale: the sweep takes the three
+        // staging trees and nothing else.
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(sweep_txn(&root, future).await.unwrap(), 3);
+        assert!(!clone.exists() && !pack.exists() && !snap.exists());
+        assert!(healthy.exists());
+        assert!(backup.exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }

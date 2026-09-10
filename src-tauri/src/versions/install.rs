@@ -37,8 +37,10 @@ pub async fn list_installed_versions(
         // `.phl-*` names are transaction staging: an in-flight install writes
         // its marker into staging *before* promoting, and a detached removal
         // carries the old marker away under `.phl-REMOVE-*`. Neither is an
-        // installed version — listing them spawned phantom rows.
-        if entry.file_name().to_string_lossy().starts_with(".phl-") {
+        // installed version — listing them spawned phantom rows. Hidden names
+        // are excluded by construction everywhere (see `is_hidden_tree_name`);
+        // `.phl-` still guards against a future hidden-but-real layout.
+        if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         let installed_at = match read_marker(&path).await {

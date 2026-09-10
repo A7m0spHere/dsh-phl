@@ -20,6 +20,7 @@ use tauri::State;
 pub(crate) fn sanitize_segment(value: &str, label: &str) -> Result<String, String> {
     let ok = !value.is_empty()
         && value.len() <= 64
+        && !value.starts_with('.')
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -30,6 +31,23 @@ pub(crate) fn sanitize_segment(value: &str, label: &str) -> Result<String, Strin
     } else {
         Err(format!("非法的{label}: {value}"))
     }
+}
+
+/// The single rule for child entries of PHL's scan roots (`versions/`,
+/// `runtimes/`, `instances/`, `<instance>/snapshots/`, `node_modules`):
+/// a directory whose name starts with `.` is never a business object.
+///
+/// Every transaction staging name PHL writes starts with a dot —
+/// `.phl-txn`, `.phl-new-*`, `.phl-REMOVE-*`, `.phl-pack-*`, `.phl-restore`,
+/// `.phl-old-*`, `.phl-tmp-*`, `.phl-staging` — as does OS junk
+/// (`.DS_Store`, `Thumbs.db`). Every *completed* object name (`dsh-x.y.z`,
+/// `node-22`, `inst-…`, `snap-…`) does not. Scanners that skip hidden
+/// entries therefore exclude staging by construction, without having to
+/// enumerate prefixes — and a staging tree that carries a committed object's
+/// metadata (`snapshot.json`, `instance.json`, an install marker written
+/// before the promote-rename) can never be mistaken for the real thing.
+pub(crate) fn is_hidden_tree_name(name: &str) -> bool {
+    name.starts_with('.')
 }
 
 /* ----------------------------- containment ------------------------------ */

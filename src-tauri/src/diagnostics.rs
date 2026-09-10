@@ -197,8 +197,14 @@ async fn versions_check(root: &Path) -> DiagnosticItem {
         if !path.is_dir() || path.file_name().is_none() {
             continue;
         }
-        total += 1;
+        // Same hidden-name rule as the runtimes check below: `.phl-txn`
+        // (and any other staging or OS junk) is not an installed version,
+        // and counting it flagged a broken install that does not exist.
         let name = entry.file_name().to_string_lossy().into_owned();
+        if crate::paths::is_hidden_tree_name(&name) {
+            continue;
+        }
+        total += 1;
         if !path.join("phl-install.json").exists() {
             broken.push(format!("{name}（缺少安装标记）"));
         } else if !path.join("lib").join("bin.js").exists() {
@@ -250,9 +256,9 @@ async fn runtimes_check(root: &Path) -> DiagnosticItem {
         if !path.is_dir() {
             continue;
         }
-        // `.phl-*` 是安装暂存目录，不是已完成的 Runtime。
+        // `.phl-*` 是安装暂存目录，不是已完成的 Runtime（规则见 `paths::is_hidden_tree_name`）。
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        if crate::paths::is_hidden_tree_name(&name) {
             continue;
         }
         total += 1;
@@ -417,6 +423,36 @@ mod tests {
         let report = run_diagnostics_inner(&root).await.unwrap();
         assert_eq!(item(&report, "instance-refs").level, "warn");
         assert!(item(&report, "instance-refs").detail.contains("Demo"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn transaction_staging_is_never_counted_as_installed() {
+        let root = temp_root("staging");
+        // A real, complete version.
+        let version = root.join("versions/0.1.0");
+        std::fs::create_dir_all(version.join("lib")).unwrap();
+        std::fs::write(version.join("phl-install.json"), "{}").unwrap();
+        std::fs::write(version.join("lib/bin.js"), "// bin").unwrap();
+        // `.phl-txn` still holding staging trees from a running or crashed
+        // install, and a detached removal still carrying the *old* marker —
+        // neither may count as an installed version.
+        std::fs::create_dir_all(root.join("versions/.phl-txn/0.1.5.staging-1")).unwrap();
+        let stale = root.join("versions/.phl-REMOVE-0.1.2");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("phl-install.json"), "{}").unwrap();
+        // An empty hidden parent in runtimes must not look broken either.
+        std::fs::create_dir_all(root.join("runtimes/.phl-txn")).unwrap();
+
+        let report = run_diagnostics_inner(&root).await.unwrap();
+        assert_eq!(item(&report, "versions").level, "ok");
+        assert!(
+            item(&report, "versions").detail.contains("1 个已安装"),
+            "only the real version counts: {}",
+            item(&report, "versions").detail
+        );
+        assert_eq!(item(&report, "runtimes").level, "ok");
 
         let _ = std::fs::remove_dir_all(&root);
     }
