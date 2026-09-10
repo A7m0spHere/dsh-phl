@@ -1,251 +1,155 @@
-# PHL · dsh-phl
+# PHL · DeepSeek Harness 实例与运行时管理器
 
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="PHL —— 一台机器上并存多个互相隔离的 DSH 实例">
+  <img src="./assets/readme/hero.png" width="100%" alt="PHL 鲸鱼尾鳍 Logo：多个 DSH 版本并存，每个实例独立配置。Windows 桌面应用。">
 </p>
 
-PHL 是 DeepSeek Harness 的**实例与运行时管理器**。它解决的问题很具体：一台机器上要同时用几个不同版本的 DSH，而每个版本的运行时、插件与配置又必须互不干扰。
+在同一台机器上，为日常使用、插件测试和版本尝鲜分别创建 DSH 实例。**每个实例选择自己的 DSH 版本与 Node 运行时，配置、插件和工作目录彼此隔离。**
 
-> 独立实现，与 DeepSeek 官方无隶属关系。产品模型与交互质量参考了 PCL、Prism Launcher、DSHBox 等成熟设计，代码与全部资源均为独立实现（见[实现边界](#参考与实现边界)）。
+[下载安装](https://github.com/A7m0spHere/dsh-phl/releases) · [首次运行](#首次运行) · [从源码构建](#从源码构建) · [文档](#文档与反馈) · [问题反馈](https://github.com/A7m0spHere/dsh-phl/issues)
+
+<p align="center">
+  <img src="./assets/readme/app.png" width="100%" alt="PHL 桌面端真实截图：版本页展示已安装与可下载的 DSH 版本、发布日期及更新说明；顶部可切换实例、插件、API 和运行时。">
+</p>
+
+*桌面端「版本」页实拍。PHL 使用 Tauri 2 + Rust，下载、磁盘读写与进程管理均已接入真实后端。*
 
 ## 下载与安装
 
-| | |
+面向 **Windows 10/11 x64**，目前为 **alpha 预览**，界面与数据格式仍可能变化。PHL 为独立项目，与 DeepSeek 官方无隶属关系。
+
+1. 打开 [Releases](https://github.com/A7m0spHere/dsh-phl/releases)，从最新预览版的 **Assets** 下载 `PHL_<version>_x64-setup.exe` 及同名 `.sha256` 文件。
+2. 在下载目录运行下方命令，对照 `.sha256` 核对文件，再运行安装程序。
+3. 从开始菜单打开 **PHL**，按下方步骤创建第一个实例。
+
+```powershell
+Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
+```
+
+安装包尚未做 Windows 代码签名，首次下载或运行可能出现 SmartScreen 提示，处理步骤见[安装说明](./docs/install-note.md)。应用依赖 WebView2；若系统缺失，安装器会按 [Tauri 默认方式](https://v2.tauri.app/distribute/windows-installer/#webview2-installation-options)联网下载并安装。
+
+**应用内更新：** alpha.3 起可在「设置 → 关于」检查更新、下载并安装。alpha.2 及更早版本需先手动安装带更新功能的版本，详见[更新说明](./docs/auto-update.md)。
+
+## 首次运行
+
+1. **准备 DSH 版本** — 在「版本」页下载所需版本。
+2. **准备运行时** — 在「运行时」页下载 Node，或使用已检测到的系统 Node。
+3. **创建实例** — 填写名称，选择 DSH 版本、运行时与端口，完成向导。
+4. **启动并打开 WebUI** — 在实例页点击「启动」，等待端口就绪；需要插件时，在「插件」页选择目标实例后安装。
+
+已有本机 DSH 环境，可以使用[本机发现与接入](./docs/p0-local-dsh-adoption.md)，按向导选择接入方式及需要迁移的对话。
+
+## 围绕实例管理环境
+
+| 你要做的事 | PHL 提供的能力 |
 |---|---|
-| 最新版本 | [v0.1.0-alpha.2](https://github.com/A7m0spHere/dsh-phl/releases)（alpha 预览，prerelease） |
-| 安装包 | `PHL_0.1.0-alpha.2_x64-setup.exe`（Windows x64） |
-| 系统要求 | Windows 10/11 x64；WebView2 已内置，无需单独安装 |
+| 同时保留多个环境 | 创建、克隆与管理实例；各自绑定 DSH 版本和 Runtime，配置与插件独立保存 |
+| 下载版本与安装插件 | DSH / Node 下载、完整性校验、进度与取消；插件安装到选定实例 |
+| 启动并排查问题 | 端口探测与自动分配、启动日志、崩溃反馈；停止时终止进程树 |
+| 修改前留一份备份 | 创建、回滚与删除快照；快照保存实例的 `dsh-home`，不包含 workspace、日志或版本绑定 |
+| 接入与迁移环境 | 本机 DSH 发现、对话复制、`.phlpack` 导入导出，以及轻量 Bundle 配置清单 |
+| 整理与维护 | 磁盘占用统计、孤立目录与缓存清理、诊断、数据目录迁移和任务中心 |
 
-安装包**尚未做代码签名**，首次下载与运行会看到 SmartScreen 提示——这是缺少签名与信誉，不是检测到病毒。
-点「保留」继续，下载后先核对 SHA-256（Release 附带同名 `.sha256`）。完整说明见
-[安装与安全提示](#安装与安全提示)。
+**Bundle 的范围：** JSON 清单记录实例配置与插件信息，不包含插件文件，也不导出凭据值及机器本地环境变量；导入后需重新安装插件并配置凭据。对话与 `.phlpack` 的迁移范围见[迁移说明](./docs/p1-session-pack.md)。
 
-## 首次运行：从零到一个跑起来的实例
-
-1. **版本** —— 下载一个 DSH 版本（走 GitHub Releases，自动 sha512 校验）。
-2. **运行时** —— 下载一个 Node Runtime（nodejs.org dist，SHASUMS256 校验），或直接使用系统 Node。
-3. **新建实例** —— 选版本与运行时，填名称与端口，完成。
-4. **启动** —— 实例页点「启动」，端口就绪后自动打开 WebUI；停止即终止整棵进程树。
-
-## 真实界面
+## 隔离如何工作
 
 <p align="center">
-  <img src="./assets/readme/app.png" width="100%" alt="PHL 桌面端「版本」页：真实拉取到的 DSH 版本列表，含标签、日期、大小与更新说明">
+  <img src="./assets/readme/how-it-works.svg" width="100%" alt="隔离示意：DSH 版本与 Node 文件集中存放，由不同实例引用。实例 A 和 B 各有独立的 DSH_HOME、配置、插件与端口，分别启动并打开 WebUI。">
 </p>
 
-上面是桌面端的实际界面（`npm run app:dev`）。桌面端的数据来自 Rust 管线，会真实读写磁盘、真实下载与校验、真实拉起与终止进程；浏览器模式（`npm run dev`）下一切数据来自 Mock Repository，便于纯 UI 开发。
+**共享程序文件，分别保存实例状态。** DSH 与 Node 存放在版本库和运行时库中，实例按 ID 引用；配置与插件则放在各自的 `dsh-home`。此处的隔离指环境与数据目录分离，不是操作系统级安全沙箱。
 
-## 一个实例是怎么起来的
+```text
+<数据目录>/
+├── versions/                   DSH 版本文件
+├── runtimes/                   Node 运行时文件
+└── instances/<实例 ID>/
+    ├── instance.json           版本、运行时与端口等配置
+    ├── dsh-home/               实例自己的 DSH_HOME
+    │   └── profiles/web/       插件与 profile 配置
+    ├── workspace/              工作目录
+    └── logs/                   启动日志
+```
 
-<p align="center">
-  <img src="./assets/readme/how-it-works.svg" width="100%" alt="流程图：版本目录、运行时目录与插件注册表汇入一个实例；实例持有独立的 DSH_HOME、固定的 web profile 与探测或自动分配的端口；随后以 dsh web --port 启动并打开 WebUI">
-</p>
-
-每个实例固定自己的 DSH 版本、Runtime 与插件：启动时以实例自己的 `DSH_HOME` 拉起 `dsh web --port`，端口探测或自动分配，停止即终止整棵进程树。
-
-## 哪些是真的
-
-| 模块 | 状态 |
-|---|---|
-| Version Manager | ✅ 真实：GitHub Releases + npm 目录，下载 / sha512 校验 / 解包 / 删除 |
-| Plugin Manager | ✅ 真实：社区注册表，安装进实例 profile 的 `node_modules` 与 `cordis.patch.yml` |
-| Instance Manager | ✅ 真实：磁盘上的 `instance.json`，重启不丢、删除即清理、插件列表由磁盘反推 |
-| Runtime Manager | ✅ 真实：nodejs.org dist 目录（支持 npmmirror 镜像），SHASUMS256 校验后解包 |
-| Process / Port、真实启动 | ✅ 真实：`dsh web --port` 启动、端口探测与自动分配、进程树终止、崩溃事件、启动日志 |
+启动时，PHL 注入实例自己的 `DSH_HOME`，使用所选运行时执行 `dsh web --port <端口>`，固定使用 `web` profile。端口就绪后打开 WebUI；关闭应用时会确认仍在运行的实例。
 
 ## 从源码构建
 
-只想安装使用，看上面的[下载与安装](#下载与安装)即可；下面是开发与自行构建的路径。
+前端使用 **React 18 / TypeScript / Vite 6**，样式与交互由 Tailwind CSS、Motion 和 Zustand 提供。页面统一经过 Repository 接口访问数据，入口在 [`src/services/index.ts`](./src/services/index.ts)。
 
-### 环境要求
+桌面端构建环境：
 
-桌面端需要 Rust 工具链（前端本身不需要）：
-
-| 依赖 | 说明 |
+| 依赖 | 要求 |
 |---|---|
-| Node.js ≥ 18 | 前端构建 |
-| Rust (stable, MSVC) | `https://rustup.rs` → `rustup default stable-x86_64-pc-windows-msvc` |
-| Visual Studio C++ 生成工具 | 勾选「使用 C++ 的桌面开发」 |
-| WebView2 | Windows 11 已内置，无需安装 |
+| Node.js | 与项目 CI 一致使用 Node 22，附带 npm |
+| Rust | stable，Windows 使用 MSVC 工具链 |
+| Visual Studio C++ Build Tools | 安装「使用 C++ 的桌面开发」工作负载 |
+| WebView2 | 桌面窗口运行所需 |
 
-### 运行
-
-Windows 上可以直接双击：
-
-| 文件 | 作用 |
-|---|---|
-| `run-dev.cmd` | 开发模式打开桌面窗口（自动检查环境、装依赖、生成图标） |
-| `build-app.cmd` | 打包成 exe 与安装程序，完成后自动打开产物目录 |
-
-或者用命令：
+克隆仓库后执行：
 
 ```bash
-npm install
-
-# 桌面应用（推荐）——会自动拉起 Vite 并打开 Tauri 窗口
+git clone https://github.com/A7m0spHere/dsh-phl.git
+cd dsh-phl
+npm ci
 npm run app:dev
-
-# 打包（输出见下）
-npm run app:build
-
-# 只在浏览器里调 UI（窗口控制会提示仅桌面端可用）
-npm run dev
-npm run typecheck
-npm test
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-打包产物：
+也可双击 [`run-dev.cmd`](./run-dev.cmd) 检查环境并启动；首次编译 Rust 会花费一些时间。
 
-```text
-src-tauri/target/release/PHL.exe                        可直接双击的可执行文件
-src-tauri/target/release/bundle/nsis/PHL_<version>_x64-setup.exe   安装程序（版本取自 package.json）
-```
+| 命令 | 用途 |
+|---|---|
+| `npm run dev` | 浏览器 UI 预览，使用 Mock 数据，不执行真实桌面操作 |
+| `npm run app:dev` | 启动 Tauri 桌面应用，连接真实 Rust 后端 |
+| `npm run app:build` | 构建 Windows 应用与 NSIS 安装包 |
+| `npm run icon` | 从仓库内母版生成应用图标 |
 
-安装程序装完会在开始菜单创建快捷方式；也可以直接把 `PHL.exe` 发送到桌面快捷方式。
+安装包输出到 `src-tauri/target/release/bundle/nsis/`。也可双击 [`build-app.cmd`](./build-app.cmd) 构建并打开产物目录。
 
-首次生成应用图标（母版已提交，图标由脚本产出）：
+<details>
+<summary>开发检查与代码导航</summary>
 
 ```bash
-npm run icon
+npm run typecheck
+npm run bridge:check
+npm test
+npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --workspace
 ```
 
-## 安装与安全提示
-
-从 Release 下载的安装包**尚未做代码签名**，浏览器与 SmartScreen 会提示「通常不会下载 …」——这是缺少签名与信誉，
-不是检测到病毒。点「保留」继续下载，**下载后先核对 SHA-256**（Release 附带同名 `.sha256`），
-运行时若出现「Windows 已保护你的电脑」，选「更多信息 → 仍要运行」。
-
-各签名方案的对比与 PHL 的候选路径见 [docs/code-signing.md](./docs/code-signing.md)。
-
-## 桌面端形态
-
-- **无边框窗口** + 自绘标题栏：主导航、下载指示、主题切换与窗口按钮在同一条 44px 的栏里。
-- 标题栏可拖动（`data-tauri-drag-region`），双击最大化 / 还原，最大化后按钮切换为「向下还原」字形。
-- **关闭由应用决定**：Rust 拦截 `CloseRequested` 交回前端，弹出自己的确认框并列出仍在运行的实例，
-  确认后才真正退出——避免留下孤儿 DSH 进程。
-- 窗口初始隐藏，前端首帧绘制完成后再显示，**没有白屏闪烁**；Rust 侧有 4 秒兜底显示，前端崩溃时窗口不会消失。
-- 禁用网页右键菜单与全局文本选择，输入框、代码与路径等值仍可正常选中复制。
-
-## 技术栈
-
-| 层 | 选型 |
+| 目录 | 内容 |
 |---|---|
-| 桌面壳 | Tauri 2 + Rust |
-| UI | React 18 + TypeScript |
-| 构建 | Vite 6 |
-| 样式 | Tailwind CSS 3（CSS 变量驱动的 Design Tokens） |
-| 动效 | Motion (`motion/react`) |
-| 状态 | Zustand |
+| [`src/pages/`](./src/pages/) / [`src/components/`](./src/components/) | 页面与 UI 组件 |
+| [`src/services/`](./src/services/) / [`src/stores/`](./src/stores/) | Repository、桌面桥接与共享状态 |
+| [`src/types/`](./src/types/) / [`src/data/`](./src/data/) | 领域模型与浏览器 Mock 数据 |
+| [`src-tauri/src/`](./src-tauri/src/) | 下载、实例、插件、运行时、进程与磁盘操作 |
+| [`src-tauri/crates/`](./src-tauri/crates/) | 共用 Pack Core 与 `phl-pack` CLI |
 
-## 目录结构
+开发约定以 [`AGENTS.md`](./AGENTS.md) 为准；完整检查流程见 [CI 配置](./.github/workflows/ci.yml)。
 
-```text
-src/                     前端
-├── types/        领域模型：Instance / Version / Runtime / Plugin
-├── data/         种子与目录数据（浏览器 Mock 用；桌面端数据来自 Rust）
-├── services/     Repository 接口 + Mock 实现 + Tauri 实现（services/index.ts 决定来源）
-├── stores/       Zustand：ui / catalog / instance / view / wizard / settings
-├── lib/          cn / format / hue / motion / hooks / desktop
-├── components/
-│   ├── ui/       Button / Card / Progress / Menu / Dialog / Toast …
-│   ├── layout/   TitleBar / Panel / Page / Router / QuickSwitcher
-│   └── instance/ InstanceCard / LaunchDock / LaunchTimeline / StatusPill
-└── pages/        Instances / InstanceDetail / Create / Versions / Plugins / Runtimes / Settings
+</details>
 
-src-tauri/               桌面壳
-├── src/lib.rs     窗口生命周期 + 命令注册
-├── src/versions.rs / plugins.rs / instances.rs / runtimes.rs
-│                  Version / Plugin / Instance / Runtime 的真实实现
-│                  （目录抓取、下载、完整性校验、磁盘读写与清理）
-├── capabilities/  权限声明（仅开放自绘标题栏所需的窗口能力）
-└── tauri.conf.json
+## 文档与反馈
 
-scripts/make-icon.mjs    无依赖生成应用图标（与应用内 Logo 共用同一母版）
-```
-
-抽象方向：
-
-```text
-UI  →  Repository  →  Tauri / Rust     （桌面端：版本、插件、实例、Runtime）
-UI  →  Repository  →  Mock Data        （浏览器模式；桌面端的静态模板）
-```
-
-`src/services/index.ts` 是唯一决定数据来源的地方，替换实现时页面与 Store 无需改动。
-
-## 信息架构
-
-```text
-标题栏：实例 / 版本 / 插件 / 运行时 / 设置
-  └─ 左侧上下文面板（筛选、作用域、步骤、分区）
-       └─ 内容区（页面）
-            └─ 底部启动坞（仅实例页）
-```
-
-## 已实现的能力
-
-- 实例列表（卡片 / 列表两种视图）、筛选、排序、搜索
-- 实例持久化（真实）：`<root>/instances/<id>/`，重启不丢；创建 / 克隆 / 删除 / 改名 / 端口与 env 修改全部落盘
-- 实例详情：运行环境、隔离路径、插件（由磁盘 `node_modules` 反推）、快照、统计、删除
-- 创建实例向导：基本信息 → DSH 版本 → Runtime → 模板与端口 → 确认，附创建进度
-- 版本管理（真实）：npm + GitHub Releases 目录、下载进度与速度、sha512 校验、取消、删除保护
-- Runtime 管理（真实）：nodejs.org dist 目录（支持 npmmirror 镜像）、SHASUMS256 校验、Windows zip / Unix tar.gz 解包、系统 Node 探测
-- 插件管理（真实）：社区注册表、npm / GitHub / 直链来源、安装进实例 profile 并注册 `cordis.patch.yml`
-- 存储视图（真实）：实例与 Runtime 占用按磁盘实测，孤立目录扫描与一键回收
-- Bundle 导出 / 导入（真实）：实例配置与插件记录打包为 JSON 清单；导出前预览并列出被省略的字段——凭据值（库声明的 `apiKeyEnv` 与凭据字样的变量）与 `PATH`、`DSH_HOME` 等机器本地变量不进 Bundle，只保留变量名供导入方重新配置；导入走与创建同款的暂存 + 重命名管线，导入结果明示需重新配置的凭据；插件文件不进 Bundle、通过插件页重新安装
-- 快照（真实）：创建 / 回滚 / 删除 —— 复制实例的 dsh-home（插件与配置），回滚后快照保留、可反复还原；运行中的实例拒绝快照操作
-- 诊断（真实）：数据目录可写、DSH 版本与 Runtime 完整性、实例引用有效性、孤立目录与下载缓存一览；缓存一键清理
-- 真实启动：解析版本与 Runtime → 端口探测 / 自动分配 → 以实例自己的 `DSH_HOME` 启动 `dsh web` → 端口就绪探测 → 打开 WebUI；停止即终止进程树，崩溃自动反馈到 UI，启动日志落在实例 `logs/` 下
-- 应用更新（真实）：读取 GitHub 上的**签名清单**（minisign 校验，验不过不下载），发现新版本后可在「设置 → 关于」下载并安装，装完自动重启；启动时可自动检查。见 [docs/auto-update.md](./docs/auto-update.md)
-- 设置：外观（主题、强调色、密度、动效强度）、下载源、存储、高级、关于
-- 快速跳转（Ctrl+K）、快捷键、Toast、确认与输入对话框、空状态与错误态
-
-## 快捷键
-
-| 快捷键 | 作用 |
+| 入口 | 内容 |
 |---|---|
-| `Ctrl` `K` | 快速跳转 |
-| `Ctrl` `,` | 打开设置 |
-| `Esc` | 返回上一页；无返回路径时回到上层栏目 |
+| [发布记录](https://github.com/A7m0spHere/dsh-phl/releases) | 已发布版本、更新说明与安装包 |
+| [应用内更新](./docs/auto-update.md) | 检查更新、下载与安装方式 |
+| [本机 DSH 接入](./docs/p0-local-dsh-adoption.md) / [对话与环境迁移](./docs/p1-session-pack.md) | 接入方式、格式与迁移边界 |
+| [Pack Core、CLI 与导出 Skill](./docs/p2-pack-core-skill.md) | `.phlpack` 的复用与集成 |
+| [安全说明](./SECURITY.md) / [隐私说明](./docs/privacy.md) | 安全边界、漏洞报告与数据处理 |
 
-完整清单（含命令面板、对话框与下拉、插件发现等上下文快捷键）见应用内「设置 → 快捷键」。
+当前发布与验证重点为 Windows；macOS / Linux 尚未完成真机验收，PHL 内部受管的源码构建管线仍在规划中。
 
-## 参考与实现边界
+常用快捷键：`Ctrl+K` 快速跳转，`Ctrl+,` 打开设置，`Esc` 返回。完整清单在「设置 → 快捷键」。
 
-PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox 等已被验证的成熟设计，
-包括实例优先的模型、信息架构、状态反馈节奏与动效质量。
+遇到问题或有建议，请提交 [Issue](https://github.com/A7m0spHere/dsh-phl/issues)，附上 PHL 版本、复现步骤与相关日志（移除凭据后）。
 
-但本项目的**代码、组件、视觉细节与全部资源均为独立实现**：
+## 参考与许可
 
-> Existing launchers may be used as product and UX references only.
-> Do not copy, port, mechanically translate, or derive implementation
-> code or assets from them unless license and provenance have been
-> explicitly reviewed.
+PHL 在产品模型与交互上参考 PCL、Prism Launcher、DSHBox 等项目。实现遵守[代码来源边界](./AGENTS.md#代码来源边界必须遵守)：不复制、移植或机械改写其他 Launcher 的代码，不使用其专有视觉资产。鲸鱼尾鳍标识使用仓库内的独立母版，见[素材来源](./src-tauri/icons/master/PROVENANCE.md)。
 
-未复制、移植或机械改写上述任何项目的源码，未使用其 UI 素材、图标或专有视觉资产。
-应用内的标识、图标与配色体系均在本仓库内定义：应用标识是仓库作者产出并压成单色的
-鲸鱼尾鳍，只借用 DeepSeek 的品牌蓝 `#4D6BFE` 作为配色，**PHL 与 DeepSeek 官方无隶属关系**。
-
-## 安全
-
-路径遏制、凭据处理、插件供应链与发布完整性的现状及漏洞报告方式见
-[SECURITY.md](./SECURITY.md)。
-
-## 许可证
-
-[MIT](./LICENSE) © 2026 A7m0spHere
-
-可自由使用、修改、分发与商用，只需保留版权与许可声明。软件按「原样」提供，不附带任何担保。
-随包依赖的许可证见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
-
-## 下一步
-
-核心链路（版本 → 插件 → 实例 → Runtime → 启动 → Bundle → 快照 → 诊断 → 验证与局部修复）
-已全部真实接入，另有：数据目录迁移的断点日志（继续/撤销）、PHL 重启后对仍在运行进程的
-身份接管、后端资源互斥与任务中心。剩余：受管 Source Build 管线（路线图），以及持续的
-真机打磨。实例模板为静态产品内容（形状预设），不需要后端模块。
-
-当前为 **alpha 预览**：已在 [Releases](https://github.com/A7m0spHere/dsh-phl/releases) 提供安装包，
-界面与数据格式仍可能变化。**alpha.3 起支持应用内检查更新**——装的是更早版本的话，需要手动装一次 alpha.3，
-之后就能自动更新。问题与建议请提 [Issue](https://github.com/A7m0spHere/dsh-phl/issues)。
+[MIT](./LICENSE) © 2026 A7m0spHere · [第三方许可](./THIRD_PARTY_NOTICES.md)
