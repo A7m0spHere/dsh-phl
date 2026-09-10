@@ -62,6 +62,13 @@ pub(crate) async fn scan_snapshots(dir: &Path) -> Vec<SnapshotFile> {
         if !path.is_dir() {
             continue;
         }
+        // `.phl-new-*` is the create's staging name. It carries a committed
+        // `snapshot.json` *before* the promote rename, so a crash between the
+        // two would otherwise surface the half-published tree as a real
+        // snapshot — one whose restore/delete could never find it.
+        if crate::paths::is_hidden_tree_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let Ok(raw) = tokio::fs::read_to_string(path.join("snapshot.json")).await else {
             continue; // no metadata → not a completed snapshot
         };
@@ -422,4 +429,135 @@ pub(crate) async fn delete_snapshot_inner(
             .map_err(|e| format!("无法删除快照: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("phl-snap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_processes() -> Processes {
+        Processes(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    fn manifest(id: &str) -> InstanceManifest {
+        InstanceManifest {
+            schema_version: 0,
+            id: id.into(),
+            name: "Snap".into(),
+            note: None,
+            kind: "sandbox".into(),
+            hue: 0,
+            version_id: "dsh-0.1.0".into(),
+            runtime_id: "node-system".into(),
+            port: 34480,
+            auto_port: true,
+            profile: "web".into(),
+            created_at: crate::versions::now_iso(),
+            last_run_at: None,
+            total_runtime: 0,
+            favorite: false,
+            env: std::collections::HashMap::new(),
+            args: Vec::new(),
+            api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
+        }
+    }
+
+    fn snapshot_file(id: &str) -> SnapshotFile {
+        SnapshotFile {
+            id: id.into(),
+            label: format!("测试快照 {id}"),
+            created_at: crate::versions::now_iso(),
+            version_id: "dsh-0.1.0".into(),
+            runtime_id: "node-system".into(),
+            plugin_count: 0,
+            size: 0,
+        }
+    }
+
+    fn write_snapshot_meta(dir: &Path, snap: &SnapshotFile) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("snapshot.json"),
+            serde_json::to_string_pretty(snap).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A plugin package carrying PHL's marker, laid out like a real
+    /// `dsh-home/profiles/<profile>/node_modules/<pkg>`.
+    fn write_marker_pkg(home: &Path, name: &str) {
+        let pkg = home
+            .join("dsh-home")
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("phl-plugin.json"),
+            format!(r#"{{"pluginId":"t/{name}","version":"1.0.0","registryId":"{name}"}}"#),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn staging_dirs_never_surface_as_snapshots() {
+        let root = temp_root("staging");
+        let dir = root.join("inst-1");
+        let snaps = dir.join("snapshots");
+        std::fs::create_dir_all(&snaps).unwrap();
+
+        // A real, promoted snapshot.
+        write_snapshot_meta(&snaps.join("snap-111"), &snapshot_file("snap-111"));
+        // A crash between the metadata write and the promote rename leaves a
+        // `.phl-new-*` staging tree that carries a *valid* snapshot.json.
+        let mut ghost = snapshot_file("snap-222");
+        ghost.plugin_count = 1;
+        write_snapshot_meta(&snaps.join(".phl-new-snap-222"), &ghost);
+        write_marker_pkg(&snaps.join(".phl-new-snap-222"), "solo");
+
+        let listed = scan_snapshots(&dir).await;
+        assert_eq!(
+            listed.len(),
+            1,
+            "the half-published staging tree must not be listed: {listed:?}"
+        );
+        assert_eq!(listed[0].id, "snap-111");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_snapshot_id_resolves_through_the_final_name_only() {
+        let root = temp_root("delete");
+        let dir = root.join("instances").join("inst-2");
+        std::fs::create_dir_all(dir.join("snapshots").join(".phl-new-snap-9")).unwrap();
+        std::fs::create_dir_all(dir.join("snapshots").join("snap-9")).unwrap();
+        // The staging id is refused outright (sanitize_segment rule), so a
+        // "delete" can never reach into a tree a running create still owns.
+        let err = delete_snapshot_inner(&root, "inst-2", ".phl-new-snap-9", &fake_processes())
+            .await
+            .unwrap_err();
+        assert!(err.contains("非法"), "{err}");
+        assert!(dir.join("snapshots").join(".phl-new-snap-9").exists());
+        // The real id deletes only the final directory.
+        delete_snapshot_inner(&root, "inst-2", "snap-9", &fake_processes())
+            .await
+            .unwrap();
+        assert!(!dir.join("snapshots").join("snap-9").exists());
+        assert!(dir.join("snapshots").join(".phl-new-snap-9").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

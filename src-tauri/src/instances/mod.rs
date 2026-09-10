@@ -170,7 +170,9 @@ pub(crate) async fn list_instances_inner(root: &Path) -> Result<Vec<InstanceReco
             continue;
         }
         // A directory without a manifest is not an instance: it is either a
-        // staging dir from an interrupted create, or a leftover from before
+        // staging dir from an interrupted create (hidden name — never a
+        // business object per `paths::is_hidden_tree_name`, and reclaimable
+        // through the diagnostics residue scan), or a leftover from before
         // instances were real. `scan_orphan_instances` reports those.
         let Some(manifest) = read_manifest(&path).await else {
             continue;
@@ -574,6 +576,16 @@ pub(crate) async fn scan_orphan_instances_inner(root: &Path) -> Result<Vec<Orpha
         if !path.is_dir() {
             continue;
         }
+        // `.phl-new-*` (create/clone staging) and `.phl-pack-*` (pack install
+        // staging) carry no manifest only until their promote rename — a
+        // *running* install would otherwise appear here as a reclaimable
+        // "orphan", one confirmed click from deleting the tree under itself.
+        // Crash leftovers of these names are owned by the residue scan and
+        // the stale sweep instead, where the grace period protects a live
+        // transaction.
+        if crate::paths::is_hidden_tree_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         match classify_manifest(&path).await {
             ManifestRead::Ok(_) | ManifestRead::UnsupportedSchema { .. } => continue,
             ManifestRead::Missing | ManifestRead::Corrupt(_) => {}
@@ -624,10 +636,12 @@ async fn delete_orphan_instance_inner(root: &Path, name: &str) -> Result<(), Str
 
 /* ------------------------------ internals ----------------------------- */
 
-/// The shared staging + rename create path (used by create and bundle
+/// The shared staging + rename create path (used by create, clone and pack
 /// import). A create that fails halfway must not leave a directory that looks
-/// like an instance but has no manifest — that is exactly how the current
-/// orphans came about.
+/// like an instance: the staging name is hidden (`paths::is_hidden_tree_name`),
+/// so no scanner lists it, and a stale leftover is reclaimed by the residue
+/// sweep, not by the orphan-reclaim view (which must never touch a tree a
+/// running create still owns).
 pub(crate) async fn build_instance_tree(
     root: &Path,
     manifest: &InstanceManifest,
@@ -2523,6 +2537,66 @@ mod tests {
         m2.management_mode = ManagementMode::default();
         assert!(reject_external_write(&m2, "ext-w1aa", "测试").is_ok());
         assert!(reject_external_write(&m, "ext-w1aa", "测试").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn ipc_payloads_keep_their_camel_case_contracts() {
+        // The TS bridge (`RemoteInstanceRecord`, progress handlers) reads
+        // `dshHome` / `pluginId` / `bytesDone` off the wire. A field renamed
+        // without `rename_all` surfaces as `undefined` in the UI — nothing in
+        // the type system catches it, so pin the serialized keys here.
+        let root = temp_root("ipc");
+        create_instance_inner(root.as_path(), manifest("ipc-1", "IPC"))
+            .await
+            .unwrap();
+        let modules = root
+            .join("instances")
+            .join("ipc-1")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default")
+            .join("node_modules");
+        std::fs::create_dir_all(modules.join("solo")).unwrap();
+        std::fs::write(
+            modules.join("solo").join("phl-plugin.json"),
+            r#"{"pluginId":"who/solo","version":"0.3.1","registryId":"solo"}"#,
+        )
+        .unwrap();
+
+        let recs = list_instances_inner(root.as_path()).await.unwrap();
+        assert_eq!(recs.len(), 1);
+        let raw = serde_json::to_string(&recs[0]).unwrap();
+        for key in [
+            "dshHome",
+            "workspace",
+            "plugins",
+            "snapshots",
+            "versionId",
+            "runtimeId",
+            "pluginId",
+            "registryId",
+        ] {
+            assert!(
+                raw.contains(&format!("\"{key}\"")),
+                "missing camelCase key {key}: {raw}"
+            );
+        }
+        assert!(
+            !raw.contains("\"dsh_home\"") && !raw.contains("\"plugin_id\""),
+            "snake_case leaked into the IPC shape: {raw}"
+        );
+        let prog = serde_json::to_string(&CloneProgress {
+            progress: 0.5,
+            bytes_done: 1,
+            bytes_total: 2,
+        })
+        .unwrap();
+        assert!(
+            prog.contains("bytesDone") && prog.contains("bytesTotal"),
+            "progress event keys must stay camelCase: {prog}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
