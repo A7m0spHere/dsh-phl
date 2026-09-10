@@ -245,7 +245,7 @@ export function SettingsPage() {
    * so the half-moved directories are never a silent dead end.
    */
   const [openJournal, setOpenJournal] = useState<MigrationJournal | null>(null)
-  const [journalBusy, setJournalBusy] = useState<'resume' | 'undo' | 'finish' | null>(null)
+  const [journalBusy, setJournalBusy] = useState<'undo' | 'finish' | null>(null)
   useEffect(() => {
     if (section !== 'storage') return
     void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))

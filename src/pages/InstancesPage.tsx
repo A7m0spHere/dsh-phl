@@ -189,7 +189,10 @@ export function InstancesPage() {
     }
     const ok = await confirm({
       title: `导入「${preview.name}」`,
-      message: `版本 ${preview.versionId} · Runtime ${preview.runtimeId} · 端口 ${preview.port} · ${preview.pluginCount} 条插件记录。`,
+      // Resolve the `dsh-<ver>` id against the catalog so the dialog shows
+      // the display name like every other version surface; the raw id is
+      // only the fallback when the catalog does not know the version.
+      message: `版本 ${versions.find((v) => v.id === preview.versionId)?.name ?? preview.versionId} · Runtime ${preview.runtimeId} · 端口 ${preview.port} · ${preview.pluginCount} 条插件记录。`,
       detail: notes.join(' '),
       confirmLabel: '导入',
     })
