@@ -83,7 +83,7 @@ export function UpdateSection() {
         {status === 'available' && info?.notes && (
           <details className="mt-3 rounded-lg bg-surface-sunken p-3 text-sm text-ink-muted ring-1 ring-inset ring-line">
             <summary className="cursor-pointer select-none text-ink">这一版更新了什么</summary>
-            <div className="mt-2 whitespace-pre-wrap leading-relaxed">{info.notes}</div>
+            <div className="mt-2 whitespace-pre-wrap leading-relaxed">{readableNotes(info.notes)}</div>
           </details>
         )}
       </div>
@@ -107,4 +107,17 @@ export function UpdateSection() {
 
 function timeOf(ms: number) {
   return new Date(ms).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * The manifest carries the release notes as Markdown - the same text the release
+ * page shows. This panel is plain text, so the emphasis markers are stripped
+ * instead of rendered: raw "#" and "**" would just read as noise here.
+ */
+function readableNotes(notes: string): string {
+  return notes
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*/g, '')
+    .replace(/^\s*-\s+/gm, '• ')
+    .trim()
 }
