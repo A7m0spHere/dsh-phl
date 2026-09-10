@@ -246,7 +246,15 @@ async fn run_plugin_install(
     // has succeeded; a failure rolls both back.
     task.set_phase("committing");
     let commit_result = async {
-        commit_install(dest.as_path(), &marker, instance_root, &registry_id).await?;
+        commit_install(
+            dest.as_path(),
+            &marker,
+            instance_root,
+            &registry_id,
+            task,
+            Some(on_progress),
+        )
+        .await?;
         mark_transaction_committed(instance_root).await
     }
     .await;
@@ -287,14 +295,27 @@ pub(crate) async fn commit_install(
     marker: &serde_json::Value,
     instance_root: &Path,
     registry_id: &str,
+    task: &crate::resources::Task,
+    on_event: Option<&Channel<PluginProgressEvent>>,
 ) -> Result<(), String> {
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
         .await
         .map_err(|e| format!("无法写入安装记录: {e}"))?;
 
+    // pnpm can take minutes here and has no machine-readable progress
+    // without a TTY — name the phase on the task row AND push the card to an
+    // indeterminate stage, instead of both sitting at a fake "100% installing".
+    task.set_phase("installing-deps");
+    if let Some(ch) = on_event {
+        let _ = ch.send(PluginProgressEvent::InstallingDeps);
+    }
     install_plugin_dependencies(dest)
         .await
         .map_err(|e| format!("安装插件依赖失败: {e}"))?;
+    task.set_phase("committing");
+    if let Some(ch) = on_event {
+        let _ = ch.send(PluginProgressEvent::Committing);
+    }
 
     register_cordis_patch(instance_root, registry_id, None)
         .await
@@ -715,6 +736,22 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// A throwaway task handle for tests that call phase-reporting internals:
+    /// the row lives in a map nothing lists, so phase writes are discarded.
+    fn test_task() -> crate::resources::Task {
+        crate::resources::Tasks::default()
+            .begin(
+                crate::resources::TaskInfo::new(
+                    "plugin-test".into(),
+                    "plugin-install",
+                    "test".into(),
+                    &[],
+                ),
+                None,
+            )
+            .unwrap()
+    }
+
     fn temp_root(tag: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("phl-plugin-install-{tag}-{}", std::process::id()));
@@ -756,9 +793,16 @@ mod tests {
         )
         .unwrap();
         let marker = serde_json::json!({"version": "1.2.3"});
-        commit_install(&f["dest"], &marker, &f["instance"], "dsh-foo")
-            .await
-            .unwrap();
+        commit_install(
+            &f["dest"],
+            &marker,
+            &f["instance"],
+            "dsh-foo",
+            &test_task(),
+            None,
+        )
+        .await
+        .unwrap();
         let written: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(f["dest"].join("phl-plugin.json")).unwrap(),
         )
@@ -780,6 +824,8 @@ mod tests {
             &serde_json::json!({}),
             &f["instance"],
             "dsh-foo",
+            &test_task(),
+            None,
         )
         .await
         .expect_err("commit must fail");
@@ -956,6 +1002,8 @@ mod tests {
             &serde_json::json!({"version":"2.0.0"}),
             &profile,
             "dsh-foo",
+            &test_task(),
+            None,
         )
         .await
         .unwrap();

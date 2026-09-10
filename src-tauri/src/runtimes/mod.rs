@@ -192,7 +192,6 @@ pub async fn download_node_runtime(
         &locks,
         &tasks,
         |task| async move {
-            task.set_phase("downloading");
             let r = run_runtime_install(
                 &flag,
                 &dist_base,
@@ -200,6 +199,7 @@ pub async fn download_node_runtime(
                 &version,
                 &phl.root(),
                 keep_archive,
+                &task,
                 &on_progress,
             )
             .await;

@@ -153,6 +153,37 @@ pub enum ProgressEvent {
     InstallingDeps { progress: f64 },
 }
 
+/// Mirror one progress event into the task-registry row (O-10), so the
+/// title-bar task center shows the same phase the page shows instead of
+/// freezing on "准备中". Called beside every `on_progress.send` in the
+/// installers — the Channel's own callback only ever sees serialized bytes,
+/// so the update has to happen where the event still exists as data.
+/// Indeterminate phases must clear the ratio (`None`): a stale download
+/// percentage under a "安装依赖" label is exactly the lie this wiring kills.
+pub(crate) fn sync_task_progress(task: &crate::resources::Task, ev: &ProgressEvent) {
+    match ev {
+        ProgressEvent::Downloading { progress, .. } => {
+            task.set_phase("downloading");
+            task.set_progress(Some(*progress));
+        }
+        ProgressEvent::Extracting { progress } => {
+            task.set_phase("extracting");
+            task.set_progress(Some(*progress));
+        }
+        ProgressEvent::Verifying => {
+            task.set_phase("verifying");
+            task.set_progress(None);
+        }
+        ProgressEvent::InstallingDeps { .. } => {
+            // npm has no machine-readable progress without a TTY — the ramp it
+            // produced was a wall-clock guess, so the task row stays
+            // indeterminate here on purpose.
+            task.set_phase("installing-deps");
+            task.set_progress(None);
+        }
+    }
+}
+
 /* --------------------------- cancel registry --------------------------- */
 
 /// Transfer ids mapped to a shared cancel flag so the frontend
@@ -230,7 +261,7 @@ pub async fn download_dsh_version(
         Some(flag.clone()),
         &locks,
         &tasks,
-        |_task| async move {
+        |task| async move {
             let r = run_install(
                 &flag,
                 &tarball_url,
@@ -240,6 +271,7 @@ pub async fn download_dsh_version(
                 &registry_base,
                 keep_archive,
                 total_bytes,
+                &task,
                 &on_progress,
             )
             .await;

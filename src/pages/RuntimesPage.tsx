@@ -92,7 +92,7 @@ export function RuntimesPage() {
           {runtimes.map((r) => {
             const state = r.state
             const installed = state.kind === 'installed'
-            const busy = ['queued', 'downloading', 'extracting'].includes(state.kind)
+            const busy = ['queued', 'downloading', 'verifying', 'extracting'].includes(state.kind)
             const users = usedBy.get(r.id) ?? []
             return (
               <motion.li key={r.id} variants={riseItem}>
@@ -174,6 +174,7 @@ export function RuntimesPage() {
                         <div className="pt-3">
                           <ProgressBar
                             value={'progress' in state ? state.progress : 0}
+                            indeterminate={state.kind === 'verifying'}
                             active={state.kind === 'downloading'}
                             height={4}
                           />
@@ -187,7 +188,9 @@ export function RuntimesPage() {
                                   : `${formatBytes(state.bytesDone)}（总大小未知）`
                                 : state.kind === 'queued'
                                   ? '排队中，等待传输槽位…'
-                                  : '正在解压…'}
+                                  : state.kind === 'verifying'
+                                    ? '正在校验官方 SHASUMS…'
+                                    : '正在解压…'}
                             </span>
                             <span className="num">
                               {state.kind === 'downloading' ? formatSpeed(state.bytesPerSec) : ''}

@@ -37,6 +37,11 @@ export function createRuntimeActions(
                 bytesPerSec: progress.bytesPerSec ?? 0,
               })
               maybeHintMirror(() => officialRegistryLooksSlow(startedAt, progress.bytesDone ?? 0))
+            } else if (progress.stage === 'verifying') {
+              // Before this, verifying fell into the `extracting 0` branch and
+              // the bar jumped back to 0% reading "正在解压…" during the
+              // SHASUMS check.
+              patch({ kind: 'verifying' })
             } else {
               patch({ kind: 'extracting', progress: progress.progress ?? 0 })
             }

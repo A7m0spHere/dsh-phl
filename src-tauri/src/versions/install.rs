@@ -208,6 +208,7 @@ pub(crate) async fn run_install(
     registry_base: &str,
     keep_archive: bool,
     total_hint: Option<u64>,
+    task: &crate::resources::Task,
     on_progress: &Channel<ProgressEvent>,
 ) -> Result<(), String> {
     let version_name = sanitize_version(version_name)?;
@@ -241,31 +242,36 @@ pub(crate) async fn run_install(
         &part_path,
         total_hint,
         &|progress, bytes_done, bytes_per_sec| {
-            let _ = on_progress.send(ProgressEvent::Downloading {
+            let ev = ProgressEvent::Downloading {
                 progress,
                 bytes_done,
                 bytes_per_sec,
-            });
+            };
+            // One event, two consumers: the page's bar and the task center.
+            crate::versions::sync_task_progress(task, &ev);
+            let _ = on_progress.send(ev);
         },
     )
     .await?;
 
-    on_progress
-        .send(ProgressEvent::Verifying)
-        .map_err(|e| e.to_string())?;
+    let ev = ProgressEvent::Verifying;
+    crate::versions::sync_task_progress(task, &ev);
+    on_progress.send(ev).map_err(|e| e.to_string())?;
     if let Err(e) = verify_integrity(&downloaded.sha512, integrity) {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(e);
     }
 
-    on_progress
-        .send(ProgressEvent::Extracting { progress: 0.0 })
-        .map_err(|e| e.to_string())?;
+    let ev = ProgressEvent::Extracting { progress: 0.0 };
+    crate::versions::sync_task_progress(task, &ev);
+    on_progress.send(ev).map_err(|e| e.to_string())?;
     if let Err(e) = extract(
         &part_path,
         &staging,
         &|progress| {
-            let _ = on_progress.send(ProgressEvent::Extracting { progress });
+            let ev = ProgressEvent::Extracting { progress };
+            crate::versions::sync_task_progress(task, &ev);
+            let _ = on_progress.send(ev);
         },
         flag,
     )
@@ -280,12 +286,14 @@ pub(crate) async fn run_install(
     // install. A version that boots into a surprise 30-second npm run would
     // be the worse failure mode.
     if package_requires_deps(&staging) {
-        on_progress
-            .send(ProgressEvent::InstallingDeps { progress: 0.0 })
-            .map_err(|e| e.to_string())?;
+        let ev = ProgressEvent::InstallingDeps { progress: 0.0 };
+        crate::versions::sync_task_progress(task, &ev);
+        on_progress.send(ev).map_err(|e| e.to_string())?;
         let node = pick_npm_capable_node(root).unwrap_or_else(|| PathBuf::from("node"));
         if let Err(e) = install_version_deps(&node, &staging, registry_base, flag, &|p| {
-            let _ = on_progress.send(ProgressEvent::InstallingDeps { progress: p });
+            let ev = ProgressEvent::InstallingDeps { progress: p };
+            crate::versions::sync_task_progress(task, &ev);
+            let _ = on_progress.send(ev);
         })
         .await
         {
@@ -312,14 +320,22 @@ pub(crate) async fn run_install(
         return Err(e.to_string());
     }
 
-    on_progress
-        .send(ProgressEvent::Verifying)
-        .map_err(|e| e.to_string())?;
+    let ev = ProgressEvent::Verifying;
+    crate::versions::sync_task_progress(task, &ev);
+    on_progress.send(ev).map_err(|e| e.to_string())?;
+    // The health gate is its own wait — name it after what is happening
+    // rather than reusing the integrity phase.
+    task.set_phase("checking");
+    task.set_progress(None);
     if let Err(e) = check_version_health(&staging, &version_name) {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(format!("安装校验未通过，版本未安装: {e}"));
     }
 
+    // The swap itself: rename + a second health check + the backup removal.
+    // For a reinstall over a big `node_modules` the backup removal is the
+    // slow part, so the task row says so instead of looking hung.
+    task.set_phase("committing");
     promote_staged(&staging, &dest, &backup, &|installed: &Path| {
         check_version_health(installed, &version_name)
     })

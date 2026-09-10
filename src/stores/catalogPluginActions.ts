@@ -93,7 +93,9 @@ export function createPluginActions(
               stage:
                 progress.stage === 'extracting' || progress.stage === 'installing-deps'
                   ? 'installing'
-                  : progress.stage,
+                  : progress.stage === 'installingDeps'
+                    ? 'deps'
+                    : progress.stage,
               progress: progress.progress ?? 0,
               bytesDone: progress.bytesDone ?? 0,
               bytesPerSec: progress.bytesPerSec ?? 0,

@@ -507,7 +507,16 @@ async fn run_npm_install(
             status.code().unwrap_or(-1)
         ))
     } else {
-        Err(err_text)
+        // The pipe caps the log at tens of KB, but the failure a toast has to
+        // render is the TAIL — the last lines before npm gave up.
+        let trimmed = err_text.trim_end();
+        let cut = trimmed
+            .char_indices()
+            .rev()
+            .nth(4000)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        Err(trimmed[cut..].to_string())
     }
 }
 

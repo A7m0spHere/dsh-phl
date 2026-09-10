@@ -4,7 +4,16 @@ import type { DshVersion, InstanceTemplate, Plugin, Runtime } from '@/types'
 
 /** Live transfer state for one (instance, plugin) install. */
 export interface PluginTransferState {
-  stage: 'queued' | 'preparing' | 'downloading' | 'verifying' | 'installing'
+  stage:
+    | 'queued'
+    | 'preparing'
+    | 'downloading'
+    | 'verifying'
+    | 'installing'
+    /** pnpm is resolving the plugin's dependency closure (no ratio to show). */
+    | 'deps'
+    /** The transaction commit: marker + Cordis registration + enable flag. */
+    | 'committing'
   progress: number
   bytesDone: number
   bytesPerSec: number

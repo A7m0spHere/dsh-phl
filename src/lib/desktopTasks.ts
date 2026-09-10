@@ -11,6 +11,9 @@ export interface TaskInfo {
   label: string
   resources: string[]
   phase: string
+  /** Real 0..=1 ratio for the current phase, or null when indeterminate —
+   *  the task center must not render a bar for null. */
+  progress: number | null
   state: 'running' | 'done' | 'failed' | 'cancelled'
   cancelRequested: boolean
   error: string | null

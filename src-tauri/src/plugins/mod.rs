@@ -118,6 +118,13 @@ pub enum PluginProgressEvent {
     Installing {
         progress: f64,
     },
+    /// pnpm is materialising the plugin's dependency closure — minutes-long
+    /// on a cold cache, with no machine-readable progress (npm/pnpm only draw
+    /// their bar on a TTY). The card must go indeterminate, not freeze at the
+    /// last extraction percentage.
+    InstallingDeps,
+    /// The transaction commit: marker, Cordis registration, enable flag.
+    Committing,
 }
 
 #[derive(Debug, Serialize)]

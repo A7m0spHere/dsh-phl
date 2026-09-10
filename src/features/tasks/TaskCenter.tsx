@@ -5,6 +5,7 @@ import { cn } from '@/lib/cn'
 import { cancelTransfer, desktop, type TaskInfo } from '@/lib/desktop'
 import { parseThrownError } from '@/lib/errorCodes'
 import { useMotion } from '@/lib/motion'
+import { ProgressBar } from '@/components/ui'
 import { useTaskStore } from '@/stores/taskStore'
 import { useUIStore } from '@/stores/uiStore'
 
@@ -36,6 +37,7 @@ const PHASE_LABEL: Record<string, string> = {
   verifying: '校验完整性',
   extracting: '解压中',
   'installing-deps': '安装依赖',
+  checking: '健康检查',
   committing: '提交变更',
   copying: '复制文件',
   moving: '搬迁',
@@ -187,15 +189,17 @@ function TaskRow({
           {running ? (
             <>
               <span>{phaseText(task)}</span>
-              {task.cancelRequested ? null : (
-                task.id.startsWith('task-') ? null : (
-                  <button
-                    className="text-accent hover:underline"
-                    onClick={() => void cancelTransfer(task.id)}
-                  >
-                    取消
-                  </button>
-                )
+              {/* A real ratio earns a number next to the phase word;
+                  indeterminate phases stay on the word alone — inventing a
+                  percent for them is the lie the old rows told by omission
+                  (they showed none, because nothing ever set the phase). */}
+              {task.progress != null && (
+                <span className="num shrink-0">{Math.round(task.progress * 100)}%</span>
+              )}
+              {task.cancelRequested || task.id.startsWith('task-') ? null : (
+                <button className="text-accent hover:underline" onClick={() => void cancelTransfer(task.id)}>
+                  取消
+                </button>
               )}
             </>
           ) : task.state === 'cancelled' ? (
@@ -209,6 +213,11 @@ function TaskRow({
             <span>已完成 · {label}</span>
           )}
         </div>
+        {running && task.progress != null && (
+          <div className="mt-1">
+            <ProgressBar value={task.progress} height={3} />
+          </div>
+        )}
         {/* 失败的下载类任务给出直接可达的页面入口（重试入口）。 */}
         {task.state === 'failed' && (task.kind === 'version-install' || task.kind === 'runtime-install') && (
           <button
