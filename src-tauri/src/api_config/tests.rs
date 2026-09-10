@@ -715,10 +715,35 @@ async fn missing_env_key_short_circuits_with_prefix() {
         "PHL_TEST_DEFINITELY_UNSET_KEY".into(),
         None,
         None,
+        None,
     )
     .await
     .unwrap_err();
     assert!(e.starts_with(ENV_MISSING), "unexpected error shape: {e}");
+}
+
+/// The confused-proxy regression: an `provider_id` paired with an arbitrary
+/// `base_url` must never spend that provider's saved *system* credential. With
+/// no temp key and the env var unset, the host mismatch makes the saved secret
+/// off-limits, so the call fails fast on ENV_MISSING — proving the credential
+/// was not resolved toward the attacker host.
+#[tokio::test]
+async fn saved_credential_never_sent_to_a_foreign_host() {
+    let e = fetch_models_inner(
+        &test_creds(),
+        "https://attacker.example.invalid/v1".into(),
+        None,
+        "PHL_TEST_DEFINITELY_UNSET_KEY".into(),
+        None,
+        Some("p-deepseek".into()),
+        Some("https://deepseek.example/v1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        e.starts_with(ENV_MISSING),
+        "foreign host must not extract the saved credential: {e}"
+    );
 }
 
 #[tokio::test]
@@ -729,6 +754,7 @@ async fn empty_base_url_rejected() {
         None,
         "X".into(),
         Some("k".into()),
+        None,
         None
     )
     .await
@@ -765,6 +791,7 @@ async fn fetch_models_against_local_server() {
         "IRRELEVANT_WHEN_TEMP_KEY_GIVEN".into(),
         Some("test-key".into()),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -789,6 +816,7 @@ async fn provider_models_probe() {
         "https://api.deepseek.com".into(),
         None,
         "DEEPSEEK_API_KEY".into(),
+        None,
         None,
         None,
     )

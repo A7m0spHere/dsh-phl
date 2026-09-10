@@ -610,6 +610,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The honesty half of the rollback contract (audit D4): when the
+    /// final-check fails *and* the `rename(backup → dest)` that would bring the
+    /// old version back ALSO fails, `promote_staged` must not claim
+    /// 「已恢复原版本」. It has to say recovery failed and name the backup path,
+    /// so the user looks where the previous version actually still is instead
+    /// of finding a missing install. The backup tree is made un-restorable by
+    /// removing it inside `final_check` — a deterministic stand-in for any real
+    /// reason the restore rename might fail (a lock, a vanished path) without
+    /// depending on OS file locking.
+    #[tokio::test]
+    async fn promote_reports_a_failed_rollback_instead_of_a_false_restore() {
+        let root = std::env::temp_dir().join(format!("phl-rollback-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = root.join("versions");
+        let dest = versions.join("0.1.0");
+        std::fs::create_dir_all(dest.join("lib")).unwrap();
+        std::fs::write(dest.join("lib").join("bin.js"), "// old").unwrap();
+
+        let token = now_millis();
+        let staging = txn_dir(&versions, "0.1.0", "staging", token);
+        let backup = txn_dir(&versions, "0.1.0", "backup", token);
+        std::fs::create_dir_all(staging.join("lib")).unwrap();
+        std::fs::write(staging.join("lib").join("bin.js"), "// broken").unwrap();
+
+        // A final_check that fails, and removes the backup dir as its failure
+        // path so the subsequent restore rename cannot succeed. The closure
+        // must capture nothing across the `await`, so it deletes synchronously.
+        let backup_for_check = backup.clone();
+        let err = promote_staged(&staging, &dest, &backup, &|_| {
+            let _ = std::fs::remove_dir_all(&backup_for_check);
+            Err("坏树".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("恢复原版本失败"),
+            "must admit the restore failed, not claim a false success: {err}"
+        );
+        assert!(
+            !err.contains("已恢复原版本"),
+            "must never say the previous version was restored: {err}"
+        );
+        assert!(
+            err.contains(&backup.display().to_string()),
+            "must name the backup path the user should recover from: {err}"
+        );
+        // The failed commit left no half-installed version at `dest`.
+        assert!(!dest.join("lib").join("bin.js").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn version_health_gates_incomplete_trees() {
         let dir = std::env::temp_dir().join(format!("phl-health-{}", std::process::id()));

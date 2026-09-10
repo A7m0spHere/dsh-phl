@@ -140,6 +140,40 @@ pub struct ValidatedPack {
     pub assets: Vec<String>,
 }
 
+/// Win32 device names that cannot exist as a file/directory segment
+/// (`CON`, `NUL`, `COM1`… `LPT9`, case-insensitive, ignoring any extension).
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// True when one path component is a name Windows (and NTFS) will actually
+/// materialise as the archive intends. This is the *archive-relative* view of
+/// the portable-filename invariant the app crate enforces for its own ids in
+/// `paths::is_windows_safe_name`; the two differ on purpose:
+///
+///   * A leading `.` is REJECTED for app id segments (an object hidden from
+///     every scanner can never be listed back) but ALLOWED here, because a
+///     legitimate pack payload is full of dotfiles (`.env`, `.gitignore`,
+///     `.credentials.yaml`).
+///   * A `:` is fatal for both: on NTFS it opens an *alternate data stream*,
+///     so `payload:secret` writes a stream that never appears in the entry's
+///     own name, is invisible to the integrity manifest and to Explorer, and
+///     would pass `read_pack`'s name check untouched. Refusing the colon here
+///     is what keeps the "validated by its names" promise honest on Windows.
+///   * Trailing `.`/space (Win32 trims them, colliding two entries onto one
+///     path) and reserved device names (uncreatable) are refused by both.
+fn is_safe_entry_component(name: &str) -> bool {
+    if name.is_empty() || name.contains(':') {
+        return false;
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    !WINDOWS_RESERVED.contains(&base.as_str())
+}
+
 /// A safe relative path inside the pack: normalised, no traversal, forward
 /// slashes. Rejects the shapes `ensure_under_root` would otherwise have to
 /// catch at write time — doing it on the *name* is what lets validation run
@@ -152,7 +186,18 @@ pub(crate) fn normalize_entry(name: &str) -> Result<PathBuf, PackError> {
     let mut out = PathBuf::new();
     for c in Path::new(&unified).components() {
         match c {
-            Component::Normal(part) => out.push(part),
+            Component::Normal(part) => {
+                // The component is OS-safe as a *name*, not just traversal-
+                // free: a colon would smuggle an NTFS stream past the name
+                // check (see `is_safe_entry_component`).
+                let text = part.to_string_lossy();
+                if !is_safe_entry_component(&text) {
+                    return Err(PackError::PathTraversal(format!(
+                        "压缩包条目名包含非法文件名段: {name}"
+                    )));
+                }
+                out.push(part);
+            }
             Component::CurDir => {}
             // ParentDir / RootDir / Prefix: an escape attempt or an absolute
             // entry. Refused outright, same reasoning as `safe_join`.
@@ -205,6 +250,10 @@ where
     }
 
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    // Packs are portable to Windows/macOS, whose default filesystems are
+    // case-insensitive. Reject names that would collapse onto one destination
+    // there even when validation runs on a case-sensitive Linux runner.
+    let mut seen_portable: BTreeSet<String> = BTreeSet::new();
     let mut entries: Vec<String> = Vec::new();
     let mut embedded: BTreeSet<String> = BTreeSet::new();
     let mut assets: Vec<String> = Vec::new();
@@ -238,7 +287,12 @@ where
         }
 
         if !entry.is_dir() {
-            if !seen.insert(path.clone()) {
+            let portable_key = path
+                .iter()
+                .map(|part| part.to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>()
+                .join("/");
+            if !seen.insert(path.clone()) || !seen_portable.insert(portable_key) {
                 return Err(PackError::DuplicateEntry(raw_name));
             }
             entries.push(raw_name.clone());
@@ -275,6 +329,16 @@ where
         .map_err(|e| PackError::MalformedManifest(format!("非 UTF-8: {e}")))?;
     let manifest: PhlPackManifest = parse_manifest(text)?;
     validate_manifest_schema(&manifest)?;
+
+    // `sessionsIncluded` is the installer's privacy-consent signal. A pack
+    // must not claim false while physically carrying conversation history;
+    // otherwise validation succeeds and unpack writes user data the review UI
+    // explicitly said was absent.
+    if has_sessions && !manifest.content.sessions_included {
+        return Err(PackError::Consistency(
+            "压缩包包含 sessions/ 对话记录，但清单声明 sessionsIncluded=false".into(),
+        ));
+    }
 
     // Cross-check: every embedded plugin the manifest names must physically
     // exist as a `package.json` under its declared path (spec §23 embedded file

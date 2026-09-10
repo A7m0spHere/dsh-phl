@@ -14,18 +14,56 @@ use tauri::State;
 
 /* ---------------------------- path segments ---------------------------- */
 
+/// The Win32-reserved device names. A name whose leading dot-separated
+/// segment matches one of these (case-insensitively) cannot be created as a
+/// file or directory on Windows regardless of extension — `CON`, `CON.txt`,
+/// `nul` all fail — and a path segment PHL cannot create is a segment it must
+/// not resolve a destructive operation against. `COM0`/`COM10+`/`LPT10+` are
+/// deliberately *not* reserved here: they are not special on current Windows
+/// and rejecting them would risk turning away a legitimate id.
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// True unless `name` is a filesystem segment the Win32 namespace treats
+/// specially even though a plain `[A-Za-z0-9._-]` whitelist lets it through.
+///
+/// This is the *shared* portable-filename invariant behind every id/profile/
+/// version/runtime segment PHL creates, so the rules cannot drift between
+/// modules and leave a hole in exactly the one place a `remove_dir_all` walks
+/// the result. It rejects:
+///   * the empty string, and `.`/`..` (navigation — the reason
+///     `remove_version_dir` once deleted the data root instead of a version);
+///   * a trailing `.` or space: Win32 silently trims them, so `foo.` and
+///     `foo` collide into one directory and `dsh-1.0.` would overwrite
+///     `dsh-1.0` (a *different* logical object sharing a path);
+///   * a leading `.`: hidden from every scanner, so an object written under
+///     it can never be listed back;
+///   * a Win32 reserved device name (see [`WINDOWS_RESERVED`]).
+pub(crate) fn is_windows_safe_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.ends_with('.') || name.ends_with(' ') || name.starts_with('.') {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    !WINDOWS_RESERVED.contains(&base.as_str())
+}
+
 /// Ids, profile names and snapshot ids are pasted straight into filesystem
 /// paths, so they get a whitelist: anything that is not a plain segment is
-/// rejected rather than normalized.
+/// rejected rather than normalized. The character whitelist and the shared
+/// Win32 invariant ([`is_windows_safe_name`]) are both enforced here so no
+/// caller has to remember either half.
 pub(crate) fn sanitize_segment(value: &str, label: &str) -> Result<String, String> {
     let ok = !value.is_empty()
         && value.len() <= 64
-        && !value.starts_with('.')
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        && value != "."
-        && value != "..";
+        && is_windows_safe_name(value);
     if ok {
         Ok(value.to_string())
     } else {
@@ -340,6 +378,36 @@ mod tests {
         assert!(sanitize_segment("a/b", "id").is_err());
         assert!(sanitize_segment("a\\b", "id").is_err());
         assert!(sanitize_segment("", "id").is_err());
+    }
+
+    /// The Windows-specific shapes that pass a plain `[A-Za-z0-9._-]`
+    /// whitelist but resolve to the *wrong* (or no) directory on NTFS. These
+    /// once turned a per-id delete into a data-root delete; they must fail at
+    /// the single shared invariant, not via scattered `!= "..."` patches.
+    #[test]
+    fn segments_reject_windows_special_names() {
+        // Dot-runs: `.`/`..` navigation and `...` (Windows trims trailing
+        // dots so `...` collapses toward the parent).
+        assert!(sanitize_segment(".", "id").is_err());
+        assert!(sanitize_segment("..", "id").is_err());
+        assert!(sanitize_segment("...", "id").is_err());
+        assert!(sanitize_segment("....", "id").is_err());
+        // Trailing dot / space: Windows silently trims them, so these collide
+        // onto the trimmed name — `dsh-1.0.` would overwrite `dsh-1.0`.
+        assert!(!is_windows_safe_name("dsh-1.0."));
+        assert!(!is_windows_safe_name("inst-a "));
+        // Leading dot hides the object from every scanner, so it can never be
+        // listed back.
+        assert!(!is_windows_safe_name(".hidden"));
+        // Reserved device names (case-insensitive, extension ignored).
+        for bad in ["CON", "con", "NUL.txt", "aux", "COM1", "LPT9", "COM3.log"] {
+            assert!(!is_windows_safe_name(bad), "{bad} must be refused");
+        }
+        // A real, legal version id and id must still pass.
+        assert!(is_windows_safe_name("dsh-0.1.2"));
+        assert!(is_windows_safe_name("node-22.1.0"));
+        assert!(is_windows_safe_name("inst-a1b2c3"));
+        assert!(is_windows_safe_name("CONsole")); // not the device name
     }
 
     #[test]

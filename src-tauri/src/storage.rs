@@ -482,6 +482,7 @@ pub async fn move_root_data(
         &locks,
         &tasks,
         |task| async move {
+            ensure_migration_source_is_current(&phl, Path::new(&from))?;
             if let Some(path) = journal_path.as_deref() {
                 retire_completed_migration(&phl, path, Path::new(&from), Path::new(&to))?;
             }
@@ -530,6 +531,26 @@ fn same_location(a: &Path, b: &Path) -> bool {
     #[cfg(not(windows))]
     {
         a == b
+    }
+}
+
+/// The IPC caller may describe the destination, but it does not get to choose
+/// an arbitrary source tree. A migration always starts at the data root the
+/// backend currently owns; otherwise `move_root_data` would be a privileged
+/// "move this directory" primitive for any local WebView caller.
+fn ensure_migration_source_is_current(phl: &PhlState, from: &Path) -> Result<(), String> {
+    let current = phl.root();
+    if same_location(&current, from) {
+        Ok(())
+    } else {
+        Err(crate::errors::coded(
+            crate::errors::ErrCode::State,
+            format!(
+                "迁移源目录与当前数据目录不一致：当前为 {}，收到 {}；未移动任何数据",
+                current.display(),
+                from.display()
+            ),
+        ))
     }
 }
 
@@ -994,6 +1015,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn migration_source_must_be_the_backend_owned_root() {
+        let scratch = TestRoot::new();
+        let current = scratch.0.join("current");
+        let unrelated = scratch.0.join("unrelated");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        let state = PhlState::with_pointer(Some(scratch.0.join("root.json")));
+        state.set_root(&current.to_string_lossy()).unwrap();
+
+        assert!(ensure_migration_source_is_current(&state, &current).is_ok());
+        let err = ensure_migration_source_is_current(&state, &unrelated).unwrap_err();
+        assert!(err.contains("不一致"), "unexpected error: {err}");
+        assert!(
+            unrelated.exists(),
+            "validation must not touch the supplied tree"
+        );
     }
 
     /// A writable directory on a volume *other* than the one holding

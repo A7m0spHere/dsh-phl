@@ -243,11 +243,64 @@ async fn remove_runtime_dir_body(
     let root = phl.root();
     let dir = root.join("runtimes").join(&safe);
     ensure_under_root(&root.join("runtimes"), &dir)?;
+
+    // A runtime is the interpreter every instance bound to it launches with.
+    // Unlike a version, an instance need not be *running* to break: deleting
+    // the runtime strands that instance's next launch, so this guard scans
+    // every instance manifest, not just the live process table the version
+    // delete walks.
+    let users = instances_referencing_runtime(&root, &safe).await;
+    if !users.is_empty() {
+        return Err(format!(
+            "以下实例绑定了该 Runtime，请先删除或改用其它 Runtime 后再操作：{}",
+            users.join("、")
+        ));
+    }
+
     task.set_phase("removing");
-    crate::instances::remove_tree_progress(&dir, task)
-        .await
-        .map_err(|(_, e)| e.to_string())?;
+    // Detach from the visible namespace before tearing it down, exactly as
+    // version removal does: the hidden `.phl-REMOVE-*` name is skipped by every
+    // tree walker, so a slow or partial teardown can never be listed back as an
+    // installed runtime or copied half-deleted. A failed teardown renames it
+    // home and surfaces the caller's error.
+    let detached = root.join("runtimes").join(format!(
+        ".phl-REMOVE-{safe}-{}",
+        crate::versions::install::now_millis()
+    ));
+    let target = match tokio::fs::rename(&dir, &detached).await {
+        Ok(()) => detached,
+        Err(_) => dir.clone(),
+    };
+    let result = crate::instances::remove_tree_progress(&target, task).await;
+    if result.is_err() && target != dir {
+        let _ = tokio::fs::rename(&target, &dir).await;
+    }
+    result.map_err(|(_, e)| e.to_string())?;
     Ok(())
+}
+
+/// The names of every instance whose manifest still points at `runtime_id`.
+/// An instance whose manifest this build cannot read is skipped: it is hidden
+/// from the UI anyway and cannot launch under this build, so it neither blocks
+/// nor is blocked.
+async fn instances_referencing_runtime(root: &Path, runtime_id: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(crate::instances::instances_root(root)).await else {
+        return names;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_dir() || crate::paths::is_hidden_tree_name(&entry.file_name().to_string_lossy())
+        {
+            continue;
+        }
+        if let Some(manifest) = crate::instances::read_manifest(&path).await {
+            if manifest.runtime_id == runtime_id {
+                names.push(format!("「{}」", manifest.name));
+            }
+        }
+    }
+    names
 }
 
 /// Bytes on disk per installed runtime, for the Runtimes overview. The dist
@@ -457,6 +510,96 @@ mod tests {
         assert!(safe_join(&dest, Path::new("node.exe")).is_ok());
         assert!(safe_join(&dest, Path::new("../evil")).is_err());
         assert!(safe_join(&dest, Path::new("C:\\evil")).is_err());
+    }
+
+    fn rt_task() -> crate::resources::Task {
+        crate::resources::Tasks::default()
+            .begin(
+                crate::resources::TaskInfo::new(
+                    "rt-test".into(),
+                    "runtime-remove",
+                    "test".into(),
+                    &[],
+                ),
+                None,
+            )
+            .unwrap()
+    }
+
+    /// Write a real instance (with an `instance.json`) under `root/instances`
+    /// that binds to `runtime_id`, for the reference-guard boundary test.
+    fn seed_instance(root: &Path, id: &str, runtime_id: &str) {
+        let dir = root.join("instances").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "id": id,
+            "name": format!("inst {id}"),
+            "kind": "sandbox",
+            "hue": 0,
+            "versionId": "dsh-0.1.0",
+            "runtimeId": runtime_id,
+            "port": 8000,
+            "autoPort": false,
+            "profile": "web",
+            "createdAt": "2026-01-01T00:00:00Z",
+        });
+        std::fs::write(
+            dir.join("instance.json"),
+            serde_json::to_vec_pretty(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A runtime bound to an instance — even a stopped one — must not be
+    /// deletable, and the guard must run before anything is removed.
+    #[tokio::test]
+    async fn deleting_a_runtime_bound_to_an_instance_is_refused_and_leaves_it_intact() {
+        let root = std::env::temp_dir().join(format!("phl-rt-del-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtimes")).unwrap();
+        let rt = root.join("runtimes").join("node-22.11.0");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(rt.join("node.exe"), b"interpreter").unwrap();
+        // A stopped instance (not in any process table) still binds the runtime.
+        seed_instance(&root, "inst-a", "node-22.11.0");
+
+        let phl = PhlState::with_pointer(Some(root.join("cfg").join("root.json")));
+        phl.set_root(&root.to_string_lossy()).unwrap();
+
+        let err = remove_runtime_dir_body(&phl, "node-22.11.0", &rt_task())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("绑定") || err.contains("实例"),
+            "unexpected: {err}"
+        );
+        assert!(rt.exists(), "a referenced runtime must not be deleted");
+        assert!(rt.join("node.exe").exists());
+
+        // With no instance bound, the same call succeeds.
+        std::fs::remove_dir_all(root.join("instances")).unwrap();
+        remove_runtime_dir_body(&phl, "node-22.11.0", &rt_task())
+            .await
+            .unwrap();
+        assert!(!rt.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn instances_referencing_runtime_scans_real_manifests() {
+        let root = std::env::temp_dir().join(format!("phl-rt-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        seed_instance(&root, "inst-a", "node-22.11.0");
+        seed_instance(&root, "inst-b", "node-20.0.0");
+        let users = instances_referencing_runtime(&root, "node-22.11.0").await;
+        assert_eq!(users.len(), 1);
+        assert!(users[0].contains("inst inst-a") || users[0].contains("inst-a"));
+        assert!(instances_referencing_runtime(&root, "node-18.0.0")
+            .await
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

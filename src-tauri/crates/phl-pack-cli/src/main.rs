@@ -174,9 +174,40 @@ fn cmd_unpack(args: &[String]) -> Result<(), String> {
     // refuse (the same "validate before writing" rule as PHL's own install).
     phl_pack_core::read_pack_from_path(&pack).map_err(|e| e.detail())?;
     let dest = PathBuf::from(dest);
-    std::fs::create_dir_all(&dest).map_err(|e| format!("创建目标目录失败: {e}"))?;
-    let written = unpack::unpack_entries_to(&pack, |rel| Some((dest.join(rel), dest.clone())))
-        .map_err(|e| e.detail())?;
+    if dest.exists() {
+        return Err(format!(
+            "目标路径已存在，拒绝覆盖其中的文件: {}",
+            dest.display()
+        ));
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("output");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging = parent.join(format!(".{name}.phl-unpack-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&staging).map_err(|e| format!("创建解包暂存目录失败: {e}"))?;
+    let unpacked =
+        unpack::unpack_entries_to(&pack, |rel| Some((staging.join(rel), staging.clone())));
+    let written = match unpacked {
+        Ok(written) => written,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e.detail());
+        }
+    };
+    if let Err(e) = std::fs::rename(&staging, &dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("提交解包目录失败: {e}"));
+    }
     println!("已解包 {} 个文件到 {}", written.len(), dest.display());
     Ok(())
 }
@@ -326,6 +357,25 @@ mod tests {
         let err = cmd_unpack(&[pack.display().to_string(), out.display().to_string()]).unwrap_err();
         assert!(!err.is_empty());
         assert!(!out.join("embedded").exists(), "nothing extracted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpack_refuses_an_existing_target_without_touching_it() {
+        let dir = temp("existing-target");
+        let layout = dir.join("layout");
+        std::fs::create_dir_all(&layout).unwrap();
+        fixture_layout(&layout);
+        let pack = dir.join("built.phlpack");
+        cmd_build(&[layout.display().to_string(), pack.display().to_string()]).unwrap();
+
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("sentinel.txt"), b"keep").unwrap();
+        let err = cmd_unpack(&[pack.display().to_string(), out.display().to_string()]).unwrap_err();
+        assert!(err.contains("已存在"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(out.join("sentinel.txt")).unwrap(), b"keep");
+        assert!(!out.join("phlpack.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

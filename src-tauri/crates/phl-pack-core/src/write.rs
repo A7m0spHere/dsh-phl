@@ -387,6 +387,12 @@ pub fn build_pack_from_dir_with_cancel<F: Fn() -> bool>(
     cancel: &F,
 ) -> Result<ValidatedPack, PackError> {
     ensure_not_cancelled(cancel)?;
+    if out.exists() {
+        return Err(PackError::Unreadable(format!(
+            "输出文件已存在，拒绝覆盖: {}",
+            out.display()
+        )));
+    }
     let manifest_path = src_dir.join(MANIFEST_NAME);
     let bytes = std::fs::read(&manifest_path).map_err(|_| PackError::MissingManifest)?;
     let text = std::str::from_utf8(&bytes)
@@ -406,17 +412,26 @@ pub fn build_pack_from_dir_with_cancel<F: Fn() -> bool>(
     files.retain(|(rel, _)| rel != MANIFEST_NAME);
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut builder = PackBuilder::create(out).map_err(PackError::Unreadable)?;
-    for (rel, path) in &files {
-        ensure_not_cancelled(cancel)?;
+    let result = (|| {
+        let mut builder = PackBuilder::create(out).map_err(PackError::Unreadable)?;
+        for (rel, path) in &files {
+            ensure_not_cancelled(cancel)?;
+            builder
+                .add_file_from_disk_with_cancel(path, rel, cancel)
+                .map_err(PackError::Invalid)?;
+        }
         builder
-            .add_file_from_disk_with_cancel(path, rel, cancel)
+            .finish_with_cancel(manifest, cancel)
             .map_err(PackError::Invalid)?;
+        read_pack_from_path_with_cancel(out, cancel)
+    })();
+    if result.is_err() {
+        // A failed build is not an artifact: leaving a partial ZIP behind
+        // makes the next safe (no-overwrite) retry fail and invites users to
+        // mistake an invalid file for a completed pack.
+        let _ = std::fs::remove_file(out);
     }
-    builder
-        .finish_with_cancel(manifest, cancel)
-        .map_err(PackError::Invalid)?;
-    read_pack_from_path_with_cancel(out, cancel)
+    result
 }
 
 #[cfg(test)]
@@ -592,6 +607,38 @@ mod tests {
         let err = build_pack_from_dir(&dir, &dir.join("x.phlpack"), &mut withheld, &mut Vec::new())
             .unwrap_err();
         assert_eq!(err, PackError::MissingManifest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_whole_directory_build_removes_its_partial_output() {
+        let dir = std::env::temp_dir().join(format!("phl-packpartial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("sessions/project/session-1")).unwrap();
+        std::fs::write(
+            src.join(MANIFEST_NAME),
+            serde_json::to_vec(&sample_manifest()).unwrap(),
+        )
+        .unwrap();
+        // The validator rejects this privacy contradiction only after the ZIP
+        // has been written, exercising cleanup of a genuinely created output.
+        std::fs::write(
+            src.join("sessions/project/session-1/session.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let out = dir.join("partial.phlpack");
+        assert!(build_pack_from_dir(&src, &out, &mut Vec::new(), &mut Vec::new()).is_err());
+        assert!(!out.exists(), "a failed build must not leave an artifact");
+
+        std::fs::write(&out, b"keep me").unwrap();
+        assert!(build_pack_from_dir(&src, &out, &mut Vec::new(), &mut Vec::new()).is_err());
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            b"keep me",
+            "pre-existing outputs are refused before any write"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
