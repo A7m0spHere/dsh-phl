@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0-alpha.3",
+  "notes": "# PHL 0.1.0-alpha.3\r\n\r\n这一版加入了**应用内自动更新**：装上它之后，以后的新版本可以在应用里直接下载安装，不用再手动换包。\r\n\r\n## 新增\r\n\r\n**设置 → 关于 里多了更新面板。** 显示当前版本与状态，可以手动「检查更新」；有新版本时一键「下载并安装」，\r\nWindows 上安装器装完会自动重启应用。启动后也会**自动检查一次**（可在同一面板关掉）——\r\n它只读取一份清单，不会自动下载任何东西。\r\n\r\n更新包经过**签名校验**：清单里带 minisign 签名，应用用内置公钥验证，验不过就不下载。\r\n所以即使安装包仍未做 Authenticode 签名，更新链路本身是可信的。\r\n\r\n## 说明\r\n\r\n- 自动更新**从这一版开始生效**：如果装的是 alpha.2 或更早，需要手动装一次 alpha.3，之后才能自动更新。\r\n- 安装包仍未做代码签名，首次下载与运行仍有 SmartScreen 提示（见下）。\r\n- alpha 阶段：界面与数据格式仍可能变化。",
+  "pub_date": "2026-09-10T01:48:27Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSUVNLT2ZsMDMzcmhMOVJvMkZPSzFxakdBNlA3a2MzeTZ4S0tvays3MkRtQnRWSndHS3JTY0Q2d3lFdXV4My9Pam4wYnFoZnVaYk03ZlVON01qd243TGhEYWtKZmJmZWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDA0OTA2CWZpbGU6UEhMXzAuMS4wLWFscGhhLjNfeDY0LXNldHVwLmV4ZQptSnd4TDYrbFYvQTFMT0UvWlQ3NUQxZmJmelF6ZG1qaXFwMWhJc2dUUlVlNDBKMWFDN1dVNGQyUzZaaVVvcEZLVUtMWW5iY251ZWw1enh2MXdXN05Ddz09Cg==",
+      "url": "https://github.com/A7m0spHere/dsh-phl/releases/download/v0.1.0-alpha.3/PHL_0.1.0-alpha.3_x64-setup.exe"
+    }
+  }
+}
