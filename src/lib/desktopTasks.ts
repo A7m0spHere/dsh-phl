@@ -23,12 +23,10 @@ export interface TaskInfo {
 
 export interface TaskList {
   tasks: TaskInfo[]
-  /** Resource keys currently locked — a conflict can be explained with these. */
-  held: string[]
 }
 
 /** Live and recent long tasks from the backend registry (single source). */
 export async function listTasks(): Promise<TaskList> {
-  if (!isDesktop) return { tasks: [], held: [] }
+  if (!isDesktop) return { tasks: [] }
   return invoke<TaskList>('list_tasks')
 }

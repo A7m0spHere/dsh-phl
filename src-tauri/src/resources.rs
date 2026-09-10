@@ -454,17 +454,18 @@ fn trim_history(map: &mut HashMap<String, TaskInfo>) {
 #[serde(rename_all = "camelCase")]
 pub struct TaskList {
     pub tasks: Vec<TaskInfo>,
-    pub held: Vec<String>,
 }
 
-/// Recent and in-flight long tasks, for the task centre and for explaining
-/// a conflict the UI did not itself cause.
+/// Recent and in-flight long tasks, for the task centre.
+///
+/// This used to also ship a raw `held` key list, polled and stored by the
+/// frontend but consumed nowhere: a task row already carries the `resources`
+/// it holds, and a *conflict* is explained through the coded Busy error
+/// (whose `held_by` renders the owning operation) — the snapshot added a
+/// second, un-labelled channel for the same facts and was deleted per audit.
 #[tauri::command]
-pub fn list_tasks(tasks: State<'_, Tasks>, locks: State<'_, ResourceLocks>) -> TaskList {
-    TaskList {
-        tasks: tasks.list(),
-        held: locks.snapshot(),
-    }
+pub fn list_tasks(tasks: State<'_, Tasks>) -> TaskList {
+    TaskList { tasks: tasks.list() }
 }
 
 /* ------------------------------ tests ------------------------------ */
