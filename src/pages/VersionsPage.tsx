@@ -201,9 +201,14 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
 
   const state = version.state
   const installed = state.kind === 'installed'
-  const busy = ['queued', 'downloading', 'extracting', 'verifying', 'installing-deps'].includes(
-    state.kind,
-  )
+  const busy = [
+    'queued',
+    'downloading',
+    'extracting',
+    'verifying',
+    'installing-deps',
+    'removing',
+  ].includes(state.kind)
 
   const onRemove = async () => {
     const ok = await confirm({
@@ -346,7 +351,11 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               <div className="pt-3">
                 <ProgressBar
                   value={'progress' in state ? state.progress : 0.97}
-                  indeterminate={state.kind === 'queued' || state.kind === 'installing-deps'}
+                  indeterminate={
+                    state.kind === 'queued' ||
+                    state.kind === 'installing-deps' ||
+                    state.kind === 'removing'
+                  }
                   active={state.kind === 'downloading'}
                   height={4}
                 />
@@ -362,12 +371,14 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                             ? // npm has no machine-readable progress without a TTY;
                               // an indeterminate bar beats a fake percentage.
                               '正在安装依赖（npm），冷安装可能需要几分钟…'
-                            : '正在校验完整性…'}
+                            : state.kind === 'removing'
+                              ? '正在删除版本目录…'
+                              : '正在校验完整性…'}
                   </span>
                   <span className="num">
                     {state.kind === 'downloading'
                       ? formatSpeed(state.bytesPerSec)
-                      : state.kind === 'installing-deps'
+                      : state.kind === 'installing-deps' || state.kind === 'removing'
                         ? ''
                         : 'progress' in state
                           ? `${Math.round(state.progress * 100)}%`

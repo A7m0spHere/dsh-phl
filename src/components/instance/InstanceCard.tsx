@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowUpRight, MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
+import { ArrowUpRight, Loader2, MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { formatRelative } from '@/lib/format'
 import { hueTone } from '@/lib/hue'
@@ -35,6 +35,10 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   const dismissError = useInstanceStore((s) => s.dismissError)
   const focused = useInstanceStore((s) => s.focusId === instance.id)
   const setFocus = useInstanceStore((s) => s.setFocus)
+  // The backend is walking this instance's tree for deletion: the row must
+  // say so (and stop offering actions) instead of sitting frozen until the
+  // remove command finally lands.
+  const deleting = useInstanceStore((s) => s.deleting[instance.id] === true)
   const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance.runtimeId))
   const push = useUIStore((s) => s.push)
@@ -104,7 +108,19 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               pushes the layout around. */}
           <div className="relative mt-0.5 h-[16px]">
             <AnimatePresence mode="wait" initial={false}>
-              {busy ? (
+              {deleting ? (
+                <motion.div
+                  key="deleting"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={t(0.16)}
+                  className="absolute inset-0 flex items-center gap-1.5 text-sm text-warn"
+                >
+                  <Loader2 size={11} className="shrink-0 animate-spin" />
+                  <span className="truncate">正在删除实例目录…</span>
+                </motion.div>
+              ) : busy ? (
                 <motion.div
                   key="phase"
                   initial={{ opacity: 0, y: 5 }}
@@ -162,6 +178,12 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           </div>
         )}
 
+        {deleting ? (
+          <span className="flex shrink-0 items-center gap-1.5 text-sm text-ink-faint">
+            <Loader2 size={12} className="animate-spin" />
+            删除中…
+          </span>
+        ) : (
         <div
           className="flex shrink-0 items-center gap-1"
           onClick={(e) => e.stopPropagation()}
@@ -234,6 +256,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             )}
           />
         </div>
+        )}
       </div>
 
       {/* Secondary row only exists in the grid layout, where there is room. */}

@@ -186,12 +186,28 @@ export function createPluginActions(
       if (!removed) return
       const label = get().pluginById(pluginId)?.name ?? pluginId
       if (!removed.linked) {
+        // Pending on the card while the tree walk runs: before this the row
+        // sat unchanged (or vanished, for pinned rows) until the command
+        // resolved, and a second click hit the backend busy lock.
+        const key = pluginKey(instanceId, pluginId)
+        if (get().pluginTransfers[key]) return
+        const patch = (transfer: import('./catalogTypes').PluginTransferState) =>
+          set((current) => ({ pluginTransfers: { ...current.pluginTransfers, [key]: transfer } }))
+        const clear = () =>
+          set((current) => {
+            const transfers = { ...current.pluginTransfers }
+            delete transfers[key]
+            return { pluginTransfers: transfers }
+          })
+        patch({ stage: 'removing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
         try {
           await repository.uninstallPlugin(instance, removed)
         } catch (err) {
+          clear()
           useUIStore.getState().toast({ kind: 'error', title: `${label} 卸载失败`, message: parseThrownError(err).message })
           return
         }
+        clear()
       }
       patchInstancePlugins(instanceId, (plugins) => plugins.filter((plugin) => plugin.pluginId !== pluginId))
       useUIStore.getState().toast({ kind: 'info', title: `已从「${instance.name}」移除 ${label}` })

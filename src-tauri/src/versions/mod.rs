@@ -705,6 +705,22 @@ mod tests {
 mod net_tests {
     use super::*;
 
+    /// Throwaway task handle for the removal tests in this module: phase
+    /// writes land on a registry row nobody lists.
+    fn test_task() -> crate::resources::Task {
+        crate::resources::Tasks::default()
+            .begin(
+                crate::resources::TaskInfo::new(
+                    "ver-test".into(),
+                    "version-remove",
+                    "test".into(),
+                    &[],
+                ),
+                None,
+            )
+            .unwrap()
+    }
+
     /// Real-network probe: run explicitly with `cargo test -- --ignored`
     /// to see what the catalog pipeline actually returns on this machine.
     #[tokio::test]
@@ -783,7 +799,7 @@ mod net_tests {
             .unwrap()
             .insert("pinver-01".into(), ProcessEntry { pid: 1, port: 1 });
 
-        let err = remove_version_dir_inner(&root, &processes, "0.1.0")
+        let err = remove_version_dir_inner(&root, &processes, "0.1.0", &test_task())
             .await
             .unwrap_err();
         assert!(err.contains("占用版本的实例"), "{err}");
@@ -792,7 +808,7 @@ mod net_tests {
 
         // After the instance stops, the delete goes through.
         processes.0.lock().unwrap().remove("pinver-01");
-        remove_version_dir_inner(&root, &processes, "0.1.0")
+        remove_version_dir_inner(&root, &processes, "0.1.0", &test_task())
             .await
             .unwrap();
         assert!(!version.exists(), "version removed once nothing pins it");

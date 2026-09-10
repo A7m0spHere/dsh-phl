@@ -1,4 +1,5 @@
 import { Cancelled, repository } from '@/services'
+import { parseThrownError } from '@/lib/errorCodes'
 import type { Runtime } from '@/types'
 import { acquireTransferSlot, releaseTransferSlot } from './transferCoordinator'
 import { maybeHintMirror, officialRegistryLooksSlow } from './catalogNotifications'
@@ -68,7 +69,30 @@ export function createRuntimeActions(
     },
 
     async removeRuntime(id) {
-      await repository.removeRuntime(id)
+      const prev = get().runtimes.find((r) => r.id === id)?.state
+      if (!prev || prev.kind === 'removing') return
+      set((current) => ({
+        runtimes: current.runtimes.map((runtime) =>
+          runtime.id === id ? { ...runtime, state: { kind: 'removing' as const } } : runtime,
+        ),
+      }))
+      try {
+        await repository.removeRuntime(id)
+      } catch (err) {
+        // Put the row back — the directory is still there (or coming back).
+        set((current) => ({
+          runtimes: current.runtimes.map((runtime) =>
+            runtime.id === id ? { ...runtime, state: prev } : runtime,
+          ),
+        }))
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '删除 Runtime 失败',
+          message: parseThrownError(err).message || '目录可能被其他程序占用。',
+          duration: 6000,
+        })
+        return
+      }
       set((current) => ({
         runtimes: current.runtimes.map((runtime) =>
           runtime.id === id ? { ...runtime, state: { kind: 'available' } } : runtime,

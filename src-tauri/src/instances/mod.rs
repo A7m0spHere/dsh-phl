@@ -304,8 +304,8 @@ pub async fn delete_instance(
         None,
         &locks,
         &tasks,
-        move |_| async move {
-            let r = delete_instance_inner(&state.root(), &id, &processes).await;
+        move |task| async move {
+            let r = delete_instance_inner(&state.root(), &id, &processes, &task).await;
             if r.is_ok() {
                 if let Ok(dir) = instance_dir(&state.root(), &id) {
                     invalidate_disk_usage(&dir);
@@ -317,20 +317,130 @@ pub async fn delete_instance(
     .await
 }
 
-async fn delete_instance_inner(root: &Path, id: &str, processes: &Processes) -> Result<(), String> {
+async fn delete_instance_inner(
+    root: &Path,
+    id: &str,
+    processes: &Processes,
+    task: &crate::resources::Task,
+) -> Result<(), String> {
     let dir = instance_dir(root, id)?;
     assert_inside_instances(root, &dir)?;
     // Canonical containment on top of the lexical one: a directory junction
-    // planted at the instance path must not redirect `remove_dir_all`.
+    // planted at the instance path must not redirect the walker.
     ensure_under_root(&instances_root(root), &dir)?;
     // The UI blocks this too, but the guard belongs next to the irreversible
     // operation: a running instance's files are in use, and forcing the
     // delete would leave a half-deleted tree behind a live process.
     snapshot::ensure_not_running(processes, id)?;
-    if dir.exists() {
-        tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
-            crate::errors::coded(crate::errors::io_code(&e), format!("无法删除实例目录: {e}"))
+    task.set_phase("removing");
+    remove_tree_progress(&dir, task)
+        .await
+        .map_err(|(path, e)| {
+            crate::errors::coded(
+                crate::errors::io_code(&e),
+                format!("无法删除实例目录: {}（{e}）", path.display()),
+            )
         })?;
+    Ok(())
+}
+
+/// Recursively delete `dir`, feeding a real byte ratio into the task row.
+/// Every remove command in PHL used `tokio::fs::remove_dir_all` blind: a
+/// multi-GB `node_modules` teardown left the task center on "准备中" and the
+/// page looking unresponsive long enough for users to click again into a
+/// busy-lock error. This is the same deletion std performs — files and links
+/// first, directories post-order, links unlinked and never followed — with
+/// progress the std call cannot give.
+///
+/// The tree is moved out of the visible namespace by the *caller* when a
+/// transaction boundary matters (version removal stages a backup elsewhere);
+/// here we only take the wall time and say so.
+/// The failed path plus the raw OS error — callers own the wording, because
+/// a locked `node_modules` inside a version tree and a locked instance home
+/// deserve different advice.
+pub(crate) async fn remove_tree_progress(
+    dir: &Path,
+    task: &crate::resources::Task,
+) -> Result<(), (PathBuf, std::io::Error)> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    task.set_progress(None);
+    // Denominator first: `dir_size` ignores links exactly as the delete step
+    // below counts them at zero, so the ratio can never drift past 100%.
+    let measure_path = dir.to_path_buf();
+    let total = tokio::task::spawn_blocking(move || copy::dir_size(&measure_path))
+        .await
+        .map_err(|_| (dir.to_path_buf(), std::io::Error::other("统计线程异常退出")))?;
+    let report = task.clone();
+    let target = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut state = RemoveState {
+            report: &report,
+            total,
+            done: 0,
+            last: std::time::Instant::now(),
+        };
+        // The step clears the tree's contents; the now-empty root itself goes
+        // here — same discipline as std's `remove_dir_all`.
+        match remove_tree_step(&target, &mut state).and_then(|()| std::fs::remove_dir(&target)) {
+            Ok(()) => {
+                // Land the bar at 100% even when the throttle ate the tail.
+                if total > 0 {
+                    report.set_progress(Some(1.0));
+                }
+                Ok(())
+            }
+            Err(e) => Err((target, e)),
+        }
+    })
+    .await
+    .map_err(|_| (dir.to_path_buf(), std::io::Error::other("删除线程异常退出")))?
+}
+
+struct RemoveState<'a> {
+    report: &'a crate::resources::Task,
+    total: u64,
+    done: u64,
+    last: std::time::Instant,
+}
+
+fn remove_tree_step(dir: &Path, state: &mut RemoveState) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Links count zero toward the byte total (`dir_size` ignores
+            // them); a file link unlinks with `remove_file`, a junction or
+            // directory symlink needs `remove_dir` — Windows rejects the
+            // wrong choice with a non-obvious code, so try both.
+            if std::fs::remove_file(&path).is_err() {
+                std::fs::remove_dir(&path)?;
+            }
+        } else if file_type.is_dir() {
+            remove_tree_step(&path, state)?;
+            std::fs::remove_dir(&path)?;
+        } else {
+            let bytes = std::fs::symlink_metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            std::fs::remove_file(&path)?;
+            state.done = state.done.saturating_add(bytes);
+            // 120 ms throttle — the same cadence the downloader uses, so a
+            // rapid delete of small files does not hammer the task mutex.
+            if state.last.elapsed() >= std::time::Duration::from_millis(120) {
+                state.last = std::time::Instant::now();
+                if state.total > 0 {
+                    let ratio = (state.done as f64 / state.total as f64).min(0.99);
+                    state.report.set_progress(Some(ratio));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -833,6 +943,21 @@ async fn run_clone(
 /// fresh instance. A clone starts from the present, without the past.
 #[cfg(test)]
 mod tests {
+    /// Throwaway task handle for tests driving guarded internals directly.
+    fn test_task() -> crate::resources::Task {
+        crate::resources::Tasks::default()
+            .begin(
+                crate::resources::TaskInfo::new(
+                    "inst-test".into(),
+                    "instance-delete",
+                    "test".into(),
+                    &[],
+                ),
+                None,
+            )
+            .unwrap()
+    }
+
     use super::bundle::import_instance_bundle_inner;
     use super::copy::dir_size_skipping;
     use super::manifest::MANIFEST_SCHEMA_VERSION;
@@ -1063,9 +1188,14 @@ mod tests {
         assert_eq!(listed[0].manifest.name, "Renamed");
         assert_eq!(listed[0].manifest.port, 9001);
 
-        delete_instance_inner(root.as_path(), "demo-a1b2", &Processes::default())
-            .await
-            .unwrap();
+        delete_instance_inner(
+            root.as_path(),
+            "demo-a1b2",
+            &Processes::default(),
+            &test_task(),
+        )
+        .await
+        .unwrap();
         assert!(!dir.exists());
         assert!(list_instances_inner(root.as_path())
             .await
@@ -1704,10 +1834,10 @@ mod tests {
             let snapshot_dir = root.join("instances").join("win-path-1").join("snapshots");
             std::fs::create_dir_all(&snapshot_dir).unwrap();
 
-            delete_instance_inner(&root, "win-path-2", &Processes::default())
+            delete_instance_inner(&root, "win-path-2", &Processes::default(), &test_task())
                 .await
                 .unwrap();
-            delete_instance_inner(&root, "win-path-1", &Processes::default())
+            delete_instance_inner(&root, "win-path-1", &Processes::default(), &test_task())
                 .await
                 .unwrap();
             assert!(!root.join("instances").join("win-path-1").exists());
@@ -2002,9 +2132,14 @@ mod tests {
 
         // Delete the clone: the source tree and its bytes are untouched,
         // and no staging directory survived the lifecycle.
-        delete_instance_inner(root.as_path(), "cln-b2bb", &Processes::default())
-            .await
-            .unwrap();
+        delete_instance_inner(
+            root.as_path(),
+            "cln-b2bb",
+            &Processes::default(),
+            &test_task(),
+        )
+        .await
+        .unwrap();
         assert!(!cln.exists());
         assert_eq!(tree_fingerprint(&src.join("dsh-home")), before);
         assert_eq!(list_instances_inner(root.as_path()).await.unwrap().len(), 1);
@@ -2229,9 +2364,14 @@ mod tests {
         std::fs::create_dir_all(&nm).unwrap();
         copy::recreate_link(&nm.join("dep"), &versions_dep, true).unwrap();
 
-        delete_instance_inner(root.as_path(), "dlt-a1aa", &Processes::default())
-            .await
-            .unwrap();
+        delete_instance_inner(
+            root.as_path(),
+            "dlt-a1aa",
+            &Processes::default(),
+            &test_task(),
+        )
+        .await
+        .unwrap();
 
         assert!(!root.join("instances").join("dlt-a1aa").exists());
         assert_eq!(

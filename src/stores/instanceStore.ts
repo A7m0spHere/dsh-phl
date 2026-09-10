@@ -23,6 +23,13 @@ interface InstanceState {
    * tree copy that can run for a while on a plugin-heavy instance.
    */
   snapshotTransfers: Record<string, CopyProgress>
+  /**
+   * Instances whose teardown the backend is walking right now (a GB-deep
+   * `node_modules` delete takes real seconds). The row shows "删除中…" and
+   * ignores repeat clicks — before this the interface sat frozen through
+   * the delete and users clicked into a busy-lock error.
+   */
+  deleting: Record<string, true>
 
   load: () => Promise<void>
   /** Forces a re-read — used when the data root changes under the app. */
@@ -156,6 +163,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   setFocus: (focusId) => set({ focusId }),
   createProgress: null,
   snapshotTransfers: {},
+  deleting: {},
 
   async load() {
     // StrictMode mounts effects twice in development; loading once keeps the
@@ -610,6 +618,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   async deleteInstance(id) {
     const instance = get().byId(id)
     if (!instance) return
+    if (get().deleting[id]) return // a teardown for this row is already walking
     if (instanceWriters.get(id)?.busy) {
       useUIStore.getState().toast({ kind: 'info', title: '请等待实例配置保存完成后再删除' })
       return
@@ -624,12 +633,39 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     if (transfers[id] !== undefined || get().snapshotTransfers[id] !== undefined) {
       set({ snapshotTransfers: transfers })
     }
-    await repository.deleteInstance(id)
+    // Pending FIRST: the tree walk takes seconds, and the user must see the
+    // click land (row badge + task center "删除实例") before it does.
+    set({ deleting: { ...get().deleting, [id]: true } })
+    try {
+      await repository.deleteInstance(id)
+    } catch (err) {
+      set((s) => {
+        const deleting = { ...s.deleting }
+        delete deleting[id]
+        return { deleting }
+      })
+      const parsed = parseThrownError(err)
+      useUIStore.getState().toast({
+        kind: 'error',
+        title: `删除「${instance.name}」失败`,
+        message: parsed.message,
+        action: { label: '重试', run: () => void get().deleteInstance(id) },
+      })
+      return
+    }
+    set((s) => {
+      const deleting = { ...s.deleting }
+      delete deleting[id]
+      const states = { ...s.states }
+      delete states[id]
+      return {
+        deleting,
+        instances: s.instances.filter((i) => i.id !== id),
+        states,
+        focusId: s.focusId === id ? null : s.focusId,
+      }
+    })
     instanceWriters.delete(id)
-    const states = { ...get().states }
-    delete states[id]
-    set({ instances: get().instances.filter((i) => i.id !== id), states })
-    if (get().focusId === id) set({ focusId: null })
     useUIStore.getState().toast({
       kind: 'info',
       title: `已删除「${instance.name}」`,

@@ -391,17 +391,16 @@ pub async fn uninstall_plugin(
         None,
         &locks,
         &tasks,
-        move |_| async move {
+        move |task| async move {
             super::install::recover_profile_transaction(&profile).await?;
             remove_plugin_block(&profile, &registry_id).await?;
             let nm = profile.join("node_modules");
             let dir = nm.join(&registry_id);
             crate::paths::ensure_under_root(&nm, &dir)?;
-            if dir.exists() {
-                tokio::fs::remove_dir_all(&dir)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
+            task.set_phase("removing");
+            crate::instances::remove_tree_progress(&dir, &task)
+                .await
+                .map_err(|(_, e)| e.to_string())?;
             // Recovery above consumes verified backups before unregistering;
             // never guess ownership from flattened package names here.
             Ok(())
