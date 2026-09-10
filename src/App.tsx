@@ -10,6 +10,7 @@ import {
   useInstanceStore,
   useSettingsStore,
   useUIStore,
+  useUpdateStore,
   useViewStore,
   initDesktopRoot,
   maybeOfferRootChoice,
@@ -87,6 +88,21 @@ export default function App() {
       })
     load()
   }, [loadCatalog, loadInstances, loadApiConfig])
+
+  // Update check: one signed manifest read, a few seconds after the window is
+  // up so it never competes with the startup load. It is silent — a failure
+  // here must not interrupt someone who is working — and it only toasts when a
+  // newer version exists. Downloading and installing stay a deliberate click in
+  // 设置 → 关于.
+  const autoUpdateCheck = useSettingsStore((s) => s.autoUpdateCheck)
+  useEffect(() => {
+    if (!autoUpdateCheck) return
+    const timer = window.setTimeout(
+      () => void useUpdateStore.getState().check({ silent: true }),
+      8000,
+    )
+    return () => window.clearTimeout(timer)
+  }, [autoUpdateCheck])
 
   // Version catalog auto-sync. Deliberately cheap: one coarse timer that only
   // compares clocks on each tick, and no-ops while the window is hidden — so

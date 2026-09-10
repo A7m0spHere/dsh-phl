@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-10 应用内自动更新：**接入 Tauri updater。** 启动后 8 秒静默读取 GitHub 上的签名清单（`updates` 分支的 `latest.json`，minisign 校验，公钥在 `tauri.conf.json`），有更新时提示；下载与安装是「设置 → 关于」里的一次点击，Windows 上安装器装完自动重启。发布流水线在打标签时用 `TAURI_SIGNING_PRIVATE_KEY` 签出 `.sig` 并生成清单（`createUpdaterArtifacts` 走 CI 专用合并配置，本地无密钥也能构建），随后推到 `updates` 分支并附到 Release。已在真实桌面端验证：本地清单服务 → 应用识别到新版本并显示更新说明；公钥与签名的 keyid 一致。详见 [自动更新说明](docs/auto-update.md)。
+
 2026-09-09 发布就绪：**代码与供应链检查已就绪，实机验收按「维护者自测通过、问题走 issue」记账。** `cargo audit`（513 个 crate）**0 个漏洞**，7 条警告均为传递依赖的 unmaintained / unsound（`glib` 仅 Linux 目标编译），不引入豁免；安装包在 `acdb74e` 上重建（2,978,500 字节，SHA-256 `5B72B49F…7837`）。CI：`96546fc`、`cb04137` 全绿；`b8a8c91` 的 Rust job 一次 `cargo test --workspace` 失败但同代码在下一提交通过，本地连跑 10 轮全绿，判为 runner 偶发（再次出现需取日志定位）。**已发布 `v0.1.0-alpha.1`（prerelease）**：<https://github.com/A7m0spHere/dsh-phl/releases/tag/v0.1.0-alpha.1>，资产 `PHL_0.1.0-alpha.1_x64-setup.exe`（2,973,765 字节，SHA-256 `3D6FD01D…9AEB`，附 `.sha256`），由标签触发 `.github/workflows/release.yml` 在干净 runner 上重跑门禁后构建。详见 [发布就绪记录](docs/preview-release-readiness-2026-09-09.md)。
 
 2026-09-09 P2 收口：**首轮 review 点名「公开发包前应一并修复」的四项 P2 已处理完毕。** P2-1 凭据与配置的提交顺序改为「先记旧值、失败回滚」，错误文案不再说谎；P2-2 快照明确**只替换 dsh-home**，不再暗示回滚版本绑定（按 review 允许的第二条路径）；P2-3 新增中断还原的自动回滚（备份放回、退役、清暂存）；P2-4 WebUI 窗口地址与请求不一致时先 navigate 再聚焦。门禁全绿：Rust workspace **352 项通过 / 6 忽略**（桌面库 316）、前端 **92 项 / 15 文件**。放行剩余条件仍为真机安装验收、故障注入与 `cargo audit`，以及在本轮修复之上重建安装包。详见 [P2 收口记录](docs/preview-release-p2-round-2026-09-09.md)。

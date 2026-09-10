@@ -197,6 +197,7 @@ UI  →  Repository  →  Mock Data        （浏览器模式；桌面端的静�
 - 快照（真实）：创建 / 回滚 / 删除 —— 复制实例的 dsh-home（插件与配置），回滚后快照保留、可反复还原；运行中的实例拒绝快照操作
 - 诊断（真实）：数据目录可写、DSH 版本与 Runtime 完整性、实例引用有效性、孤立目录与下载缓存一览；缓存一键清理
 - 真实启动：解析版本与 Runtime → 端口探测 / 自动分配 → 以实例自己的 `DSH_HOME` 启动 `dsh web` → 端口就绪探测 → 打开 WebUI；停止即终止进程树，崩溃自动反馈到 UI，启动日志落在实例 `logs/` 下
+- 应用更新（真实）：读取 GitHub 上的**签名清单**（minisign 校验，验不过不下载），发现新版本后可在「设置 → 关于」下载并安装，装完自动重启；启动时可自动检查。见 [docs/auto-update.md](./docs/auto-update.md)
 - 设置：外观（主题、强调色、密度、动效强度）、下载源、存储、高级、关于
 - 快速跳转（Ctrl+K）、快捷键、Toast、确认与输入对话框、空状态与错误态
 
@@ -246,5 +247,5 @@ PHL 在**产品模型与交互质量**上参考了 PCL、Prism Launcher、DSHBox
 真机打磨。实例模板为静态产品内容（形状预设），不需要后端模块。
 
 当前为 **alpha 预览**：已在 [Releases](https://github.com/A7m0spHere/dsh-phl/releases) 提供安装包，
-界面与数据格式仍可能变化，暂不提供自动更新。问题与建议请提
-[Issue](https://github.com/A7m0spHere/dsh-phl/issues)。
+界面与数据格式仍可能变化。**alpha.3 起支持应用内检查更新**——装的是更早版本的话，需要手动装一次 alpha.3，
+之后就能自动更新。问题与建议请提 [Issue](https://github.com/A7m0spHere/dsh-phl/issues)。

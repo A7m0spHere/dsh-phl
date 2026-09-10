@@ -54,6 +54,7 @@ import { Logo } from '@/components/layout/Logo'
 import { AccentPicker, InstanceColourLegend } from '@/features/settings/appearance'
 import { MigrationOverlay } from '@/features/settings/MigrationOverlay'
 import { DiagnosticsSection } from '@/features/settings/DiagnosticsSection'
+import { UpdateSection } from '@/features/settings/UpdateSection'
 import { ROOT_PRESETS, SECTIONS } from '@/features/settings/consts'
 
 export function SettingsPanel() {
@@ -116,8 +117,7 @@ export function SettingsPage() {
       startup: s.startup,
       minimizeToTray: s.minimizeToTray,
       closeStopsInstances: s.closeStopsInstances,
-      checkUpdates: s.checkUpdates,
-      source: s.source,
+        source: s.source,
       customSource: s.customSource,
       concurrency: s.concurrency,
       keepArchives: s.keepArchives,
@@ -515,18 +515,6 @@ export function SettingsPage() {
                     checked={settings.closeStopsInstances}
                     onChange={(v) => settings.set('closeStopsInstances', v)}
                     label="退出时停止所有实例"
-                  />
-                }
-              />
-              <SettingRow
-                title="自动检查 DSH 新版本"
-                description="独立的应用更新检查尚未接入；版本列表的定时刷新在「下载」分区配置"
-                control={
-                  <Switch
-                    disabled
-                    checked={settings.checkUpdates}
-                    onChange={(v) => settings.set('checkUpdates', v)}
-                    label="自动检查 DSH 新版本"
                   />
                 }
               />
@@ -1043,6 +1031,8 @@ export function SettingsPage() {
                 </div>
               </div>
             </PageSection>
+
+            <UpdateSection />
 
             <PageSection title="当前阶段">
               <div className="rounded-lg bg-surface p-3 text-sm leading-relaxed text-ink-muted ring-1 ring-inset ring-line">
