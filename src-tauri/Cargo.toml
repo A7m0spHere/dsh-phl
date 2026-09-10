@@ -30,6 +30,10 @@ tauri-build = { version = "2", features = [] }
 # the display's scale factor (see apply_taskbar_icon in lib.rs).
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
+# In-app updates: the updater verifies a minisign signature against the pubkey
+# in tauri.conf.json before installing; process is only needed to relaunch.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 实例 dsh-home/settings.yaml 的读-合并-写（api_config）

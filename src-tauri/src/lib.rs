@@ -278,6 +278,8 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(versions::Transfers::default())
         .manage(resources::ResourceLocks::default())
         .manage(resources::Tasks::default())

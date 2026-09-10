@@ -37,8 +37,13 @@ interface SettingsState {
   root: string
   startup: StartupBehaviour
   minimizeToTray: boolean
-  checkUpdates: boolean
   closeStopsInstances: boolean
+  /**
+   * Check GitHub for a newer PHL build shortly after launch. The check only
+   * reads a signed manifest — nothing is downloaded or installed without an
+   * explicit click in 设置 → 关于.
+   */
+  autoUpdateCheck: boolean
 
   source: DownloadSource
   customSource: string
@@ -90,8 +95,8 @@ const defaults = {
   root: DEFAULT_ROOT,
   startup: 'none' as StartupBehaviour,
   minimizeToTray: true,
-  checkUpdates: true,
   closeStopsInstances: true,
+  autoUpdateCheck: true,
   source: 'official' as DownloadSource,
   customSource: '',
   concurrency: 2,
