@@ -196,9 +196,13 @@ jobs:
           $url = "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git clone --depth 1 --branch updates $url $dir 2>$null
           if ($LASTEXITCODE -ne 0) {
+            # First release after this step was added: the branch does not exist
+            # yet, so create it - and remember to wire the remote, or the push
+            # below fails with "'origin' does not appear to be a git repository".
             New-Item -ItemType Directory -Force $dir | Out-Null
             git -C $dir init --quiet
             git -C $dir checkout --quiet -b updates
+            git -C $dir remote add origin $url
           }
           Copy-Item dist-release/latest.json (Join-Path $dir 'latest.json') -Force
           git -C $dir config user.name 'github-actions[bot]'
