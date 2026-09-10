@@ -162,12 +162,14 @@ jobs:
       - name: Compose the release body
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist-release | Out-Null
+          # Written outside dist-release on purpose: everything in that folder
+          # is uploaded as a release asset, and the composed body is not one.
+          $target = Join-Path $env:RUNNER_TEMP 'release-body.md'
           $notes = Get-Content docs/release-notes.md -Raw
           $install = Get-Content docs/install-note.md -Raw
           $sep = [char]10 + [char]10
-          [IO.File]::WriteAllText("dist-release/release-body.md", $notes + $sep + $install, (New-Object Text.UTF8Encoding($false)))
-          Write-Host "release body lines: $((Get-Content dist-release/release-body.md).Count)"
+          [IO.File]::WriteAllText($target, $notes + $sep + $install, (New-Object Text.UTF8Encoding($false)))
+          Write-Host "release body lines: $((Get-Content $target).Count)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -177,7 +179,7 @@ jobs:
           # The composed body comes first: GitHub prepends it to the generated
           # changelog, so readers see what changed and how to verify the
           # download before the raw commit list.
-          body_path: dist-release/release-body.md
+          body_path: ${{ runner.temp }}/release-body.md
           generate_release_notes: true
           files: dist-release/*
 
