@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // repository surface is irrelevant to these actions and stubbed empty.
 const latest = vi.hoisted(() => vi.fn())
 const toggled = vi.hoisted(() => vi.fn())
+const toastSpy = vi.hoisted(() => vi.fn())
+// Mutable so individual tests can run actions against a running instance.
+const instanceStatus = vi.hoisted(() => ({ current: 'stopped' as string }))
 
 vi.mock('@/services', () => ({
   repository: {
@@ -13,7 +16,7 @@ vi.mock('@/services', () => ({
   Cancelled: class Cancelled extends Error {},
 }))
 vi.mock('./uiStore', () => ({
-  useUIStore: { getState: () => ({ toast: vi.fn(), push: vi.fn() }) },
+  useUIStore: { getState: () => ({ toast: toastSpy, push: vi.fn() }) },
 }))
 vi.mock('./settingsStore', () => ({
   useSettingsStore: { getState: () => ({ pendingReleaseAlerts: false, set: vi.fn() }) },
@@ -24,9 +27,10 @@ vi.mock('./instanceStore', () => ({
     getState: () => ({
       byId: (id: string) =>
         id === 'inst'
-          ? { id: 'inst', plugins: [{ pluginId: 'p-a', version: '1.0.0', linked: false }] }
+          ? { id: 'inst', name: 'Inst', plugins: [{ pluginId: 'p-a', version: '1.0.0', linked: false }] }
           : undefined,
       updateInstance: vi.fn(),
+      stateOf: () => ({ status: instanceStatus.current }),
     }),
   },
 }))
@@ -36,6 +40,8 @@ import { useCatalogStore } from './catalogStore'
 beforeEach(() => {
   latest.mockReset()
   toggled.mockReset()
+  toastSpy.mockReset()
+  instanceStatus.current = 'stopped'
   useCatalogStore.setState({
     latestVersions: {},
     // pluginById reads `plugins`; seed a row so `p-a` is checkable.
@@ -168,5 +174,30 @@ describe('plugin toggle serialization', () => {
     await Promise.all([first, second])
 
     expect(toggled).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('plugin toggle runtime semantics', () => {
+  it('a toggle while the instance runs promises the NEXT launch, not the live one', async () => {
+    // `cordis.patch.yml` is read at launch only; the old silent success made
+    // the switch moving look like the running process had re-read it.
+    instanceStatus.current = 'running'
+    toggled.mockResolvedValue(undefined)
+    await useCatalogStore.getState().setPluginEnabled('inst', 'p-a', false)
+    expect(toastSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'info',
+        title: expect.stringContaining('重启实例后生效'),
+      }),
+    )
+    expect(toastSpy).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+  })
+
+  it('a toggle while stopped reports plain success', async () => {
+    toggled.mockResolvedValue(undefined)
+    await useCatalogStore.getState().setPluginEnabled('inst', 'p-a', true)
+    expect(toastSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'success', title: expect.stringContaining('已启用') }),
+    )
   })
 })

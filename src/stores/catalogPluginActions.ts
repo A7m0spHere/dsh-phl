@@ -29,6 +29,18 @@ function patchInstancePlugins(instanceId: string, update: (plugins: InstalledPlu
   if (current) store.updateInstance(instanceId, { plugins: update(current.plugins) })
 }
 
+/**
+ * Whether profile changes would be noticed by the *currently running*
+ * process. DSH reads `cordis.patch.yml` and the profile's `node_modules`
+ * at launch — there is no hot-reload path. While the instance runs, these
+ * changes describe the NEXT launch, and the toast must not claim the live
+ * process already changed.
+ */
+function processLive(instanceId: string): boolean {
+  const status = useInstanceStore.getState().stateOf(instanceId).status
+  return status === 'running' || status === 'starting'
+}
+
 async function startLatestCheck(get: CatalogGet, set: CatalogSet, pluginId: string): Promise<void> {
   const gen = (latestGen.get(pluginId) ?? 0) + 1
   latestGen.set(pluginId, gen)
@@ -112,7 +124,9 @@ export function createPluginActions(
         useUIStore.getState().toast({
           kind: 'success',
           title: `已安装到「${instance.name}」`,
-          message: `${plugin.name} ${version}`,
+          message: processLive(instanceId)
+            ? `${plugin.name} ${version} · 实例正在运行，重启后才会加载新插件`
+            : `${plugin.name} ${version}`,
         })
       } catch (err) {
         if (err instanceof Cancelled) {
@@ -174,6 +188,14 @@ export function createPluginActions(
         patchInstancePlugins(instanceId, (plugins) =>
           plugins.map((plugin) => (plugin.pluginId === pluginId ? { ...plugin, enabled } : plugin)),
         )
+        // The toggle used to be SILENT on success: the switch visibly moved
+        // while the instance was running, implying the live process had
+        // re-read `cordis.patch.yml`. It had not.
+        useUIStore.getState().toast(
+          processLive(instanceId)
+            ? { kind: 'info', title: `${label} ${enabled ? '启用' : '停用'}配置已保存，重启实例后生效` }
+            : { kind: 'success', title: `${label} ${enabled ? '已启用' : '已停用'}` },
+        )
       } finally {
         pluginToggles.delete(key)
       }
@@ -210,7 +232,13 @@ export function createPluginActions(
         clear()
       }
       patchInstancePlugins(instanceId, (plugins) => plugins.filter((plugin) => plugin.pluginId !== pluginId))
-      useUIStore.getState().toast({ kind: 'info', title: `已从「${instance.name}」移除 ${label}` })
+      useUIStore.getState().toast({
+        kind: 'info',
+        title: `已从「${instance.name}」移除 ${label}`,
+        ...(processLive(instanceId)
+          ? { message: '实例正在运行，该插件已随进程加载，重启后不再出现' }
+          : {}),
+      })
     },
   }
 }
