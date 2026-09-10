@@ -120,6 +120,9 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const restoreSnapshot = useInstanceStore((s) => s.restoreSnapshot)
   const deleteSnapshot = useInstanceStore((s) => s.deleteSnapshot)
   const snapshotTransfer = useInstanceStore((s) => s.snapshotTransfers[id])
+  const snapshotOp = useInstanceStore((s) => s.snapshotOps[id])
+  const cancelSnapshot = useInstanceStore((s) => s.cancelSnapshot)
+  const deletingSnapshots = useInstanceStore((s) => s.deletingSnapshots)
   const confirm = useUIStore((s) => s.confirm)
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
@@ -832,21 +835,30 @@ export function InstanceDetailPage({ id }: { id: string }) {
               <Button
                 size="xs"
                 variant="ghost"
-                disabled={!!snapshotTransfer}
+                disabled={!!snapshotOp}
                 onClick={actions.snapshot}
               >
-                {snapshotTransfer ? '创建中…' : '创建快照'}
+                {snapshotOp === 'create' ? '创建中…' : '创建快照'}
               </Button>
             }
           >
             {snapshotTransfer && (
               <div className="mb-3 rounded bg-surface-sunken px-3 py-2 ring-1 ring-inset ring-line">
                 <ProgressBar value={snapshotTransfer.progress} active height={4} />
-                <div className="mt-1.5 flex justify-between text-sm text-ink-faint">
-                  <span>正在复制 dsh-home…</span>
-                  <span className="num">
-                    {formatBytes(snapshotTransfer.bytesDone)} /{' '}
-                    {formatBytes(snapshotTransfer.bytesTotal)}
+                <div className="mt-1.5 flex items-center justify-between text-sm text-ink-faint">
+                  <span>
+                    {snapshotOp === 'restore'
+                      ? '正在还原 dsh-home…（交换阶段不可取消）'
+                      : '正在复制 dsh-home…'}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="num">
+                      {formatBytes(snapshotTransfer.bytesDone)} /{' '}
+                      {formatBytes(snapshotTransfer.bytesTotal)}
+                    </span>
+                    <Button size="xs" variant="ghost" onClick={() => cancelSnapshot(instance.id)}>
+                      取消
+                    </Button>
                   </span>
                 </div>
               </div>
@@ -881,6 +893,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       <Button
                         size="xs"
                         variant="secondary"
+                        disabled={!!snapshotOp || !!deletingSnapshots[`${instance.id}:${snap.id}`]}
                         onClick={async () => {
                           const ok = await confirm({
                             title: `回滚到「${snap.label}」`,
@@ -897,6 +910,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                         label="删除快照"
                         size="xs"
                         variant="ghost"
+                        disabled={!!deletingSnapshots[`${instance.id}:${snap.id}`] || !!snapshotOp}
                         onClick={async () => {
                           const ok = await confirm({
                             title: '删除快照',

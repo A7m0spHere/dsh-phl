@@ -203,8 +203,15 @@ export interface PhlRepository {
   /**
    * Copies the snapshot's `dsh-home` back over the live one. The snapshot
    * itself survives, so the same point can be restored repeatedly.
+   * Progress and cancellation mirror `createSnapshot`: the copy is the long
+   * cancellable leg; once the swap starts the backend runs it to completion.
    */
-  restoreSnapshot(instance: Instance, snapshotId: string): Promise<Instance>
+  restoreSnapshot(
+    instance: Instance,
+    snapshotId: string,
+    onProgress: (p: CopyProgress) => void,
+    signal: AbortSignal,
+  ): Promise<Instance>
 
   deleteSnapshot(instance: Instance, snapshotId: string): Promise<void>
 

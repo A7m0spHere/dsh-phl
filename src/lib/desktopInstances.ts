@@ -165,10 +165,14 @@ export async function createInstanceSnapshot(
 
 export async function restoreInstanceSnapshot(
   id: string,
+  transferId: string,
   snapshotId: string,
+  onProgress: (event: { progress: number; bytesDone: number; bytesTotal: number }) => void,
 ): Promise<RemoteInstanceRecord> {
   if (!isDesktop) throw new Error('还原快照仅在桌面端可用')
-  return invoke('restore_instance_snapshot', { id, snapshotId })
+  const channel = new Channel<Parameters<typeof onProgress>[0]>()
+  channel.onmessage = onProgress
+  return invoke('restore_instance_snapshot', { id, transferId, snapshotId, onProgress: channel })
 }
 
 export async function deleteInstanceSnapshot(id: string, snapshotId: string): Promise<void> {
