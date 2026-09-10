@@ -19,8 +19,11 @@ minisign 解决「更新包是不是我们签的」——所以即使安装包�
 https://raw.githubusercontent.com/A7m0spHere/dsh-phl/updates/latest.json
 ```
 
-发布流水线在打 `v*` 标签时把 `latest.json` 推到 `updates` 分支。用分支而不是
-`releases/latest/download/latest.json`，是因为后者只指向**最新正式版**，而 PHL 目前发的是 prerelease。
+发布流水线在打 `v*` 标签时把 `latest.json` 推到 `updates` 分支——分支里只有这一个文件，
+首次建立时会自动 `git init` 并配好 remote。用分支而不是 `releases/latest/download/latest.json`，
+是因为后者只指向**最新正式版**，而 PHL 目前发的是 prerelease。
+
+清单同时作为资产附在 Release 上（与 `.sig`、`.sha256` 并列），便于人工核对；应用实际读的是分支上那一份。
 
 ## 密钥
 
