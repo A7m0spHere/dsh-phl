@@ -1,4 +1,5 @@
 import { parseThrownError } from '@/lib/errorCodes'
+import { categoryLabel } from '@/lib/healthCategories'
 import { useCallback, useEffect, useState } from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, Wrench, XCircle } from 'lucide-react'
 import {
@@ -163,7 +164,7 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
                   </span>
                 )}
               </span>
-              <span className="shrink-0 text-sm text-ink-faint">{check.category}</span>
+              <span className="shrink-0 text-sm text-ink-faint">{categoryLabel(check.category)}</span>
             </li>
           ))}
         </ul>
