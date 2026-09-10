@@ -92,7 +92,9 @@ export function RuntimesPage() {
           {runtimes.map((r) => {
             const state = r.state
             const installed = state.kind === 'installed'
-            const busy = ['queued', 'downloading', 'verifying', 'extracting'].includes(state.kind)
+            const busy = ['queued', 'downloading', 'verifying', 'extracting', 'removing'].includes(
+              state.kind,
+            )
             const users = usedBy.get(r.id) ?? []
             return (
               <motion.li key={r.id} variants={riseItem}>
@@ -174,13 +176,15 @@ export function RuntimesPage() {
                         <div className="pt-3">
                           <ProgressBar
                             value={'progress' in state ? state.progress : 0}
-                            indeterminate={state.kind === 'verifying'}
+                            indeterminate={state.kind === 'verifying' || state.kind === 'removing'}
                             active={state.kind === 'downloading'}
                             height={4}
                           />
                           <div className="mt-1.5 flex justify-between text-sm text-ink-faint">
                             <span>
-                              {state.kind === 'downloading'
+                              {state.kind === 'removing'
+                                ? '正在删除 Runtime 目录…'
+                                : state.kind === 'downloading'
                                 ? // 目录不发布体积；Rust 拿到的 content-length 体现在 progress 里，
                                   // 分母由 已完成字节 ÷ 进度 反推，比显示「0 B」诚实。
                                   state.progress > 0

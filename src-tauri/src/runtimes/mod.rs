@@ -229,21 +229,24 @@ pub async fn remove_runtime_dir(
         None,
         &locks,
         &tasks,
-        move |_| async move { remove_runtime_dir_body(&phl, &runtime_name).await },
+        move |task| async move { remove_runtime_dir_body(&phl, &runtime_name, &task).await },
     )
     .await
 }
 
-async fn remove_runtime_dir_body(phl: &PhlState, runtime_name: &str) -> Result<(), String> {
+async fn remove_runtime_dir_body(
+    phl: &PhlState,
+    runtime_name: &str,
+    task: &crate::resources::Task,
+) -> Result<(), String> {
     let safe = sanitize_version(runtime_name)?;
     let root = phl.root();
     let dir = root.join("runtimes").join(&safe);
     ensure_under_root(&root.join("runtimes"), &dir)?;
-    if dir.exists() {
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
+    task.set_phase("removing");
+    crate::instances::remove_tree_progress(&dir, task)
+        .await
+        .map_err(|(_, e)| e.to_string())?;
     Ok(())
 }
 

@@ -129,10 +129,25 @@ export function createVersionActions(
     },
 
     async removeVersion(id) {
+      const prev = get().versions.find((v) => v.id === id)?.state
+      if (!prev || prev.kind === 'removing') return
+      // Pending FIRST — the tree walk below can take seconds, and before this
+      // the row sat on "已安装" until the remove finally resolved.
+      set((current) => ({
+        versions: current.versions.map((version) =>
+          version.id === id ? { ...version, state: { kind: 'removing' as const } } : version,
+        ),
+      }))
       try {
         await repository.removeVersion(id)
       } catch (err) {
         console.warn('[phl] removeVersion failed:', err)
+        // The directory is (probably) still there — put the row back.
+        set((current) => ({
+          versions: current.versions.map((version) =>
+            version.id === id ? { ...version, state: prev } : version,
+          ),
+        }))
         const parsed = parseThrownError(err)
         const message = parsed.code
           ? `${parsed.message}（${parsed.hint}）`

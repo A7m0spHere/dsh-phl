@@ -12,6 +12,8 @@ export type RuntimeInstallState =
   | { kind: 'extracting'; progress: number }
   | { kind: 'installed'; installedAt: string }
   | { kind: 'failed'; reason: string }
+  /** A removal is walking the tree — the row shows it instead of lying idle. */
+  | { kind: 'removing' }
 
 export interface Runtime {
   id: string

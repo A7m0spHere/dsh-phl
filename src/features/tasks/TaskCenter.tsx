@@ -39,6 +39,7 @@ const PHASE_LABEL: Record<string, string> = {
   'installing-deps': '安装依赖',
   checking: '健康检查',
   committing: '提交变更',
+  removing: '删除目录',
   copying: '复制文件',
   moving: '搬迁',
   committed: '提交完成',

@@ -27,6 +27,8 @@ export type VersionInstallState =
       skippedDependencies?: string[]
     }
   | { kind: 'failed'; reason: string }
+  /** A removal is walking the tree — the row shows it instead of lying idle. */
+  | { kind: 'removing' }
 
 export interface DshVersion {
   id: string

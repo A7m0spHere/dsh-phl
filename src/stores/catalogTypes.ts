@@ -14,6 +14,8 @@ export interface PluginTransferState {
     | 'deps'
     /** The transaction commit: marker + Cordis registration + enable flag. */
     | 'committing'
+    /** UI-only: an uninstall is walking the package tree. */
+    | 'removing'
   progress: number
   bytesDone: number
   bytesPerSec: number

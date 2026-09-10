@@ -34,6 +34,13 @@ pub async fn list_installed_versions(
         if !path.is_dir() {
             continue;
         }
+        // `.phl-*` names are transaction staging: an in-flight install writes
+        // its marker into staging *before* promoting, and a detached removal
+        // carries the old marker away under `.phl-REMOVE-*`. Neither is an
+        // installed version — listing them spawned phantom rows.
+        if entry.file_name().to_string_lossy().starts_with(".phl-") {
+            continue;
+        }
         let installed_at = match read_marker(&path).await {
             Some(marker) => marker.installed_at,
             None => continue, // no marker → not a completed install
@@ -367,8 +374,8 @@ pub async fn remove_version_dir(
         None,
         &locks,
         &tasks,
-        move |_| async move {
-            remove_version_dir_inner(&phl.root(), &processes, &version_name).await
+        move |task| async move {
+            remove_version_dir_inner(&phl.root(), &processes, &version_name, &task).await
         },
     )
     .await
@@ -378,6 +385,7 @@ pub(crate) async fn remove_version_dir_inner(
     root: &Path,
     processes: &Processes,
     version_name: &str,
+    task: &crate::resources::Task,
 ) -> Result<(), String> {
     let safe = sanitize_version(version_name)?;
     let dir = root.join("versions").join(&safe);
@@ -417,16 +425,32 @@ pub(crate) async fn remove_version_dir_inner(
         ));
     }
 
-    if dir.exists() {
-        tokio::fs::remove_dir_all(&dir).await.map_err(|e| match e.raw_os_error() {
-            // 5 = access denied, 32 = sharing violation — both mean Windows
-            // found a handle this process cannot break. Name the usual
-            // suspects; a bare os error teaches the user nothing.
-            Some(5) | Some(32) => format!(
-                "目录被占用，无法删除（{e}）。请检查：① 是否有实例正在运行此版本（含残留的 node 进程）；② 资源管理器或终端是否停在该目录内；③ 杀毒软件是否正在扫描。"
-            ),
-            _ => e.to_string(),
-        })?;
+    task.set_phase("removing");
+    // Detach from the visible namespace first: the version stops reading as
+    // installed instantly, and `.phl-*` names are skipped by every tree
+    // walker (copy, snapshot, migration), so a slow teardown can never be
+    // copied halfway through. If the delete fails partway the staging name
+    // is renamed back and the caller's error still surfaces.
+    let detached = root
+        .join("versions")
+        .join(format!(".phl-REMOVE-{safe}-{}", now_millis()));
+    let target = match tokio::fs::rename(&dir, &detached).await {
+        Ok(()) => detached,
+        Err(_) => dir.clone(),
+    };
+    let result = crate::instances::remove_tree_progress(&target, task).await;
+    if result.is_err() && target != dir {
+        // Partial teardown: put the tree back where the list can see it.
+        let _ = tokio::fs::rename(&target, &dir).await;
     }
+    result.map_err(|(_, e)| match e.raw_os_error() {
+        // 5 = access denied, 32 = sharing violation — both mean Windows found
+        // a handle this process cannot break. Name the usual suspects; a bare
+        // os error teaches the user nothing.
+        Some(5) | Some(32) => format!(
+            "目录被占用，无法删除（{e}）。请检查：① 是否有实例正在运行此版本（含残留的 node 进程）；② 资源管理器或终端是否停在该目录内；③ 杀毒软件是否正在扫描。"
+        ),
+        _ => e.to_string(),
+    })?;
     Ok(())
 }

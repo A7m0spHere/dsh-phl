@@ -50,11 +50,19 @@ export const STAGE_LABEL: Record<string, string> = {
   installing: '安装中',
   deps: '安装依赖（pnpm）…',
   committing: '提交变更…',
+  removing: '正在卸载…',
 }
 
 /** Stages with no trustworthy ratio — npm/pnpm only draw their bar on a TTY,
  *  so the card shows an indeterminate pulse instead of freezing at 100%. */
-const INDETERMINATE_STAGES = new Set(['queued', 'preparing', 'verifying', 'deps', 'committing'])
+const INDETERMINATE_STAGES = new Set([
+  'queued',
+  'preparing',
+  'verifying',
+  'deps',
+  'committing',
+  'removing',
+])
 
 export function SourceBadge({ plugin }: { plugin: Plugin }) {
   if (plugin.source.kind === 'npm') {
@@ -216,9 +224,13 @@ export function TransferInline({ instanceId, pluginId }: { instanceId: string; p
                         ''
                       : `${Math.round(transfer.progress * 100)}%`}
                 </span>
-                <Button size="sm" variant="ghost" onClick={() => cancel(instanceId, pluginId)}>
-                  取消
-                </Button>
+                {/* Uninstalls commit irreversibly after the transaction
+                    recovery — a dead "取消" would lie about that. */}
+                {transfer.stage === 'removing' ? null : (
+                  <Button size="sm" variant="ghost" onClick={() => cancel(instanceId, pluginId)}>
+                    取消
+                  </Button>
+                )}
               </span>
             </div>
           </div>
