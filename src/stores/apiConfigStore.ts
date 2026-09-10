@@ -125,21 +125,30 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       const batches: import('@/types').ModelMetadataBatch[] = []
       const providers: ApiProvider[] = []
       for (const provider of config.providers) {
-        const candidates = provider.models.filter((m) => m.id.trim() && hasMissingMetadata(m))
-        if (!candidates.length) { providers.push(provider); continue }
+        // Index-aligned, not `includes(m)`: the same model can legitimately
+        // appear twice in a library, and an identity-based filter would
+        // consume the batch cursor twice on the duplicate.
+        const candidateIdx = provider.models
+          .map((m, i) => (m.id.trim() && hasMissingMetadata(m) ? i : -1))
+          .filter((i) => i >= 0)
+        if (!candidateIdx.length) { providers.push(provider); continue }
         // baseUrl: the endpoint host is the provider's real identity — it
         // disambiguates same-named models where the user's own display name
         // never could. force: "更新目录并补全" re-downloads the catalog now.
         const batch = await repository.enrichModelMetadata({
-          models: candidates,
+          models: candidateIdx.map((i) => provider.models[i]),
           provider: provider.name,
           baseUrl: provider.baseURL,
           forceRefresh: force || undefined,
           useOpenRouter,
         })
         batches.push(batch)
-        let cursor = 0
-        providers.push({ ...provider, models: provider.models.map((m) => candidates.includes(m) ? batch.results[cursor++].model : m) })
+        const nextModels = [...provider.models]
+        candidateIdx.forEach((modelIdx, batchIdx) => {
+          const resolved = batch.results[batchIdx]
+          if (resolved) nextModels[modelIdx] = resolved.model
+        })
+        providers.push({ ...provider, models: nextModels })
       }
       // No stale network response may replace edits, deletions or a switched root.
       if (get().config !== config || root !== useSettingsStore.getState().root) {

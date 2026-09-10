@@ -815,4 +815,42 @@ mod net_tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[tokio::test]
+    async fn a_legacy_bare_binding_still_blocks_removing_the_version_it_runs() {
+        // Manifests written before the binding fix carry `0.1.0` where the
+        // guard compares against `dsh-0.1.0`. An un-healed legacy instance
+        // that is RUNNING must not be able to have its version deleted out
+        // from under it — the comparison is legacy-tolerant.
+        use crate::launch::{ProcessEntry, Processes};
+        let root = std::env::temp_dir().join(format!("phl-rmver-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("instances").join("leg-01");
+        std::fs::create_dir_all(dir.join("dsh-home")).unwrap();
+        // Written raw on purpose (write_manifest would canonicalize).
+        std::fs::write(
+            dir.join("instance.json"),
+            r#"{"schemaVersion":2,"id":"leg-01","name":"旧版接入","kind":"sandbox","hue":0,
+            "versionId":"0.1.0","runtimeId":"node-22","port":3080,"autoPort":true,
+            "profile":"web","createdAt":"now","env":{},"args":[],"managementMode":"managed-copy",
+            "source":"adopted"}"#,
+        )
+        .unwrap();
+        let version = root.join("versions").join("0.1.0");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(version.join("phl-install.json"), "{}").unwrap();
+
+        let processes = Processes::default();
+        processes
+            .0
+            .lock()
+            .unwrap()
+            .insert("leg-01".into(), ProcessEntry { pid: 1, port: 1 });
+        let err = remove_version_dir_inner(&root, &processes, "0.1.0", &test_task())
+            .await
+            .unwrap_err();
+        assert!(err.contains("旧版接入"), "guard must name it: {err}");
+        assert!(version.exists(), "the running version is untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
