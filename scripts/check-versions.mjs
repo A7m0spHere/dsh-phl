@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * One version, four files — checked before anything is published.
+ * One version, five files — checked before anything is published.
  *
  *   node scripts/check-versions.mjs [--tag v0.1.0-alpha.1]
  *
- * PHL's version lives in four places that must never disagree:
- * package.json (frontend + the version the About panel shows),
+ * PHL's version lives in five files that must never disagree:
+ * package.json (frontend + the version the About panel shows), package-lock.json
+ * (the reproducible npm dependency graph and its root package record),
  * src-tauri/tauri.conf.json (the installer's file name and product version),
  * src-tauri/Cargo.toml (the crate) and src-tauri/Cargo.lock (what the build
  * actually resolves). A half-applied bump ships an installer whose filename,
@@ -64,8 +65,14 @@ const tag =
   process.env.PHL_TAG ||
   ''
 
+const packageLock = readJson('package-lock.json')
 const sources = [
   { file: 'package.json', version: readJson('package.json').version },
+  { file: 'package-lock.json', version: packageLock.version },
+  {
+    file: 'package-lock.json#packages[""]',
+    version: packageLock.packages?.['']?.version,
+  },
   { file: 'src-tauri/tauri.conf.json', version: readJson('src-tauri/tauri.conf.json').version },
   { file: 'src-tauri/Cargo.toml', version: packageVersionFromCargoToml('src-tauri/Cargo.toml') },
   {
