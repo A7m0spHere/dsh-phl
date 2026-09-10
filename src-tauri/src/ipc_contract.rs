@@ -188,18 +188,14 @@ fn manifest_round_trip_keeps_adoption_fields_and_defaults_v1() {
     assert_eq!(v1["externalHome"], Value::Null);
 }
 
-/// The task registry the task centre polls: both keys always present, and the
-/// enum-ish `state` spelled the way the TS union expects.
+/// The task registry the task centre polls: the list key always present, and
+/// the enum-ish `state` spelled the way the TS union expects.
 #[test]
 fn task_registry_wire_shape_is_stable() {
-    let locks = crate::resources::ResourceLocks::default();
     let tasks = crate::resources::Tasks::default();
-    let list = crate::resources::TaskList {
-        tasks: tasks.list(),
-        held: locks.snapshot(),
-    };
+    let list = crate::resources::TaskList { tasks: tasks.list() };
     let value = serde_json::to_value(&list).expect("serialize");
-    assert_eq!(keys(&value), set(&["tasks", "held"]));
+    assert_eq!(keys(&value), set(&["tasks"]));
     assert_eq!(value["tasks"], json!([]));
 
     // The guard's own record, serialized: the task centre reads these names.

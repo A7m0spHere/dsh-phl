@@ -18,7 +18,6 @@ const SLOW_MS = 8000
 
 interface TaskState {
   tasks: TaskInfo[]
-  held: string[]
   open: boolean
   setOpen: (open: boolean) => void
   refresh: () => Promise<void>
@@ -29,7 +28,6 @@ interface TaskState {
 
 export const useTaskStore = create<TaskState>()((set, get) => ({
   tasks: [],
-  held: [],
   open: false,
   setOpen: (open) => {
     set({ open })
@@ -38,7 +36,7 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
   async refresh() {
     try {
       const list = await listTasks()
-      set({ tasks: list.tasks, held: list.held })
+      set({ tasks: list.tasks })
     } catch {
       // A transient IPC failure keeps the previous snapshot; the next tick
       // catches up. A task centre must never take the app down.

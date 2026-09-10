@@ -8,52 +8,7 @@ import { useMotion } from '@/lib/motion'
 import { ProgressBar } from '@/components/ui'
 import { useTaskStore } from '@/stores/taskStore'
 import { useUIStore } from '@/stores/uiStore'
-
-const KIND_LABEL: Record<string, string> = {
-  'plugin-install': '安装插件',
-  'plugin-uninstall': '卸载插件',
-  'plugin-toggle': '插件开关',
-  'instance-create': '创建实例',
-  'instance-save': '保存实例',
-  'instance-delete': '删除实例',
-  'instance-clone': '克隆实例',
-  'instance-repair': '修复实例',
-  'snapshot-create': '创建快照',
-  'snapshot-restore': '恢复快照',
-  'snapshot-delete': '删除快照',
-  'bundle-import': '导入 Bundle',
-  'version-install': '安装 DSH 版本',
-  'version-remove': '删除 DSH 版本',
-  'runtime-install': '安装 Runtime',
-  'runtime-remove': '删除 Runtime',
-  'root-migration': '迁移数据目录',
-  'root-migration-undo': '撤销目录迁移',
-}
-
-const PHASE_LABEL: Record<string, string> = {
-  started: '准备中',
-  resolving: '解析来源',
-  downloading: '下载中',
-  verifying: '校验完整性',
-  extracting: '解压中',
-  'installing-deps': '安装依赖',
-  checking: '健康检查',
-  committing: '提交变更',
-  removing: '删除目录',
-  copying: '复制文件',
-  moving: '搬迁',
-  committed: '提交完成',
-  instances: '搬运实例目录',
-  versions: '搬运版本目录',
-  runtimes: '搬运 Runtime 目录',
-  config: '搬运配置目录',
-  cache: '搬运缓存目录',
-}
-
-function phaseText(t: TaskInfo): string {
-  if (t.cancelRequested && t.state === 'running') return '正在取消…'
-  return PHASE_LABEL[t.phase] ?? t.phase
-}
+import { kindLabel, phaseText } from './taskLabels'
 
 function elapsed(t: TaskInfo): string {
   const end = t.finishedAt ?? Date.now()
@@ -168,7 +123,7 @@ function TaskRow({
   running?: boolean
   onNavigate: ReturnType<typeof useUIStore.getState>['navigate']
 }) {
-  const label = KIND_LABEL[task.kind] ?? task.kind
+  const label = kindLabel(task.kind)
   const error = task.state === 'failed' && task.error ? parseThrownError(task.error) : null
   return (
     <div className="flex items-start gap-2.5 px-3.5 py-2">
