@@ -123,6 +123,7 @@ export function SettingsPage() {
       keepArchives: s.keepArchives,
       versionRefreshMinutes: s.versionRefreshMinutes,
       pendingReleaseAlerts: s.pendingReleaseAlerts,
+      enrichFromOpenRouter: s.enrichFromOpenRouter,
       portStart: s.portStart,
       logLevel: s.logLevel,
       set: s.set,
@@ -615,6 +616,17 @@ export function SettingsPage() {
                     checked={settings.pendingReleaseAlerts}
                     onChange={(v) => settings.set('pendingReleaseAlerts', v)}
                     label="GitHub 版本上架 npm 时提醒"
+                  />
+                }
+              />
+              <SettingRow
+                title="模型补全使用 OpenRouter 目录"
+                description="models.dev 之外，对新发布与 vendor/model 形式的模型 id 追加查询 OpenRouter 公开模型列表（只读元数据，不发送任何密钥）；关闭后仅使用 models.dev"
+                control={
+                  <Switch
+                    checked={settings.enrichFromOpenRouter}
+                    onChange={(v) => settings.set('enrichFromOpenRouter', v)}
+                    label="模型补全使用 OpenRouter 目录"
                   />
                 }
               />

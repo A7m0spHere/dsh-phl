@@ -1,6 +1,17 @@
 # PHL 原生模型信息补全
 
-实现日期：2026-09-06。全局 `config/api.json` 是补全结果的配置源；补全本身不写实例，沿用现有保存、绑定、显式同步和实例导入流程。
+实现日期：2026-09-06；2026-09-10 现代化（见下文「新模型适配」）。全局 `config/api.json` 是补全结果的配置源；补全本身不写实例，沿用现有保存、绑定、显式同步和实例导入流程。
+
+## 新模型适配（2026-09-10）
+
+上线后反馈：新发布的模型补不出信息。定位到四个叠加原因并全部修复：
+
+1. **缓存过期即刷新**：models.dev 收录新发布通常以小时计，旧的七天 TTL 让「昨天发的模型」系统性不可识别。TTL 降为 24 小时；打开「模型与 API」页会惰性触发一次到期刷新（空批次，不写任何配置）；「补全缺失模型信息」旁提供「更新目录并补全」显式强制刷新。
+2. **规范化匹配层（最低优先级兜底）**：端点 id 常带日期快照与别名后缀（`gpt-5-20250807`、`model-latest`、Bedrock `model:0`、点号/下划线变体）。在既有四级字面匹配全部落空后，新增一层：`_`/`.` 归一为 `-`、剥去数字日期段（6/8/10 位）、`-v<数字>`、`-latest/-preview/-exp/-chat/-beta`，且要求唯一候选——歧义仍返回 Ambiguous，绝不放松标准（`-vision` 这类产品词永不被剥）。与 LiteLLM 的通配键表、Cline 的 live-catalog 优先是同一路线。
+3. **按 base URL 主机消歧**：过去消歧提示传的是用户自己的供应商显示名，几乎不可能等于目录 provider id。现在从供应商配置的 baseURL 主机映射目录 id（api.openai.com→openai、api.siliconflow.cn→siliconflow、openrouter.ai→openrouter 等），显示名提示降为最后兜底；同名跨供应商模型由此可唯一命中。
+4. **fallback 可被目录修正**：旧规则只补 undefined 字段，导致首次补全落到「默认兼容值」的模型此后永远不再复查。现在带 `fallback` 来源标记的字段视为可覆盖：目录学到该模型后下一次补全会以真实值替换猜测；`manual` 与目录值仍不动。全局「补全缺失」的候选判定同步把 fallback-only 模型重新纳入。
+
+另新增 **OpenRouter 第二目录**（开源常见做法，如 Cline 对 OpenRouter 路由直接拉取 `context_length`）：仅当 id 含 `/`（`vendor/model` 约定）或 baseURL 主机是 openrouter.ai 时请求公开的 `GET https://openrouter.ai/api/v1/models`（无密钥、只读、≤16 MiB、每日缓存于内存）。它只填 models.dev 没给出的 contextWindow 与 input，字段来源记 `openrouter`；不提供也不猜测 maxTokens/reasoning。可在 设置 → 下载 关闭。
 
 ## 上游核对与参考分析
 
@@ -48,11 +59,11 @@ PHL 的 `metadataSources` 按字段记录 `models.dev`、`fallback` 或 `manual`
 
 ## 缓存与降级
 
-`PHL_ROOT/cache/models-dev.json` 是 `{ version: 1, fetchedAt: Unix秒, data: models.dev原始JSON }`。七天内直接使用，过期时在下一次补全尝试刷新；并不在每次打开页面时请求。每个 root 独立缓存，进程内互斥复用结果，刷新失败至少等待五分钟后再尝试，避免逐行连续请求。
+`PHL_ROOT/cache/models-dev.json` 是 `{ version: 1, fetchedAt: Unix秒, data: models.dev原始JSON }`。24 小时内直接使用（2026-09-10 前为七天，见「新模型适配」），过期时在下一次补全尝试刷新；打开「模型与 API」页会惰性触发一次到期刷新（空批次）。每个 root 独立缓存，进程内互斥复用结果，刷新失败至少等待五分钟后再尝试，避免逐行连续请求。
 
 固定公共地址为 [models.dev/api.json](https://models.dev/api.json)，不发送 API Key、Base URL 或用户模型配置。请求超时 12 秒，响应上限 32 MiB。刷新结果需能解析出有效条目才能以临时文件加 rename 替换缓存；无效响应保留旧缓存。磁盘写入失败仍可用本次内存数据。
 
-无缓存且网络失败、未匹配或匹配歧义时，缺失容量使用 contextWindow=262144、maxTokens=32768，输入使用 text，标明“默认兼容值”。不编造显示名和 reasoning。目录命中但部分字段缺失时，也逐字段使用该策略。已经保存的 fallback 不会在目录恢复或更新时被静默覆盖。
+无缓存且网络失败、未匹配或匹配歧义时，缺失容量使用 contextWindow=262144、maxTokens=32768，输入使用 text，标明“默认兼容值”。不编造显示名和 reasoning。目录命中但部分字段缺失时，也逐字段使用该策略。带 `fallback` 标记的值是猜测而非事实：目录恢复或更新后的下一次补全会用真实目录值替换它（`manual` 与已命中的目录值不受影响；2026-09-10 起生效，此前规则为“永不覆盖”）。
 
 ## 验证与边界
 

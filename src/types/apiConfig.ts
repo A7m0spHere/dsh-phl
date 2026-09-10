@@ -23,11 +23,22 @@ export interface ApiModelRef {
 }
 
 export type ModelMetadataField = 'name' | 'contextWindow' | 'maxTokens' | 'input' | 'reasoningEfforts'
-export type ModelMetadataSource = 'models.dev' | 'fallback' | 'manual'
+export type ModelMetadataSource = 'models.dev' | 'openrouter' | 'fallback' | 'manual'
 export interface ModelMetadataRequest {
   models: ApiModelRef[]
   /** DSH provider route name, not PHL's opaque provider id. */
   provider?: string
+  /**
+   * The provider's configured endpoint. Its host identifies the serving
+   * provider far more reliably than the user's display name (disambiguation
+   * hint for same-named models), and OpenRouter routes unlock the second
+   * metadata tier.
+   */
+  baseUrl?: string
+  /** "更新目录并补全": bypass the freshness window for this call. */
+  forceRefresh?: boolean
+  /** Settings gate for the OpenRouter second tier; default true. */
+  useOpenRouter?: boolean
 }
 export interface ModelMetadataResolution {
   model: ApiModelRef
@@ -38,6 +49,8 @@ export interface ModelMetadataResolution {
 export interface ModelMetadataBatch {
   results: ModelMetadataResolution[]
   catalogStatus: 'fresh' | 'stale' | 'unavailable' | 'mock'
+  /** Whether the OpenRouter tier was consulted for this batch. */
+  openrouterConsulted?: boolean
 }
 
 /**

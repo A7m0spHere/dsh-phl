@@ -8,6 +8,7 @@ import { fetchProviderModels, isDesktop } from '@/lib/desktop'
 import { ApiModelRef, RemoteModel } from '@/types'
 import { Badge, Button, Input, Tooltip } from '@/components/ui'
 import { repository } from '@/services'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { useMotion } from '@/lib/motion'
 import { metadataSummary } from '@/lib/modelMetadata'
 import { ModelRow } from './ModelRow'
@@ -165,7 +166,15 @@ export function ModelEditor({
 
   const resolve = async (candidates: ApiModelRef[]) => {
     try {
-      const batch = await repository.enrichModelMetadata({ models: candidates, provider: fetchCtx?.providerName })
+      // baseUrl lets the backend disambiguate by the endpoint's host (and
+      // enables the OpenRouter tier for `vendor/model` ids); the gate is the
+      // user's 设置 → 模型目录 preference.
+      const batch = await repository.enrichModelMetadata({
+        models: candidates,
+        provider: fetchCtx?.providerName,
+        baseUrl: fetchCtx?.baseURL?.trim() || undefined,
+        useOpenRouter: useSettingsStore.getState().enrichFromOpenRouter,
+      })
       if (alive.current) setMetadataMessage(metadataSummary(batch))
       return batch.results.map((r) => r.model)
     } catch {

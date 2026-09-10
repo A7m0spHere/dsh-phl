@@ -8,6 +8,8 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
+import { repository } from '@/services'
 import { useMotion } from '@/lib/motion'
 import {
   useApiConfigStore,
@@ -22,6 +24,7 @@ import {
   Select,
   SettingRow,
   Skeleton,
+  Tooltip,
 } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
@@ -107,6 +110,14 @@ export function ApiConfigPage() {
 
   const [adding, setAdding] = useState(false)
   const [importTarget, setImportTarget] = useState('')
+
+  // Opening the API page lazily refreshes the model catalog (TTL-gated, an
+  // empty batch writes nothing): the week-old cache used to be why a model
+  // released yesterday "couldn't be completed" until a second enrich ran.
+  useEffect(() => {
+    if (!isDesktopFlag) return
+    void repository.enrichModelMetadata({ models: [] }).catch(() => undefined)
+  }, [])
 
   // Live badges are library-relative too: a provider rename is invisible to
   // `bindingsKey`, so the effect also rides the library identity — every
@@ -271,6 +282,13 @@ export function ApiConfigPage() {
           <Button size="sm" variant="secondary" disabled={saving || enriching} onClick={() => void enrichMissingModels()}>
             <WandSparkles size={12} />{enriching ? '补全中…' : '补全缺失模型信息'}
           </Button>
+          {/* Explicitly re-download the catalogs first — the escape hatch when
+              a model shipped hours ago and the daily cache hasn't rolled. */}
+          <Tooltip content="重新下载模型目录后再补全（较慢）">
+            <Button size="sm" variant="ghost" disabled={saving || enriching} onClick={() => void enrichMissingModels(true)}>
+              <RefreshCw size={12} />
+            </Button>
+          </Tooltip>
           <Button size="sm" variant="primary" disabled={saving} onClick={() => setAdding(true)}>
             <Plus size={12} />
             新增供应商

@@ -1,7 +1,17 @@
 import type { ApiModelRef, ModelMetadataBatch, ModelMetadataField } from '@/types'
 
 export const metadataFields: ModelMetadataField[] = ['name', 'contextWindow', 'maxTokens', 'input', 'reasoningEfforts']
-export const hasMissingMetadata = (model: ApiModelRef) => metadataFields.some((field) => model[field] === undefined)
+/**
+ * A model is an enrichment candidate when a field is unset OR when it only
+ * carries compat-guess provenance (`fallback`): the first enrich of a brand
+ * new model fills guesses, and once the catalogs learn the release the guess
+ * must be revisited — otherwise "未找到" would never be repairable by a later
+ * run. `manual` and catalog values are settled facts and never re-opened.
+ */
+export const hasMissingMetadata = (model: ApiModelRef) =>
+  metadataFields.some(
+    (field) => model[field] === undefined || model.metadataSources?.[field] === 'fallback',
+  )
 
 export function editModelField<K extends ModelMetadataField>(model: ApiModelRef, field: K, value: ApiModelRef[K]): ApiModelRef {
   const metadataSources = { ...model.metadataSources }
@@ -37,5 +47,15 @@ export function modelCapabilities(model: ApiModelRef): string {
 
 export function modelSources(model: ApiModelRef): string {
   const sources = new Set(metadataFields.filter((key) => model[key] !== undefined).map((key) => model.metadataSources?.[key] ?? 'manual'))
-  return [...sources].map((source) => source === 'fallback' ? '默认兼容值' : source === 'manual' ? '已有 / 手动配置' : 'models.dev').join(' + ')
+  return [...sources]
+    .map((source) =>
+      source === 'fallback'
+        ? '默认兼容值'
+        : source === 'manual'
+          ? '已有 / 手动配置'
+          : source === 'openrouter'
+            ? 'OpenRouter 目录'
+            : 'models.dev',
+    )
+    .join(' + ')
 }
