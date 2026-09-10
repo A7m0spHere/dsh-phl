@@ -320,8 +320,13 @@ async fn install_inner(
     let mut manifest = req.manifest;
     let id = sanitize_segment(&manifest.id, "实例 id")?;
     manifest.id = id.clone();
-    // Environment is the pack's, not the (possibly blank) request's.
-    manifest.version_id = pack.manifest.dsh.version.clone();
+    // Environment is the pack's, not the (possibly blank) request's — joined
+    // to PHL's version store as a canonical `dsh-<ver>` id. The raw pack
+    // version string matched no catalog row and left the instance stuck on
+    // a phantom binding (see `bound_id_for_version`).
+    manifest.version_id =
+        crate::versions::install::bound_id_for_version(&pack.manifest.dsh.version)
+            .unwrap_or_default();
     manifest.runtime_id = pack
         .manifest
         .runtime

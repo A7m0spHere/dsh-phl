@@ -209,10 +209,27 @@ pub async fn create_instance(
     .await
 }
 
+/// Canonicalize a manifest's version binding server-side. Bare version
+/// strings — the old adoption/pack wire shape and clones of instances adopted
+/// before the fix — become the canonical `dsh-<ver>` id the catalog and
+/// startup resolve against; path-unsafe values collapse to the empty,
+/// explicit "unbound" state rather than a phantom binding the UI can neither
+/// display nor clear. (Adoption applies a stricter "installed only" rule at
+/// its own write site; this is the shape guarantee every writer shares.)
+pub(crate) fn canonicalize_version_binding(manifest: &mut InstanceManifest) {
+    let raw = manifest.version_id.trim();
+    manifest.version_id = if raw.is_empty() {
+        String::new()
+    } else {
+        crate::versions::install::bound_id_for_version(raw).unwrap_or_default()
+    };
+}
+
 pub(crate) async fn create_instance_inner(
     root: &Path,
-    manifest: InstanceManifest,
+    mut manifest: InstanceManifest,
 ) -> Result<InstanceRecord, String> {
+    canonicalize_version_binding(&mut manifest);
     let dir = build_instance_tree(root, &manifest).await?;
     let manifest = apply_api_at_create(root, &dir, manifest).await;
     Ok(build_record(&dir, manifest).await)
@@ -259,12 +276,15 @@ pub async fn save_instance(
     .await
 }
 
-async fn save_instance_inner(root: &Path, manifest: InstanceManifest) -> Result<(), String> {
+async fn save_instance_inner(root: &Path, mut manifest: InstanceManifest) -> Result<(), String> {
     let dir = instance_dir(root, &manifest.id)?;
     // Load before write: refuses a missing instance and — critically — a
     // manifest this build cannot parse. Overwriting the latter would
     // "succeed" while destroying data a newer PHL might still read.
     load_manifest(&dir, &manifest.id).await?;
+    // Saving an adopted instance is also where a legacy bare-version binding
+    // heals: whatever shape arrives, the canonical id goes to disk.
+    canonicalize_version_binding(&mut manifest);
     write_manifest(&dir, &manifest).await
 }
 
@@ -787,6 +807,9 @@ async fn run_clone(
 
     // The clone is a new instance, not a copy of the old one's history.
     let mut manifest = manifest;
+    // A clone of a pre-fix adopted instance inherits the bare-version
+    // binding; do not propagate the phantom.
+    canonicalize_version_binding(&mut manifest);
     manifest.created_at = now_iso();
     manifest.last_run_at = None;
     manifest.total_runtime = 0;

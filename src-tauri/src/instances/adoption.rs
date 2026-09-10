@@ -389,6 +389,13 @@ async fn adopt_inner(
     }
     // An adopted instance boots with its own configuration, not the library.
     manifest.api = None;
+    // The version binding must be a real `dsh-<ver>` id. The wizard used to
+    // persist the detected bare semver, which matched no installed version and
+    // no catalog row — the adopted instance then displayed a phantom version,
+    // could not rebind (the edit dropdown's value was not among the options),
+    // and could never launch. The raw detection stays as provenance in
+    // `adopted_from.detected_version`.
+    manifest.version_id = normalize_adopted_version(root, &manifest.version_id);
 
     let dir = instance_dir(root, &id)?;
     if dir.exists() {
@@ -766,6 +773,25 @@ fn measure_tree(dir: &Path, deep: &[&str]) -> u64 {
     total
 }
 
+/// Bound version for an adopted instance: an explicit `dsh-…` binding (the
+/// wizard's version picker) passes through; a bare detected version counts
+/// as a binding only when that version actually exists in the local store;
+/// anything else becomes the empty "未绑定" state the UI can explain.
+fn normalize_adopted_version(root: &Path, raw: &str) -> String {
+    let Some(id) = crate::versions::install::bound_id_for_version(raw) else {
+        return String::new();
+    };
+    if raw.trim().starts_with("dsh-") {
+        return id;
+    }
+    let bare = id.trim_start_matches("dsh-");
+    if root.join("versions").join(bare).is_dir() {
+        id
+    } else {
+        String::new()
+    }
+}
+
 async fn manifest_version_from_source(source: &Path) -> Option<String> {
     let dir = source.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -864,6 +890,82 @@ mod tests {
                 adopted_from: None,
             },
         }
+    }
+
+    #[test]
+    fn adopted_version_binding_is_a_real_id_or_nothing() {
+        let root = temp("ver-bind");
+        std::fs::create_dir_all(root.join("versions").join("0.9.9")).unwrap();
+        // A bare detected version that IS in the local store binds canonically.
+        assert_eq!(normalize_adopted_version(&root, "0.9.9"), "dsh-0.9.9");
+        // An explicit `dsh-…` binding (the wizard's picker) passes through even
+        // while uninstalled — launch then errors with a working "去安装" CTA.
+        assert_eq!(normalize_adopted_version(&root, "dsh-1.2.3"), "dsh-1.2.3");
+        // A bare version NOT installed must not become a phantom binding the
+        // detail page can neither resolve nor clear.
+        assert_eq!(normalize_adopted_version(&root, "0.1.2-rc.1"), "");
+        // Garbage and empty both land on the honest unbound state.
+        assert_eq!(normalize_adopted_version(&root, "../evil"), "");
+        assert_eq!(normalize_adopted_version(&root, "   "), "");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn adopt_persists_the_normalized_binding_not_the_wire_value() {
+        let root = temp("ver-adopt");
+        let source = root.join("ext-dsh");
+        std::fs::create_dir_all(&source).unwrap();
+        fake_dsh_home(&source);
+        // Version evidence for discovery: a dsh-base package.json.
+        let base = source
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh-base");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("package.json"), r#"{"version":"9.9.9-phantom"}"#).unwrap();
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+
+        // The legacy wizard shape: the detected bare version echoed into the
+        // request. With no installed dir it must NOT bind — the manifest reads
+        // "" and the detection survives only as provenance.
+        let mut r = req(
+            &source,
+            ManagementMode::ManagedCopy,
+            SessionStrategy::All,
+            "vb-1",
+        );
+        r.manifest.version_id = "9.9.9-phantom".into();
+        let outcome = adopt_inner(&root, r, &Arc::new(AtomicBool::new(false)), &channel())
+            .await
+            .unwrap();
+        assert_eq!(outcome.record.manifest.version_id, "");
+        assert_eq!(
+            outcome
+                .record
+                .manifest
+                .adopted_from
+                .as_ref()
+                .unwrap()
+                .detected_version,
+            Some("9.9.9-phantom".into()),
+            "the raw detection survives as provenance"
+        );
+        // Once the version exists in the local store, the same request binds.
+        std::fs::create_dir_all(root.join("versions").join("9.9.9-phantom")).unwrap();
+        let mut r2 = req(
+            &source,
+            ManagementMode::ManagedCopy,
+            SessionStrategy::All,
+            "vb-2",
+        );
+        r2.manifest.version_id = "9.9.9-phantom".into();
+        let outcome2 = adopt_inner(&root, r2, &Arc::new(AtomicBool::new(false)), &channel())
+            .await
+            .unwrap();
+        assert_eq!(outcome2.record.manifest.version_id, "dsh-9.9.9-phantom");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn channel() -> Channel<CloneProgress> {

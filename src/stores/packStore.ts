@@ -10,6 +10,7 @@ import {
 } from '@/lib/desktop'
 import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
 import { isDesktop } from '@/lib/desktopCore'
+import { toBoundVersionId } from '@/lib/instanceVersion'
 import { useInstanceStore } from './instanceStore'
 import { useUIStore } from './uiStore'
 
@@ -59,7 +60,9 @@ function requestManifest(preview: RemotePackPreview, name: string): PackInstallR
     note: '来自整合包',
     kind: 'sandbox',
     hue: 0,
-    versionId: preview.dshVersion,
+    // Canonical id, not the pack's bare version string — the same phantom-
+    // binding bug that adoption had (Rust normalizes this too, on re-install).
+    versionId: toBoundVersionId(preview.dshVersion),
     runtimeId: preview.runtime,
     port: 0,
     autoPort: true,

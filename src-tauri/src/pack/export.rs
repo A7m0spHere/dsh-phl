@@ -137,6 +137,16 @@ pub(crate) struct ResolvedInstance {
 async fn resolve(root: &Path, id: &str) -> Result<ResolvedInstance, String> {
     let dir = instance_dir(root, id)?;
     let manifest = load_manifest(&dir, id).await?;
+    // The pack format requires a `dsh.version`; an unbound instance (empty or
+    // path-unsafe binding) has no version to promise the recipient. Fail with
+    // the actionable next step rather than an invalid archive the core
+    // validator would reject later with a stranger message.
+    if bare_pack_version(&manifest.version_id).is_none() {
+        return Err(errors::coded(
+            errors::ErrCode::State,
+            "实例尚未绑定 DSH 版本，无法导出整合包；请先在实例详情里选择版本",
+        ));
+    }
     let home = home_of(&dir, &manifest);
     let profile_root = profile_root_of(&dir, &manifest);
     Ok(ResolvedInstance {
@@ -144,6 +154,15 @@ async fn resolve(root: &Path, id: &str) -> Result<ResolvedInstance, String> {
         home,
         profile_root,
     })
+}
+
+/// The pack format's `dsh.version` carries a **bare** version string ("0.1.2"),
+/// while an instance binds the canonical `dsh-<ver>` id. Strip the prefix so
+/// every display of the dependency (preview rows, warnings) reads like a
+/// version. `None` for an empty or path-unsafe binding.
+fn bare_pack_version(version_id: &str) -> Option<String> {
+    crate::versions::install::bound_id_for_version(version_id)
+        .map(|id| id.trim_start_matches("dsh-").to_string())
 }
 
 /// Read a plugin package's declared license: `package.json`'s `license` (or
@@ -361,7 +380,7 @@ async fn build_plan_with_cancel(
     Ok(PackExportPlan {
         instance_id: id.to_string(),
         name: inst.manifest.name.clone(),
-        version_id: inst.manifest.version_id.clone(),
+        version_id: bare_pack_version(&inst.manifest.version_id).unwrap_or_default(),
         runtime_id: inst.manifest.runtime_id.clone(),
         profile: inst.manifest.profile.clone(),
         plugins: plugin_plans,
@@ -632,7 +651,7 @@ fn write_pack_archive(
                 icon: None,
             },
             dsh: super::PackDsh {
-                version: inst_manifest.version_id.clone(),
+                version: bare_pack_version(&inst_manifest.version_id).unwrap_or_default(),
                 source: None,
                 hash: None,
             },

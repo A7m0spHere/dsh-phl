@@ -90,6 +90,25 @@ pub(crate) fn sanitize_version(name: &str) -> Result<String, String> {
     }
 }
 
+/// The manifest's version binding for a version string, whichever shape it
+/// arrives in. Bare versions (npm tag "0.1.2", pack `dsh.version`, discovery
+/// output) become the canonical `dsh-<ver>` id the catalog and instances
+/// resolve against; an already-bound id passes through. `None` for empty or
+/// path-unsafe values — callers store an *empty* binding instead, which the
+/// UI shows as "未绑定" rather than as a phantom version no one can clear.
+pub(crate) fn bound_id_for_version(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(bare) = raw.strip_prefix("dsh-") {
+        sanitize_version(bare).ok()?;
+        return Some(raw.to_string());
+    }
+    let safe = sanitize_version(raw).ok()?;
+    Some(format!("dsh-{safe}"))
+}
+
 /// The transactional swap both installers share: the fully staged tree
 /// replaces `dest`, the previous tree waits in `backup` until the final
 /// check passes, and any failure puts the previous tree back. `staging` and

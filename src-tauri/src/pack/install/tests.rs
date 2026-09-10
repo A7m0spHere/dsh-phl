@@ -456,7 +456,9 @@ async fn export_scan_install_roundtrip_keeps_secrets_out_and_residue_clean() {
     .await
     .unwrap();
     assert_eq!(outcome.credential_names, vec!["PHL_TEST_KEY".to_string()]);
-    assert_eq!(outcome.record.manifest.version_id, "0.1.2-rc.1");
+    // The pack's bare "0.1.2-rc.1" binds as the canonical catalog id —
+    // the raw string used to be stored verbatim and matched nothing.
+    assert_eq!(outcome.record.manifest.version_id, "dsh-0.1.2-rc.1");
     assert_eq!(
         outcome
             .record

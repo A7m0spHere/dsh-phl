@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { repository } from '@/services'
 import { parseThrownError } from '@/lib/errorCodes'
+import { resolveBoundVersion } from '@/lib/instanceVersion'
 import { createVersionActions } from './catalogVersionActions'
 import { createRuntimeActions } from './catalogRuntimeActions'
 import { createPluginActions, pluginKey } from './catalogPluginActions'
@@ -86,7 +87,10 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   ...createRuntimeActions(set, get, controllers),
   ...createPluginActions(set, get, controllers),
 
-  versionById: (id) => get().versions.find((version) => version.id === id),
+  // Legacy-safe: an instance adopted before the binding fix stores the bare
+  // detected version; resolve it against the canonical id so launch context
+  // and version lookups agree with the detail page (see lib/instanceVersion).
+  versionById: (id) => resolveBoundVersion(get().versions, id) ?? undefined,
   runtimeById: (id) => get().runtimes.find((runtime) => runtime.id === id),
   pluginById: (id) => get().plugins.find((plugin) => plugin.id === id),
   activeTransfers: () =>

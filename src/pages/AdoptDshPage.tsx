@@ -16,7 +16,7 @@ import { formatBytes, formatDateTime } from '@/lib/format'
 import { isDesktop } from '@/lib/desktopCore'
 import type { RemoteDshCandidate } from '@/lib/desktop'
 import { useAdoptionStore } from '@/stores/adoptionStore'
-import { useUIStore } from '@/stores'
+import { useCatalogStore, useUIStore } from '@/stores'
 import {
   Badge,
   Button,
@@ -26,6 +26,7 @@ import {
   Input,
   ProgressBar,
   SectionCard,
+  Select,
   Skeleton,
   Spinner,
 } from '@/components/ui'
@@ -281,6 +282,7 @@ function ConfigureStep() {
   const name = useAdoptionStore((s) => s.name)
   const mode = useAdoptionStore((s) => s.mode)
   const strategy = useAdoptionStore((s) => s.sessionStrategy)
+  const versionId = useAdoptionStore((s) => s.versionId)
   const setName = useAdoptionStore((s) => s.setName)
   const setMode = useAdoptionStore((s) => s.setMode)
   const setStrategy = useAdoptionStore((s) => s.setSessionStrategy)
@@ -288,6 +290,7 @@ function ConfigureStep() {
   const back = useAdoptionStore((s) => s.back)
   const toPreview = useAdoptionStore((s) => s.toPreview)
   const candidate = useAdoptionStore((s) => s.selected())
+  const versions = useCatalogStore((s) => s.versions)
 
   if (!candidate) {
     // A reload of a deep hash can drop the transient draft (nothing persists
@@ -313,6 +316,8 @@ function ConfigureStep() {
       <SectionCard title="实例名称" description="接入后在 PHL 里显示的名字。">
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={candidate.displayName} />
       </SectionCard>
+
+      <DSHVersionCard candidate={candidate} />
 
       <SectionCard title="接入模式" description="两种模式都让原 DSH 可以继续在 PHL 之外单独使用。">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -393,7 +398,10 @@ function ConfigureStep() {
         </Button>
         <Button
           variant="primary"
-          disabled={copy && strategy === 'selected' && selectedDirs.length === 0}
+          disabled={
+            (copy && strategy === 'selected' && selectedDirs.length === 0) ||
+            !versions.some((v) => v.id === versionId && v.state.kind === 'installed')
+          }
           onClick={() => void toPreview()}
         >
           预览
@@ -401,6 +409,62 @@ function ConfigureStep() {
         </Button>
       </div>
     </div>
+  )
+}
+
+/* --------------------------- version binding --------------------------- */
+
+/**
+ * The DSH version the adopted instance will run. The copy only carries the
+ * configuration, plugins and conversations — program files come from PHL's
+ * version store at launch — so adoption must end with a real `dsh-<ver>`
+ * binding. Persisting the bare detected version used to leave the instance
+ * pinned to a phantom: shown but unresolvable, not rebindable, not
+ * launchable (see `lib/instanceVersion`).
+ */
+function DSHVersionCard({ candidate }: { candidate: RemoteDshCandidate }) {
+  const versionId = useAdoptionStore((s) => s.versionId)
+  const setVersionId = useAdoptionStore((s) => s.setVersionId)
+  const versions = useCatalogStore((s) => s.versions)
+  const navigate = useUIStore((s) => s.navigate)
+  const installed = versions.filter((v) => v.state.kind === 'installed')
+  const detected = candidate.detectedVersion
+  const matched = detected
+    ? installed.find((v) => v.id === `dsh-${detected}` || v.name === detected)
+    : undefined
+
+  const hint = matched
+    ? `检测到源环境使用 DSH ${detected}，已为你预选。`
+    : detected
+      ? `检测到版本 ${detected}，但它不在 PHL 版本库中——上方所选版本将运行这份环境；想保持一致可先到「版本」页下载。`
+      : '未能检测到源环境的版本，请选择一个用于运行的版本。'
+
+  return (
+    <SectionCard title="DSH 版本" description="实例启动时使用的 DSH 程序版本；接入只带走配置、插件与对话。">
+      {installed.length === 0 ? (
+        <div className="flex items-start justify-between gap-3 rounded-lg bg-sunken p-2.5">
+          <span className="text-xs text-ink-muted">
+            版本库里还没有已安装的 DSH 版本。先到「版本」页下载一个，再回来继续接入。
+          </span>
+          <Button size="sm" variant="secondary" onClick={() => navigate({ name: 'versions' })}>
+            <HardDriveDownload size={13} />
+            去下载
+          </Button>
+        </div>
+      ) : (
+        <div>
+          <div className="mb-1 text-sm font-medium text-ink">运行版本</div>
+          <Select value={versionId} onChange={(e) => setVersionId(e.target.value)}>
+            {installed.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}
+              </option>
+            ))}
+          </Select>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink-faint">{hint}</p>
+        </div>
+      )}
+    </SectionCard>
   )
 }
 
