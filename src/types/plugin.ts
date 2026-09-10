@@ -157,8 +157,16 @@ export interface InstalledPlugin {
    * moving target (HEAD / no checksum). `unknown` = installed before the
    * field existed.
    */
-  trust?: 'verified' | 'pinned' | 'unverified' | 'unknown'
+  trust?: PluginTrust
 }
+
+/**
+ * The four install-time trust levels T-107 records (see `InstalledPlugin`
+ * above). Shared between the on-disk read-back and the install outcome the
+ * Rust command returns, so the optimistic patch after an install carries
+ * exactly what the disk will later confirm.
+ */
+export type PluginTrust = 'verified' | 'pinned' | 'unverified' | 'unknown'
 
 /**
  * Install lifecycle for one (instance, plugin) pair. Kept in the store's

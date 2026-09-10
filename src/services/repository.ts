@@ -277,7 +277,7 @@ export interface PhlRepository {
     instance: Instance,
     onProgress: (p: TransferProgress) => void,
     signal: AbortSignal,
-  ): Promise<{ version: string; registryId?: string }>
+  ): Promise<{ version: string; registryId?: string; trust?: import('@/types').PluginTrust }>
 
   /**
    * Flags the plugin disabled/enabled in the profile's `cordis.patch.yml`.
