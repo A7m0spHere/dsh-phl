@@ -78,8 +78,10 @@ export interface InstallPluginArgs {
 export async function installPlugin(args: InstallPluginArgs): Promise<{
   version: string
   registryId: string
+  /** The trust the Rust transaction recorded with this commit (T-107). */
+  trust: string
 }> {
-  if (!isDesktop) return { version: '', registryId: '' }
+  if (!isDesktop) return { version: '', registryId: '', trust: 'unknown' }
   const channel = new Channel<Parameters<InstallPluginArgs['onProgress']>[0]>()
   channel.onmessage = args.onProgress
   return invoke('install_plugin', {

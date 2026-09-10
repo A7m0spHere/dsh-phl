@@ -97,7 +97,7 @@ export function createPluginActions(
       try {
         if (!(await acquireTransferSlot(key, controller.signal))) throw new Cancelled()
         patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
-        const { version, registryId } = await repository.installPlugin(
+        const { version, registryId, trust } = await repository.installPlugin(
           plugin,
           instance,
           (progress) =>
@@ -114,12 +114,18 @@ export function createPluginActions(
             }),
           controller.signal,
         )
+        // The badge must match what Rust just committed to disk: `trust`
+        // arrives on the outcome and is patched straight onto the row, so
+        // the correct level shows immediately instead of waiting for the
+        // next full disk reload of the instance record.
         patchInstancePlugins(instanceId, (plugins) =>
           plugins.some((installed) => installed.pluginId === pluginId)
             ? plugins.map((installed) =>
-                installed.pluginId === pluginId ? { ...installed, version, registryId, enabled: true } : installed,
+                installed.pluginId === pluginId
+                  ? { ...installed, version, registryId, enabled: true, ...(trust ? { trust } : {}) }
+                  : installed,
               )
-            : [...plugins, { pluginId, version, registryId, enabled: true }],
+            : [...plugins, { pluginId, version, registryId, enabled: true, ...(trust ? { trust } : {}) }],
         )
         useUIStore.getState().toast({
           kind: 'success',

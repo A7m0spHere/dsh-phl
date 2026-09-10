@@ -12,6 +12,7 @@ import type {
   InstanceTemplate,
   LaunchPhase,
   Plugin,
+  PluginTrust,
   Runtime,
   Snapshot,
 } from '@/types'
@@ -437,7 +438,7 @@ class MockRepository implements PhlRepository {
     instance: Instance,
     onProgress: (p: TransferProgress) => void,
     signal: AbortSignal,
-  ): Promise<{ version: string; registryId?: string }> {
+  ): Promise<{ version: string; registryId?: string; trust?: PluginTrust }> {
     const release = plugin.releases[0]
     const size = release?.size ?? 1_800_000
     const speed = rand(6_000_000, 11_000_000)
@@ -472,7 +473,9 @@ class MockRepository implements PhlRepository {
     // is virtual, so the delay is the only observable.
     await sleep(180, signal)
     void instance
-    return { version: release?.version ?? '0.0.0' }
+    // The mock simulates the desktop path's common case: an npm release
+    // pinned to an exact version with a verified integrity.
+    return { version: release?.version ?? '0.0.0', trust: 'verified' }
   }
 
   async setPluginEnabled(

@@ -20,10 +20,21 @@ describe('plugin cancellation at commit boundaries', () => {
     const controller = new AbortController()
     mocks.installPlugin.mockImplementation(async () => {
       controller.abort()
-      return { version: '2.0.0', registryId: 'plugin' }
+      return { version: '2.0.0', registryId: 'plugin', trust: 'pinned' }
     })
     await expect(tauriPluginOverrides.installPlugin(plugin, instance, vi.fn(), controller.signal))
-      .resolves.toEqual({ version: '2.0.0', registryId: 'plugin' })
+      .resolves.toEqual({ version: '2.0.0', registryId: 'plugin', trust: 'pinned' })
+  })
+
+  it('carries the committed trust through, defaulting a missing wire value to unknown', async () => {
+    mocks.installPlugin.mockResolvedValue({ version: '1.0.0', registryId: 'plugin' })
+    await expect(
+      tauriPluginOverrides.installPlugin(plugin, instance, vi.fn(), new AbortController().signal),
+    ).resolves.toEqual({ version: '1.0.0', registryId: 'plugin', trust: 'unknown' })
+    mocks.installPlugin.mockResolvedValue({ version: '1.0.0', registryId: 'plugin', trust: 'verified' })
+    await expect(
+      tauriPluginOverrides.installPlugin(plugin, instance, vi.fn(), new AbortController().signal),
+    ).resolves.toEqual({ version: '1.0.0', registryId: 'plugin', trust: 'verified' })
   })
 
   it('does not hide a failed recovery behind a late cancel request', async () => {

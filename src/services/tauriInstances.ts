@@ -1,7 +1,7 @@
 import * as desktop from '@/lib/desktop'
 import { slugify } from '@/lib/format'
 import type { Instance, InstanceDraft, InstanceKind, InstanceTemplate } from '@/types'
-import type { InstalledPlugin } from '@/types/plugin'
+import type { PluginTrust } from '@/types/plugin'
 import { Cancelled, newTransferId } from './repository'
 import type { CreateProgress, PhlRepository } from './repository'
 
@@ -63,9 +63,10 @@ function toManifest(instance: Instance): desktop.RemoteInstanceManifest {
 /**
  * The backend only ever writes the four known trust levels, but the wire
  * type is a string — narrow it here so the rest of the app can trust the
- * union.
+ * union. Shared with the install outcome (see `tauriPlugins`): the same
+ * four values arrive over the same wire shape from both paths.
  */
-function asTrust(value: string | undefined): NonNullable<InstalledPlugin['trust']> {
+export function asPluginTrust(value: string | undefined): PluginTrust {
   return value === 'verified' || value === 'pinned' || value === 'unverified'
     ? value
     : 'unknown'
@@ -97,7 +98,7 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     favorite: record.favorite,
     env: record.env,
     args: record.args,
-    plugins: record.plugins.map((p) => ({ ...p, trust: asTrust(p.trust) })),
+    plugins: record.plugins.map((p) => ({ ...p, trust: asPluginTrust(p.trust) })),
     // Read back from `<instance>/snapshots/*/snapshot.json`. This used to be
     // hardcoded to `[]` from when snapshots were not implemented, which meant
     // every reload dropped them from the UI while the (potentially multi-GB)
