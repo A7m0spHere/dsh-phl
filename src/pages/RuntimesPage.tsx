@@ -8,6 +8,7 @@ import { useCatalogStore, useInstanceStore, useUIStore } from '@/stores'
 import { Badge, Button, Notice, ProgressBar, SectionCard, Skeleton, Tooltip } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelShell, PanelStat } from '@/components/layout/Panel'
+import { isRuntimeBusy } from '@/types/runtime'
 
 export function RuntimesPanel() {
   const runtimes = useCatalogStore((s) => s.runtimes)
@@ -92,9 +93,7 @@ export function RuntimesPage() {
           {runtimes.map((r) => {
             const state = r.state
             const installed = state.kind === 'installed'
-            const busy = ['queued', 'downloading', 'verifying', 'extracting', 'removing'].includes(
-              state.kind,
-            )
+            const busy = isRuntimeBusy(r)
             const users = usedBy.get(r.id) ?? []
             return (
               <motion.li key={r.id} variants={riseItem}>

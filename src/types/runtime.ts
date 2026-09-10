@@ -15,6 +15,30 @@ export type RuntimeInstallState =
   /** A removal is walking the tree — the row shows it instead of lying idle. */
   | { kind: 'removing' }
 
+/**
+ * The single source of truth for "an operation on this runtime is in
+ * flight" — the same rule as `VERSION_TRANSITIONING_KINDS`, in its own list
+ * so adding a runtime-only kind cannot silently widen the version one.
+ * (`queued` and `verifying` were missing from parts of the frontend while
+ * installs waited on the transfer-slot semaphore.)
+ */
+export const RUNTIME_TRANSITIONING_KINDS: readonly RuntimeInstallState['kind'][] = [
+  'queued',
+  'downloading',
+  'verifying',
+  'extracting',
+  'removing',
+]
+
+export const isRuntimeBusyKind = (kind: RuntimeInstallState['kind']) =>
+  RUNTIME_TRANSITIONING_KINDS.includes(kind)
+
+export const isRuntimeBusy = (r: Runtime) => isRuntimeBusyKind(r.state.kind)
+
+/** See `keepVersionStateOnRefresh`. */
+export const keepRuntimeStateOnRefresh = (kind: RuntimeInstallState['kind']) =>
+  isRuntimeBusyKind(kind) || kind === 'failed'
+
 export interface Runtime {
   id: string
   /** e.g. `Node 22` */

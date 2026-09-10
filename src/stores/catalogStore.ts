@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { repository } from '@/services'
 import { parseThrownError } from '@/lib/errorCodes'
 import { resolveBoundVersion } from '@/lib/instanceVersion'
+import { isVersionBusy } from '@/types/version'
+import { isRuntimeBusy, keepRuntimeStateOnRefresh } from '@/types/runtime'
 import { createVersionActions } from './catalogVersionActions'
 import { createRuntimeActions } from './catalogRuntimeActions'
 import { createPluginActions, pluginKey } from './catalogPluginActions'
@@ -55,7 +57,22 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
             recordFailure('版本目录')(err)
             set({ versionsLoaded: true })
           }),
-        repository.listRuntimes().then((runtimes) => set({ runtimes })).catch(recordFailure('Runtime 列表')),
+        repository
+          .listRuntimes()
+          .then((runtimes) =>
+            set((current) => ({
+              runtimes: runtimes.map((runtime) => {
+                // Same rule as the version refresh merge: an in-flight or
+                // failed row keeps its optimistic state — the disk lags the
+                // operation, and a retried `load()` must not reset it.
+                const old = current.runtimes.find((candidate) => candidate.id === runtime.id)
+                return old && keepRuntimeStateOnRefresh(old.state.kind)
+                  ? { ...runtime, state: old.state }
+                  : runtime
+              }),
+            })),
+          )
+          .catch(recordFailure('Runtime 列表')),
         repository
           .listPlugins()
           .then((catalog) =>
@@ -94,8 +111,7 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
   runtimeById: (id) => get().runtimes.find((runtime) => runtime.id === id),
   pluginById: (id) => get().plugins.find((plugin) => plugin.id === id),
   activeTransfers: () =>
-    get().versions.filter((version) => ['downloading', 'extracting', 'verifying', 'queued'].includes(version.state.kind))
-      .length +
-    get().runtimes.filter((runtime) => ['downloading', 'extracting'].includes(runtime.state.kind)).length +
+    get().versions.filter(isVersionBusy).length +
+    get().runtimes.filter(isRuntimeBusy).length +
     Object.keys(get().pluginTransfers).length,
 }))

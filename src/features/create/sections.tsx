@@ -9,7 +9,7 @@ import { freeSpace } from '@/lib/desktop'
 import { HUES, hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
 import { draftIssues, useCatalogStore, useInstanceStore, useIsDark, useSettingsStore, useUIStore, useViewStore, useWizardStore } from '@/stores'
-import { isVersionBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
+import { isVersionBusy, isRuntimeBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
 import { Badge, Button, EmptyState, Field, Input, ProgressBar, SectionCard, Segmented, Spinner, Switch, TextArea } from '@/components/ui'
 import { PanelGroup, PanelShell } from '@/components/layout/Panel'
 import { InstanceTile } from '@/components/instance'
@@ -415,7 +415,7 @@ function RuntimeCard({
 }) {
   const { t, scale } = useMotion()
   const installed = runtime.state.kind === 'installed'
-  const busy = runtime.state.kind === 'downloading' || runtime.state.kind === 'extracting'
+  const busy = isRuntimeBusy(runtime)
   const unverified = hasVersion && !recommended
 
   return (

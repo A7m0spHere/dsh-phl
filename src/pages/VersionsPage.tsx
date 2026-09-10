@@ -29,6 +29,7 @@ import {
   type VersionFilter,
 } from '@/stores'
 import type { DshVersion } from '@/types'
+import { isVersionBusy } from '@/types/version'
 import {
   Badge,
   Button,
@@ -201,14 +202,7 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
 
   const state = version.state
   const installed = state.kind === 'installed'
-  const busy = [
-    'queued',
-    'downloading',
-    'extracting',
-    'verifying',
-    'installing-deps',
-    'removing',
-  ].includes(state.kind)
+  const busy = isVersionBusy(version)
 
   const onRemove = async () => {
     const ok = await confirm({
