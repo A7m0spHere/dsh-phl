@@ -19,10 +19,24 @@ interface InstanceState {
 
   createProgress: CreateProgress | null
   /**
-   * Live snapshot copies keyed by instance id. Snapshot creation is a local
-   * tree copy that can run for a while on a plugin-heavy instance.
+   * Live snapshot copies keyed by instance id. Snapshot create AND restore
+   * are local tree copies that can run for a while on a plugin-heavy
+   * instance; both report progress here.
    */
   snapshotTransfers: Record<string, CopyProgress>
+  /**
+   * Which copy the progress above belongs to, so the UI can say
+   * "正在复制 / 正在还原" truthfully. The transfer map keys one slot per
+   * instance: create and restore are mutually exclusive (`snapshotControllers`
+   * guards both).
+   */
+  snapshotOps: Record<string, 'create' | 'restore'>
+  /**
+   * Snapshot deletes walking the tree, keyed `${instanceId}:${snapshotId}`.
+   * Same lesson as `deleting` below: the row must show work-in-progress and
+   * ignore repeat clicks instead of parking the user on a busy-lock error.
+   */
+  deletingSnapshots: Record<string, true>
   /**
    * Instances whose teardown the backend is walking right now (a GB-deep
    * `node_modules` delete takes real seconds). The row shows "删除中…" and
@@ -50,6 +64,8 @@ interface InstanceState {
 
   createSnapshot: (id: string) => Promise<Snapshot | null>
   restoreSnapshot: (id: string, snapshotId: string) => Promise<void>
+  /** Abort the copy leg of the instance's in-flight create/restore. */
+  cancelSnapshot: (id: string) => void
   deleteSnapshot: (id: string, snapshotId: string) => Promise<void>
 
   createInstance: (draft: InstanceDraft) => Promise<Instance | null>
@@ -163,6 +179,8 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   setFocus: (focusId) => set({ focusId }),
   createProgress: null,
   snapshotTransfers: {},
+  snapshotOps: {},
+  deletingSnapshots: {},
   deleting: {},
 
   async load() {
@@ -420,6 +438,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     snapshotControllers.set(id, controller)
     const patchTransfer = (p: CopyProgress) =>
       set({ snapshotTransfers: { ...get().snapshotTransfers, [id]: p } })
+    set({ snapshotOps: { ...get().snapshotOps, [id]: 'create' } })
     patchTransfer({ progress: 0, bytesDone: 0, bytesTotal: 0 })
     try {
       const snap = await repository.createSnapshot(instance, patchTransfer, controller.signal)
@@ -448,13 +467,23 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       snapshotControllers.delete(id)
       const transfers = { ...get().snapshotTransfers }
       delete transfers[id]
-      set({ snapshotTransfers: transfers })
+      const ops = { ...get().snapshotOps }
+      delete ops[id]
+      set({ snapshotTransfers: transfers, snapshotOps: ops })
     }
+  },
+
+  cancelSnapshot(id) {
+    snapshotControllers.get(id)?.abort()
   },
 
   async restoreSnapshot(id, snapshotId) {
     const instance = get().byId(id)
     if (!instance) return
+    // One snapshot copy per instance at a time — the same guard create uses;
+    // a double click used to fire a second guarded task straight into a
+    // busy-lock error while the first was still copying.
+    if (snapshotControllers.has(id)) return
     const status = get().stateOf(id).status
     if (status === 'running' || status === 'starting' || status === 'stopping') {
       useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再还原快照' })
@@ -466,27 +495,49 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         .toast({ kind: 'info', title: '有插件正在安装', message: '等插件安装完成后再回滚。' })
       return
     }
+    const controller = new AbortController()
+    snapshotControllers.set(id, controller)
+    const patchTransfer = (p: CopyProgress) =>
+      set({ snapshotTransfers: { ...get().snapshotTransfers, [id]: p } })
+    set({ snapshotOps: { ...get().snapshotOps, [id]: 'restore' } })
+    patchTransfer({ progress: 0, bytesDone: 0, bytesTotal: 0 })
     try {
-      const fresh = await repository.restoreSnapshot(instance, snapshotId)
+      const fresh = await repository.restoreSnapshot(instance, snapshotId, patchTransfer, controller.signal)
       // 还原换掉了整个 dsh-home：插件列表由磁盘反推，必须以还原后的为准。
       get().updateInstance(id, { plugins: fresh.plugins })
       useUIStore
         .getState()
         .toast({ kind: 'success', title: '已还原快照', message: '插件与配置已回到快照时的状态。' })
     } catch (err) {
-      useUIStore
-        .getState()
-        .toast({
-          kind: 'error',
-          title: '还原快照失败',
-          message: parseThrownError(err).message,
-        })
+      if (err instanceof Cancelled) {
+        useUIStore.getState().toast({ kind: 'info', title: '已取消还原快照' })
+      } else {
+        useUIStore
+          .getState()
+          .toast({
+            kind: 'error',
+            title: '还原快照失败',
+            message: parseThrownError(err).message,
+          })
+      }
+    } finally {
+      snapshotControllers.delete(id)
+      const transfers = { ...get().snapshotTransfers }
+      delete transfers[id]
+      const ops = { ...get().snapshotOps }
+      delete ops[id]
+      set({ snapshotTransfers: transfers, snapshotOps: ops })
     }
   },
 
   async deleteSnapshot(id, snapshotId) {
     const instance = get().byId(id)
     if (!instance) return
+    const key = `${id}:${snapshotId}`
+    if (get().deletingSnapshots[key]) return
+    // Deleting walks the copied tree; show the row busy and absorb repeat
+    // clicks the same way instance deletion does.
+    set({ deletingSnapshots: { ...get().deletingSnapshots, [key]: true } })
     try {
       await repository.deleteSnapshot(instance, snapshotId)
       get().updateInstance(id, {
@@ -500,6 +551,10 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
           title: '删除快照失败',
           message: parseThrownError(err).message,
         })
+    } finally {
+      const deleting = { ...get().deletingSnapshots }
+      delete deleting[key]
+      set({ deletingSnapshots: deleting })
     }
   },
 

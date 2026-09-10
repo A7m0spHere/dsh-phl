@@ -236,9 +236,17 @@ class MockRepository implements PhlRepository {
     }
   }
 
-  async restoreSnapshot(instance: Instance, snapshotId: string): Promise<Instance> {
-    await sleep(900)
+  async restoreSnapshot(
+    instance: Instance,
+    snapshotId: string,
+    onProgress: (p: CopyProgress) => void,
+    signal: AbortSignal,
+  ): Promise<Instance> {
+    // Mirrors the desktop path: the copy is the visible leg and is
+    // cancellable; the mock "swap" is the returned record.
     void snapshotId
+    const size = 58_000_000
+    await ramp(900, (p) => onProgress({ progress: p, bytesDone: Math.round(size * p), bytesTotal: size }), signal)
     return instance
   }
 

@@ -275,25 +275,48 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 /// Restores a snapshot by copying its `dsh-home` back over the live one. The
 /// copy (not move) keeps the snapshot intact so it can be restored again —
 /// and rolling back to the same point twice must not be a trap.
+///
+/// Shares the create operation's model: a transfer id for the cancel flag,
+/// a progress Channel for the copy, and a registered guarded task (phase
+/// `copying` + ratio) so the task center and the instance page tell the same
+/// story. The swap is deliberately NOT cancellable — once the live home is
+/// renamed aside, the only safe way out is to finish putting the restored
+/// copy in place.
 #[tauri::command]
 pub async fn restore_instance_snapshot(
+    transfers: State<'_, Transfers>,
     locks: State<'_, crate::resources::ResourceLocks>,
     tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
     state: State<'_, PhlState>,
+    transfer_id: String,
     id: String,
     snapshot_id: String,
+    on_progress: Channel<CloneProgress>,
 ) -> Result<InstanceRecord, String> {
-    crate::resources::guarded(
-        crate::resources::next_task_id("snapshot-restore"),
+    let flag = transfers.take(&transfer_id);
+    let result = crate::resources::guarded(
+        transfer_id.clone(),
         "snapshot-restore",
         format!("恢复快照 {snapshot_id} → {id}"),
         vec![crate::resources::Resource::Instance(id.clone())],
-        None,
+        Some(flag.clone()),
         &locks,
         &tasks,
-        move |_| async move {
-            let r = restore_snapshot_inner(&state.root(), &id, &snapshot_id, &processes).await;
+        move |task| async move {
+            task.set_phase("copying");
+            let r = restore_snapshot_with(
+                &state.root(),
+                &id,
+                &snapshot_id,
+                &processes,
+                &flag,
+                &|p: CloneProgress| {
+                    task.set_progress(Some(p.progress));
+                    let _ = on_progress.send(p);
+                },
+            )
+            .await;
             if r.is_ok() {
                 if let Ok(dir) = instance_dir(&state.root(), &id) {
                     crate::instances::invalidate_disk_usage(&dir);
@@ -302,14 +325,38 @@ pub async fn restore_instance_snapshot(
             r
         },
     )
-    .await
+    .await;
+    transfers.release(&transfer_id);
+    result
 }
 
+/// Test / internal-call wrapper: no cancel channel, progress discarded.
+/// The *command* wires the real flag and channel — this default must never
+/// reach an IPC path.
 pub(crate) async fn restore_snapshot_inner(
     root: &Path,
     id: &str,
     snapshot_id: &str,
     processes: &Processes,
+) -> Result<InstanceRecord, String> {
+    restore_snapshot_with(
+        root,
+        id,
+        snapshot_id,
+        processes,
+        &Arc::new(AtomicBool::new(false)),
+        &|_| {},
+    )
+    .await
+}
+
+pub(crate) async fn restore_snapshot_with<F: Fn(CloneProgress) + Send + Sync>(
+    root: &Path,
+    id: &str,
+    snapshot_id: &str,
+    processes: &Processes,
+    flag: &Arc<AtomicBool>,
+    on_progress: &F,
 ) -> Result<InstanceRecord, String> {
     let id = sanitize_segment(id, "实例 id")?;
     let dir = instance_dir(root, &id)?;
@@ -348,13 +395,16 @@ pub(crate) async fn restore_snapshot_inner(
     // Same guarded copier as create: it runs on a blocking thread (the old
     // `copy_tree_sync` blocked the async runtime for the whole restore),
     // classifies links instead of following them, and reports the worker's
-    // real result rather than a half-finished tree.
-    let restore_flag = Arc::new(AtomicBool::new(false));
+    // real result rather than a half-finished tree. The transfer's cancel
+    // flag reaches the copier (it is the only cancellable leg of a restore:
+    // after this point the swap must run to completion), and every byte
+    // counted goes to `on_progress` — the old `&|_| {}` discarded it, so the
+    // restore's longest step showed nothing anywhere.
     let dest_home = staging.join("dsh-home");
     if let Err(e) = copy_tree_with_progress(
         snap_home.clone(),
         dest_home.clone(),
-        Arc::clone(&restore_flag),
+        Arc::clone(flag),
         SkipRule::Nothing,
         // `current` is where this tree is renamed to, so in-tree links must
         // name the live home rather than the `.phl-restore` staging path.
@@ -363,11 +413,14 @@ pub(crate) async fn restore_snapshot_inner(
             dest_root: current.clone(),
         },
         root.to_path_buf(),
-        &|_| {},
+        on_progress,
     )
     .await
     {
         let _ = tokio::fs::remove_dir_all(&staging).await;
+        if crate::versions::cancelled(flag) {
+            return Err("cancelled".into());
+        }
         return Err(format!("还原快照失败: {e}"));
     }
 
@@ -557,6 +610,39 @@ mod tests {
             .unwrap();
         assert!(!dir.join("snapshots").join("snap-9").exists());
         assert!(dir.join("snapshots").join(".phl-new-snap-9").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_restore_never_touches_the_live_home() {
+        let root = temp_root("restore-cancel");
+        let id = "inst-r1";
+        let dir = root.join("instances").join(id);
+        std::fs::create_dir_all(dir.join("dsh-home").join("profiles").join("web")).unwrap();
+        crate::instances::manifest::write_manifest(&dir, &manifest(id))
+            .await
+            .unwrap();
+        write_snapshot_meta(
+            &dir.join("snapshots").join("snap-1"),
+            &snapshot_file("snap-1"),
+        );
+        std::fs::create_dir_all(dir.join("snapshots").join("snap-1").join("dsh-home")).unwrap();
+
+        // The transfer is already cancelled before the call: the copier's
+        // first act is checking the flag, so the restore must abort before
+        // the swap and leave the live home exactly as it was.
+        let flag = Arc::new(AtomicBool::new(true));
+        let err = restore_snapshot_with(&root, id, "snap-1", &fake_processes(), &flag, &|_| {})
+            .await
+            .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(dir.join("dsh-home").join("profiles").join("web").exists());
+        assert!(!dir.join(".phl-restore").exists(), "staging cleaned up");
+        assert!(
+            !dir.join(".phl-old-dsh-home").exists(),
+            "the swap never started"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   stop: vi.fn(), launch: vi.fn(), saveInstance: vi.fn(), toast: vi.fn(), listInstances: vi.fn(),
   openDshWebUi: vi.fn(),
   cloneInstance: vi.fn(),
+  createSnapshot: vi.fn(), restoreSnapshot: vi.fn(), deleteSnapshot: vi.fn(),
   onExit: null as null | ((event: { instanceId: string; pid: number; code: number | null }) => void),
 }))
 vi.mock('@/services', async () => ({
@@ -196,5 +197,66 @@ describe('instance lifecycle', () => {
     mocks.openDshWebUi.mockResolvedValue({ ok: true, how: 'window' })
     await useInstanceStore.getState().openWebUi('test')
     expect(mocks.toast).not.toHaveBeenCalled()
+  })
+})
+
+describe('snapshot copy operations', () => {
+  const stopped = () => useInstanceStore.setState({ states: { test: { status: 'stopped' } } })
+
+  it('restore marks itself busy, streams progress, and blocks a second copy', async () => {
+    stopped()
+    let release!: () => void
+    mocks.restoreSnapshot.mockImplementation(
+      (_i: unknown, _s: string, onProgress: (p: unknown) => void) => {
+        onProgress({ progress: 0.5, bytesDone: 50, bytesTotal: 100 })
+        return new Promise((resolve) => {
+          release = () => resolve({ ...instance, plugins: [{ pluginId: 'p', version: '1', linked: true }] })
+        })
+      },
+    )
+    const run = useInstanceStore.getState().restoreSnapshot('test', 'snap-1')
+    // A restore in flight is visible as pending with live byte progress.
+    expect(useInstanceStore.getState().snapshotOps['test']).toBe('restore')
+    expect(useInstanceStore.getState().snapshotTransfers['test']).toMatchObject({ bytesTotal: 100 })
+    // A repeat click must not start a second copy (it would hit the same
+    // instance lock and surface a busy error).
+    await useInstanceStore.getState().restoreSnapshot('test', 'snap-1')
+    expect(mocks.restoreSnapshot).toHaveBeenCalledTimes(1)
+    release()
+    await run
+    // And the pending/progress state is cleared once it resolves.
+    expect(useInstanceStore.getState().snapshotOps['test']).toBeUndefined()
+    expect(useInstanceStore.getState().snapshotTransfers['test']).toBeUndefined()
+    expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+  })
+
+  it('create and restore share the one-copy-per-instance guard', async () => {
+    stopped()
+    let release!: () => void
+    mocks.createSnapshot.mockImplementation(
+      () => new Promise((resolve) => { release = () => resolve({ id: 'snap-x', label: '', createdAt: '', versionId: '', runtimeId: '', pluginCount: 0, size: 0 }) }),
+    )
+    const run = useInstanceStore.getState().createSnapshot('test')
+    expect(useInstanceStore.getState().snapshotOps['test']).toBe('create')
+    // While a create holds the instance, a restore is refused up front.
+    await useInstanceStore.getState().restoreSnapshot('test', 'snap-1')
+    expect(mocks.restoreSnapshot).not.toHaveBeenCalled()
+    release()
+    await run
+  })
+
+  it('delete marks the snapshot pending and absorbs a repeat click', async () => {
+    stopped()
+    let release!: () => void
+    mocks.deleteSnapshot.mockImplementation(
+      () => new Promise<void>((resolve) => { release = () => resolve() }),
+    )
+    const run = useInstanceStore.getState().deleteSnapshot('test', 'snap-1')
+    expect(useInstanceStore.getState().deletingSnapshots['test:snap-1']).toBe(true)
+    await useInstanceStore.getState().deleteSnapshot('test', 'snap-1')
+    expect(mocks.deleteSnapshot).toHaveBeenCalledTimes(1)
+    release()
+    await run
+    expect(useInstanceStore.getState().deletingSnapshots['test:snap-1']).toBeUndefined()
   })
 })

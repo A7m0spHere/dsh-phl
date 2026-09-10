@@ -247,9 +247,33 @@ export const tauriInstanceOverrides: Pick<
       signal.removeEventListener('abort', onAbort)
     }
   },
-  restoreSnapshot: async (instance, snapshotId) => {
-    const record = await desktop.restoreInstanceSnapshot(instance.id, snapshotId)
-    return instanceFromRecord(record)
+  restoreSnapshot: async (instance, snapshotId, onProgress, signal) => {
+    // Same shape as createSnapshot: a transfer id the cancel flag lives
+    // under, and an abort that reaches `cancel_transfer` so the copier on
+    // the Rust side stops between files instead of running to the end.
+    const transferId = newTransferId(`s:${instance.id}`)
+    if (signal.aborted) throw new Cancelled()
+    const onAbort = () => void desktop.cancelTransfer(transferId)
+    signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      const record = await desktop.restoreInstanceSnapshot(
+        instance.id,
+        transferId,
+        snapshotId,
+        onProgress,
+      )
+      // No post-await `signal.aborted` check: once the swap has run, the
+      // restore HAPPENED. The backend reports its own `"cancelled"` (which
+      // rejects here) only if the copy leg aborted before the swap; trusting
+      // a late abort flag would tell the user the rollback was skipped when
+      // their dsh-home was actually replaced.
+      return instanceFromRecord(record)
+    } catch (err) {
+      if (signal.aborted) throw new Cancelled()
+      throw err instanceof Error ? err : new Error(String(err))
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
   },
   deleteSnapshot: async (instance, snapshotId) => {
     await desktop.deleteInstanceSnapshot(instance.id, snapshotId)
