@@ -1,40 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="100%" role="img" aria-labelledby="phlFlowTitle phlFlowDesc">
-  <title id="phlFlowTitle">一个实例是怎么起来的</title>
-  <desc id="phlFlowDesc">流程图：版本目录、运行时目录与插件注册表汇入一个实例，实例持有独立的 DSH_HOME、固定的 web profile 与探测或自动分配的端口；随后以 dsh web --port 启动，端口就绪后打开 WebUI。</desc>
-  <rect width="1200" height="340" rx="18" fill="#0B0E14"/>
-  <rect x="0.5" y="0.5" width="1199" height="339" rx="17.5" fill="none" stroke="#26304A"/>
-  <text x="64" y="62" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="26" font-weight="600" fill="#F2F5FB">一个实例是怎么起来的</text>
-  <text x="64" y="94" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="18" fill="#8C99B4">来源可以有多个；运行时与插件只属于当前实例。</text>
-
-  <rect x="64" y="130" width="232" height="150" rx="12" fill="#141926" stroke="#26304A"/>
-  <text x="88" y="168" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="20" font-weight="600" fill="#F2F5FB">来源</text>
-  <text x="88" y="204" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">版本 · GitHub / npm</text>
-  <text x="88" y="234" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">运行时 · nodejs.org</text>
-  <text x="88" y="264" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">插件 · 社区注册表</text>
-
-  <line x1="300" y1="205" x2="348" y2="205" stroke="#26304A" stroke-width="2"/>
-  <path d="M347 200L356 205L347 210Z" fill="#5E6B85"/>
-
-  <rect x="356" y="118" width="336" height="174" rx="12" fill="#161C2E" stroke="#4D6BFE"/>
-  <text x="380" y="156" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="20" font-weight="600" fill="#F2F5FB">实例（隔离边界）</text>
-  <text x="380" y="192" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">DSH_HOME=&lt;root&gt;/&lt;id&gt;</text>
-  <text x="380" y="222" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">profile = web</text>
-  <text x="380" y="252" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">端口 = 探测 / 自动分配</text>
-  <text x="380" y="282" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#3FCF8E">插件 → node_modules</text>
-
-  <line x1="696" y1="205" x2="744" y2="205" stroke="#26304A" stroke-width="2"/>
-  <path d="M743 200L752 205L743 210Z" fill="#5E6B85"/>
-
-  <rect x="752" y="148" width="196" height="114" rx="12" fill="#141926" stroke="#26304A"/>
-  <text x="776" y="186" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="20" font-weight="600" fill="#F2F5FB">启动</text>
-  <text x="776" y="220" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">dsh web --port</text>
-  <text x="776" y="248" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="18" fill="#8C99B4">端口就绪后打开</text>
-
-  <line x1="952" y1="205" x2="1000" y2="205" stroke="#26304A" stroke-width="2"/>
-  <path d="M999 200L1008 205L999 210Z" fill="#5E6B85"/>
-
-  <rect x="1008" y="148" width="128" height="114" rx="12" fill="#141926" stroke="#26304A"/>
-  <text x="1032" y="186" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei UI, sans-serif" font-size="20" font-weight="600" fill="#F2F5FB">WebUI</text>
-  <text x="1032" y="220" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#B9C4DA">127.0.0.1</text>
-  <text x="1032" y="248" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="18" fill="#4D6BFE">:&lt;port&gt;</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="title desc">
+  <title id="title">程序文件共享，实例状态隔离</title>
+  <desc id="desc">概念示意：集中存放的 DSH 版本与 Node 运行时被实例 A、B 分别引用。两个实例各自保存 DSH_HOME、配置与插件，并通过不同端口启动各自的 WebUI。</desc>
+  <rect width="1200" height="640" rx="10" fill="#FFFFFF"/>
+  <g font-family="Segoe UI, Microsoft YaHei UI, PingFang SC, sans-serif">
+    <text x="56" y="72" font-size="42" font-weight="600" fill="#171E2B">程序文件共享，实例状态隔离</text>
+    <text x="1144" y="68" text-anchor="end" font-size="20" fill="#596579">概念示意</text>
+    <g id="shared-files">
+      <rect x="56" y="108" width="1088" height="104" rx="8" fill="#F0F3FF"/>
+      <text x="88" y="172" font-size="36" font-weight="600" fill="#295DB3">DSH 版本库 + Node 运行时库</text>
+      <text x="1108" y="171" text-anchor="end" font-size="26" fill="#596579">实例按需引用</text>
+      <path d="M316 213v43m568-43v43" fill="none" stroke="#295DB3" stroke-width="2"/>
+      <path d="m309 249 7 9 7-9m554 0 7 9 7-9" fill="none" stroke="#295DB3" stroke-width="2"/>
+    </g>
+    <g id="instance-a">
+      <rect x="56" y="268" width="520" height="228" rx="10" fill="#FFFFFF" stroke="#C5D0E2"/>
+      <text x="88" y="326" font-size="40" font-weight="600" fill="#171E2B">实例 A</text>
+      <text x="88" y="386" font-family="Consolas, monospace" font-size="34" fill="#295DB3">DSH_HOME / A</text>
+      <text x="88" y="452" font-size="34" fill="#596579">独立配置 · 独立插件</text>
+      <path d="M316 497v35m-7-7 7 9 7-9" fill="none" stroke="#295DB3" stroke-width="2"/>
+      <text x="316" y="584" text-anchor="middle" font-size="34" font-weight="600" fill="#171E2B">端口 A → WebUI A</text>
+    </g>
+    <g id="instance-b">
+      <rect x="624" y="268" width="520" height="228" rx="10" fill="#FFFFFF" stroke="#C5D0E2"/>
+      <text x="656" y="326" font-size="40" font-weight="600" fill="#171E2B">实例 B</text>
+      <text x="656" y="386" font-family="Consolas, monospace" font-size="34" fill="#295DB3">DSH_HOME / B</text>
+      <text x="656" y="452" font-size="34" fill="#596579">独立配置 · 独立插件</text>
+      <path d="M884 497v35m-7-7 7 9 7-9" fill="none" stroke="#295DB3" stroke-width="2"/>
+      <text x="884" y="584" text-anchor="middle" font-size="34" font-weight="600" fill="#171E2B">端口 B → WebUI B</text>
+    </g>
+  </g>
 </svg>
