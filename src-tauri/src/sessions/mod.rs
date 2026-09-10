@@ -293,6 +293,7 @@ pub async fn copy_session(
 /// task-centre row, and nothing stopped a snapshot/clone/plugin-write from
 /// racing the same homes mid-copy.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn copy_sessions(
     locks: State<'_, crate::resources::ResourceLocks>,
     tasks: State<'_, crate::resources::Tasks>,
@@ -359,7 +360,7 @@ async fn guarded_session_copy(
             target_ids.len()
         ),
         std::iter::once(source_id.clone())
-            .chain(targets.into_iter())
+            .chain(targets)
             .map(crate::resources::Resource::Instance)
             .collect::<Vec<_>>(),
         None,
@@ -382,6 +383,10 @@ async fn guarded_session_copy(
     .await
 }
 
+/// Direct entry used by the test suite and by adoption flows that hold their
+/// own instance lock around a single copy; the IPC commands above register
+/// through `guarded` instead.
+#[cfg(test)]
 pub(crate) async fn copy_sessions_inner(
     root: &Path,
     processes: &Processes,

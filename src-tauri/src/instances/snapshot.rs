@@ -283,6 +283,7 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
 /// renamed aside, the only safe way out is to finish putting the restored
 /// copy in place.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_instance_snapshot(
     transfers: State<'_, Transfers>,
     locks: State<'_, crate::resources::ResourceLocks>,
