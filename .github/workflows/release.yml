@@ -39,10 +39,10 @@ jobs:
 
       # The tag must name the version the app reports; a mismatched tag would
       # publish an installer whose about-dialog disagrees with its filename.
-      # The four version sources must also agree with each other, so a manually
+      # The five version files must also agree with each other, so a manually
       # dispatched build cannot mix versions either. Same script as the gate:
       # one definition of "consistent", checked before the build is paid for.
-      - name: Verify versions (package.json · Cargo.toml · tauri.conf.json · Cargo.lock · tag)
+      - name: Verify versions (package + lock · Cargo + lock · tauri.conf.json · tag)
         shell: bash
         env:
           PHL_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
