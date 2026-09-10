@@ -413,7 +413,11 @@ pub(crate) async fn remove_version_dir_inner(
         if let Ok(manifest) =
             crate::instances::load_manifest(&instance_dir_path, &instance_id).await
         {
-            if manifest.version_id == version_id {
+            // Legacy-tolerant comparison: manifests written before the binding
+            // fix carry the bare detected version ("0.1.0"). New ones can
+            // forget the phantom, but an un-healed existing instance must not
+            // sneak past the "in use" guard.
+            if manifest.version_id == version_id || manifest.version_id == safe {
                 running_users.push(format!("「{}」", manifest.name));
             }
         }
