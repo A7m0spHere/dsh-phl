@@ -8,6 +8,7 @@ import {
   Download,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { isVersionInstallable, isRuntimeInstallable } from '@/types'
 import {
   draftIssues,
   useCatalogStore,
@@ -163,10 +164,9 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   const pendingNames = useMemo(() => {
     const out: string[] = []
     const v = versions.find((x) => x.id === draft.versionId)
-    if (v && (v.state.kind === 'available' || v.state.kind === 'failed'))
-      out.push(`DSH ${v.name}`)
+    if (v && isVersionInstallable(v)) out.push(`DSH ${v.name}`)
     const r = runtimes.find((x) => x.id === draft.runtimeId)
-    if (r && (r.state.kind === 'available' || r.state.kind === 'failed')) out.push(r.name)
+    if (r && isRuntimeInstallable(r)) out.push(r.name)
     return out
   }, [versions, runtimes, draft.versionId, draft.runtimeId])
 
@@ -204,14 +204,8 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
     const catalog = useCatalogStore.getState()
     const version = catalog.versions.find((v) => v.id === draft.versionId)
     const runtime = catalog.runtimes.find((r) => r.id === draft.runtimeId)
-    const versionPending =
-      version && (version.state.kind === 'available' || version.state.kind === 'failed')
-        ? version
-        : null
-    const runtimePending =
-      runtime && (runtime.state.kind === 'available' || runtime.state.kind === 'failed')
-        ? runtime
-        : null
+    const versionPending = version && isVersionInstallable(version) ? version : null
+    const runtimePending = runtime && isRuntimeInstallable(runtime) ? runtime : null
 
     const instance = await createInstance(draft)
     if (!instance) return

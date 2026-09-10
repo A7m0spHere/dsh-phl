@@ -129,10 +129,30 @@ async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, Str
 
 /// Removes everything under `<root>/cache` — leftover `.part` files and any
 /// archives the user chose to keep. Both are safe to delete; they only ever
-/// speed up a reinstall. Returns the bytes freed.
+/// speed up a reinstall. Returns the bytes freed. Registered as a task
+/// (audit C): the cache holds multi-GB `.part` downloads and archives, and
+/// this `remove_dir_all` used to be the one user-sized sweep invisible to
+/// the task centre.
 #[tauri::command]
-pub async fn clear_download_cache(phl: State<'_, PhlState>) -> Result<u64, String> {
-    clear_download_cache_inner(&phl.root()).await
+pub async fn clear_download_cache(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
+    phl: State<'_, PhlState>,
+) -> Result<u64, String> {
+    crate::resources::guarded(
+        crate::resources::next_task_id("cache-clear"),
+        "cache-clear",
+        "清理下载缓存".to_string(),
+        Vec::<crate::resources::Resource>::new(),
+        None,
+        &locks,
+        &tasks,
+        move |task| async move {
+            task.set_phase("removing");
+            clear_download_cache_inner(&phl.root()).await
+        },
+    )
+    .await
 }
 
 async fn clear_download_cache_inner(root: &Path) -> Result<u64, String> {

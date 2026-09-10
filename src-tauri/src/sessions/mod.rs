@@ -254,20 +254,26 @@ fn find_and_read(home: PathBuf, session_dir: String) -> Result<SessionDetail, St
 }
 
 /// Copy one session into one target instance, preserving lineage and cwd.
+/// Registered like `copy_sessions` (below) — the copy can be multi-GB and
+/// writes into the target's home.
 #[tauri::command]
 pub async fn copy_session(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     processes: State<'_, Processes>,
     source_id: String,
     session_dir: String,
     target_id: String,
 ) -> Result<CopyOutcome, String> {
-    let outcomes = copy_sessions_inner(
-        &state.root(),
+    let outcomes = guarded_session_copy(
+        &locks,
+        &tasks,
+        &state,
         &processes,
-        &source_id,
-        &[session_dir],
-        &[target_id],
+        source_id,
+        vec![session_dir],
+        vec![target_id.clone()],
     )
     .await?;
     outcomes
@@ -281,8 +287,15 @@ pub async fn copy_session(
 /// completed pairs are reported to the caller through the progress channel's
 /// final aggregate. For P1 the command surfaces the full set on total success
 /// and the first failure otherwise (the UI then narrows its selection).
+///
+/// Both copy commands run under `guarded` holding the source AND every target
+/// instance (audit C): a multi-GB matrix used to run untracked — no
+/// task-centre row, and nothing stopped a snapshot/clone/plugin-write from
+/// racing the same homes mid-copy.
 #[tauri::command]
 pub async fn copy_sessions(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
     state: State<'_, PhlState>,
     processes: State<'_, Processes>,
     source_id: String,
@@ -290,13 +303,81 @@ pub async fn copy_sessions(
     target_ids: Vec<String>,
     on_progress: Channel<copy::SessionProgress>,
 ) -> Result<Vec<CopyOutcome>, String> {
-    copy_sessions_inner_with(
-        &state.root(),
-        &processes,
-        &source_id,
-        &session_dirs,
-        &target_ids,
-        Some(&on_progress),
+    let mut resources: Vec<crate::resources::Resource> = std::iter::once(source_id.as_str())
+        .chain(target_ids.iter().map(String::as_str))
+        .map(|id| crate::resources::Resource::Instance(id.to_string()))
+        .collect();
+    resources.sort_by_key(|r| r.key());
+    resources.dedup_by_key(|r| r.key());
+    crate::resources::guarded(
+        crate::resources::next_task_id("session-copy"),
+        "session-copy",
+        format!(
+            "迁移 {} 个会话 → {} 个实例",
+            session_dirs.len(),
+            target_ids.len()
+        ),
+        resources,
+        None,
+        &locks,
+        &tasks,
+        move |task| async move {
+            task.set_phase("copying");
+            copy_sessions_inner_with(
+                &state.root(),
+                &processes,
+                &source_id,
+                &session_dirs,
+                &target_ids,
+                Some(&on_progress),
+                Some(&task),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// `copy_session`'s wrapper: run the same guarded matrix for one pair, so the
+/// single-copy command cannot bypass the locks the matrix command enforces.
+async fn guarded_session_copy(
+    locks: &crate::resources::ResourceLocks,
+    tasks: &crate::resources::Tasks,
+    state: &PhlState,
+    processes: &Processes,
+    source_id: String,
+    session_dirs: Vec<String>,
+    target_ids: Vec<String>,
+) -> Result<Vec<CopyOutcome>, String> {
+    let targets = target_ids.clone();
+    crate::resources::guarded(
+        crate::resources::next_task_id("session-copy"),
+        "session-copy",
+        format!(
+            "迁移 {} 个会话 → {} 个实例",
+            session_dirs.len(),
+            target_ids.len()
+        ),
+        std::iter::once(source_id.clone())
+            .chain(targets.into_iter())
+            .map(crate::resources::Resource::Instance)
+            .collect::<Vec<_>>(),
+        None,
+        locks,
+        tasks,
+        move |task| async move {
+            task.set_phase("copying");
+            copy_sessions_inner_with(
+                &state.root(),
+                processes,
+                &source_id,
+                &session_dirs,
+                &target_ids,
+                None,
+                Some(&task),
+            )
+            .await
+        },
     )
     .await
 }
@@ -308,9 +389,19 @@ pub(crate) async fn copy_sessions_inner(
     session_dirs: &[String],
     target_ids: &[String],
 ) -> Result<Vec<CopyOutcome>, String> {
-    copy_sessions_inner_with(root, processes, source_id, session_dirs, target_ids, None).await
+    copy_sessions_inner_with(
+        root,
+        processes,
+        source_id,
+        session_dirs,
+        target_ids,
+        None,
+        None,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn copy_sessions_inner_with(
     root: &Path,
     processes: &Processes,
@@ -318,6 +409,7 @@ async fn copy_sessions_inner_with(
     session_dirs: &[String],
     target_ids: &[String],
     on_progress: Option<&Channel<copy::SessionProgress>>,
+    task: Option<&crate::resources::Task>,
 ) -> Result<Vec<CopyOutcome>, String> {
     if session_dirs.is_empty() {
         return Err("未选择任何会话".into());
@@ -365,6 +457,10 @@ async fn copy_sessions_inner_with(
                     target_id: outcome.target_id.clone(),
                     new_session_dir: outcome.new_session_dir.clone(),
                 });
+            }
+            // The task-centre row reads the same ratio the panel shows.
+            if let Some(t) = task {
+                t.set_progress(Some((outcomes.len() + 1) as f64 / total as f64));
             }
             outcomes.push(outcome);
         }

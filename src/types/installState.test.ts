@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isVersionBusy,
   isVersionBusyKind,
+  isVersionInstallable,
   keepVersionStateOnRefresh,
   type DshVersion,
   type VersionInstallState,
@@ -9,6 +10,7 @@ import {
 import {
   isRuntimeBusy,
   isRuntimeBusyKind,
+  isRuntimeInstallable,
   keepRuntimeStateOnRefresh,
   type Runtime,
   type RuntimeInstallState,
@@ -81,6 +83,48 @@ describe('runtime state predicates', () => {
       expect(keepRuntimeStateOnRefresh(kind as RuntimeInstallState['kind'])).toBe(
         busy || kind === 'failed',
       )
+    }
+  })
+})
+
+/**
+ * The wizard's "install here" affordance: exactly the two resting states
+ * (never offered mid-operation; failed doubles as retry). Enumerated for
+ * the same drift reason as the busy tables above.
+ */
+const versionInstallable: Record<VersionInstallState['kind'], boolean> = {
+  available: true,
+  queued: false,
+  downloading: false,
+  extracting: false,
+  verifying: false,
+  'installing-deps': false,
+  installed: false,
+  failed: true,
+  removing: false,
+}
+
+const runtimeInstallable: Record<RuntimeInstallState['kind'], boolean> = {
+  available: true,
+  queued: false,
+  downloading: false,
+  verifying: false,
+  extracting: false,
+  installed: false,
+  failed: true,
+  removing: false,
+}
+
+describe('installable predicates (wizard auto-install affordance)', () => {
+  it('version', () => {
+    for (const [kind, on] of Object.entries(versionInstallable)) {
+      expect(isVersionInstallable(version({ kind } as VersionInstallState))).toBe(on)
+    }
+  })
+
+  it('runtime', () => {
+    for (const [kind, on] of Object.entries(runtimeInstallable)) {
+      expect(isRuntimeInstallable(runtime({ kind } as RuntimeInstallState))).toBe(on)
     }
   })
 })

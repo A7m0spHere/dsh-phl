@@ -128,6 +128,7 @@ async fn fan_out_progress_counts_every_landed_pair() {
         &["session-one".into(), "session-two".into()],
         &["dst-a".into(), "dst-b".into()],
         Some(&sink),
+        None,
     )
     .await
     .unwrap();

@@ -285,6 +285,27 @@ pub async fn install_pack(
     result
 }
 
+/// Advance the install's visible progress: the same step lands in the task
+/// center row (phase + ratio) and the frontend's `CloneProgress` channel.
+/// The core's unpack loop cannot report byte ratios (it only takes a cancel
+/// predicate), so the bar moves in PHASE steps — deliberate, honest pacing;
+/// before this the channel was threaded through `install_inner` and never
+/// sent, freezing the install wizard's bar at 0% for the entire unpack.
+fn mark(
+    task: &crate::resources::Task,
+    on_progress: &Channel<CloneProgress>,
+    phase: &str,
+    progress: f64,
+) {
+    task.set_phase(phase);
+    task.set_progress(Some(progress));
+    let _ = on_progress.send(CloneProgress {
+        progress,
+        bytes_done: 0,
+        bytes_total: 0,
+    });
+}
+
 async fn install_inner(
     root: &Path,
     task: crate::resources::Task,
@@ -358,7 +379,7 @@ async fn install_inner(
 
     let (sessions_imported, credential_names) = {
         let built = async {
-            task.set_phase("创建实例目录");
+            mark(&task, on_progress, "创建实例目录", 0.1);
             let home = staging.join("dsh-home");
             let profile = home.join("profiles").join("web");
             std::fs::create_dir_all(profile.join("node_modules"))
@@ -368,7 +389,7 @@ async fn install_inner(
                     .map_err(|e| format!("创建 {sub} 失败: {e}"))?;
             }
 
-            task.set_phase("解包整合包");
+            mark(&task, on_progress, "解包整合包", 0.2);
             // §R7: decompression + writing is the heaviest synchronous phase of
             // an install, so it runs on the blocking pool — the async worker
             // (and other instances' transfers) stay responsive during a big
@@ -398,10 +419,10 @@ async fn install_inner(
             // (before the manifest write + rename) means a failure here aborts
             // into the existing `remove_dir_all(&staging)` cleanup — no half-
             // committed instance ever lands.
-            task.set_phase("登记内置插件");
+            mark(&task, on_progress, "登记内置插件", 0.75);
             register_embedded_plugins(&pack.manifest.plugins, &profile, &task).await?;
 
-            task.set_phase("应用环境");
+            mark(&task, on_progress, "应用环境", 0.85);
             let mut credential_names = Vec::new();
             if let Some(env_section) = &pack.manifest.environment {
                 if let Ok(bundle) = serde_json::from_value::<InstanceBundle>(env_section.0.clone())
@@ -426,12 +447,13 @@ async fn install_inner(
                 }
             }
 
-            task.set_phase("写清单");
+            mark(&task, on_progress, "写清单", 0.95);
             write_manifest(&staging, &manifest).await?;
             if task.cancel_observed() {
                 return Err("cancelled".into());
             }
             std::fs::rename(&staging, &dir).map_err(|e| format!("放置实例目录失败: {e}"))?;
+            mark(&task, on_progress, "完成", 1.0);
             Ok::<_, String>((extracted.sessions, credential_names))
         }
         .await;
@@ -439,7 +461,6 @@ async fn install_inner(
             Ok(v) => v,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                let _ = on_progress;
                 return Err(e);
             }
         }

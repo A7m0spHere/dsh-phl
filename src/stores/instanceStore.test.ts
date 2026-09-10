@@ -174,6 +174,29 @@ describe('instance lifecycle', () => {
     )
   })
 
+  it('marks the source cloning, absorbs a second click, and clears when done', async () => {
+    // Clone copies the whole dsh-home (minutes on a heavy instance). Before
+    // the pending fix the source row sat unchanged and repeat clicks stacked
+    // backend busy-lock toasts.
+    let release!: () => void
+    mocks.cloneInstance.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ ...instance, id: 'clone-1', name: 'Test Copy', port: 3099 })
+        }),
+    )
+    const first = useInstanceStore.getState().cloneInstance('test', 'Test Copy')
+    expect(useInstanceStore.getState().cloning['test']).toBe(true)
+    const second = await useInstanceStore.getState().cloneInstance('test', 'Test Copy 2')
+    expect(second).toBeNull()
+    expect(mocks.cloneInstance).toHaveBeenCalledTimes(1)
+    release()
+    await first
+    expect(useInstanceStore.getState().cloning['test']).toBeUndefined()
+    expect(useInstanceStore.getState().byId('clone-1')).toBeTruthy()
+  })
+
   it('surfaces a WebUI that could not be opened at all', async () => {
     // Both halves of the contract failed — the embedded window was refused and
     // the system-browser fallback threw. The old code let the second rejection

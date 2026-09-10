@@ -169,11 +169,19 @@ pub(crate) async fn list_instances_inner(root: &Path) -> Result<Vec<InstanceReco
         if !path.is_dir() {
             continue;
         }
-        // A directory without a manifest is not an instance: it is either a
-        // staging dir from an interrupted create (hidden name — never a
-        // business object per `paths::is_hidden_tree_name`, and reclaimable
-        // through the diagnostics residue scan), or a leftover from before
-        // instances were real. `scan_orphan_instances` reports those.
+        // The name rule gates first — a manifest check alone is NOT enough:
+        // `build_instance_tree` and pack install write `instance.json` INTO
+        // the staging tree before the promote rename, so a crashed create
+        // used to list as a phantom instance (with the real id, pointing at
+        // a directory that does not exist). Hidden names are never business
+        // objects (`paths::is_hidden_tree_name`); stale staging is reclaimed
+        // through the diagnostics residue scan.
+        if crate::paths::is_hidden_tree_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        // A directory without a readable manifest is not an instance either:
+        // it is a leftover from before instances were real, and
+        // `scan_orphan_instances` reports those.
         let Some(manifest) = read_manifest(&path).await else {
             continue;
         };
@@ -1359,6 +1367,36 @@ mod tests {
             .await
             .unwrap();
         assert!(!dir.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn crashed_create_staging_is_never_listed_as_an_instance() {
+        let root = temp_root("staging-list");
+        create_instance_inner(root.as_path(), manifest("real-1", "Real"))
+            .await
+            .unwrap();
+        // The exact shape `build_instance_tree` leaves behind when the
+        // process dies between the manifest write and the promote rename:
+        // hidden name, complete manifest, a directory away from being real.
+        let staging = instances_root(root.as_path()).join(".phl-new-ghost-1");
+        std::fs::create_dir_all(staging.join("dsh-home").join("profiles").join("web")).unwrap();
+        write_manifest(&staging, &manifest("ghost-1", "Ghost"))
+            .await
+            .unwrap();
+
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "only the promoted instance is listed: {listed:?}"
+        );
+        assert_eq!(listed[0].manifest.id, "real-1");
+        // The orphan view must not offer it for reclaim either (a running
+        // create owns its staging tree; residue owns stale ones).
+        let orphans = scan_orphan_instances_inner(root.as_path()).await.unwrap();
+        assert!(orphans.iter().all(|o| o.name != ".phl-new-ghost-1"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -46,6 +46,8 @@ export const KIND_LABEL: Record<string, string> = {
   adopt: '接入本机 DSH',
   'pack-export': '导出整合包',
   'pack-install': '安装整合包',
+  'session-copy': '迁移会话',
+  'cache-clear': '清理下载缓存',
 }
 
 export const PHASE_LABEL: Record<string, string> = {

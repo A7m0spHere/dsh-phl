@@ -35,6 +35,10 @@ export const isRuntimeBusyKind = (kind: RuntimeInstallState['kind']) =>
 
 export const isRuntimeBusy = (r: Runtime) => isRuntimeBusyKind(r.state.kind)
 
+/** See `isVersionInstallable` — the wizard's mirrored rule for runtimes. */
+export const isRuntimeInstallable = (r: Runtime) =>
+  r.state.kind === 'available' || r.state.kind === 'failed'
+
 /** See `keepVersionStateOnRefresh`. */
 export const keepRuntimeStateOnRefresh = (kind: RuntimeInstallState['kind']) =>
   isRuntimeBusyKind(kind) || kind === 'failed'
