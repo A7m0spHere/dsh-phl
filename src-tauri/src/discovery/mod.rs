@@ -167,6 +167,13 @@ async fn managed_homes(root: &Path) -> HashMap<String, ManagedInstance> {
     };
     for entry in entries.flatten() {
         let dir = entry.path();
+        // `.phl-new-*` / `.phl-pack-*` staging carries a real manifest before
+        // its promote rename — the same hidden-name rule every business
+        // scanner uses (`paths::is_hidden_tree_name`), else a half-published
+        // create claims ownership of a DSH_HOME and blocks its adoption.
+        if crate::paths::is_hidden_tree_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let Some(manifest) = read_manifest(&dir).await else {
             continue;
         };

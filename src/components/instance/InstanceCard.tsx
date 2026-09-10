@@ -39,6 +39,9 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   // say so (and stop offering actions) instead of sitting frozen until the
   // remove command finally lands.
   const deleting = useInstanceStore((s) => s.deleting[instance.id] === true)
+  // The clone copies this row's tree (the new instance appears on success);
+  // the source row shows the same work-in-progress treatment as a delete.
+  const cloning = useInstanceStore((s) => s.cloning[instance.id] === true)
   const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance.runtimeId))
   const push = useUIStore((s) => s.push)
@@ -108,7 +111,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               pushes the layout around. */}
           <div className="relative mt-0.5 h-[16px]">
             <AnimatePresence mode="wait" initial={false}>
-              {deleting ? (
+              {deleting || cloning ? (
                 <motion.div
                   key="deleting"
                   initial={{ opacity: 0, y: 5 }}
@@ -118,7 +121,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
                   className="absolute inset-0 flex items-center gap-1.5 text-sm text-warn"
                 >
                   <Loader2 size={11} className="shrink-0 animate-spin" />
-                  <span className="truncate">正在删除实例目录…</span>
+                  <span className="truncate">{deleting ? '正在删除实例目录…' : '正在克隆到新实例…'}</span>
                 </motion.div>
               ) : busy ? (
                 <motion.div

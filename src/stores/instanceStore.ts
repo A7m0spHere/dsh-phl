@@ -44,6 +44,13 @@ interface InstanceState {
    * the delete and users clicked into a busy-lock error.
    */
   deleting: Record<string, true>
+  /**
+   * Instances whose tree a clone is copying right now (the copy can run
+   * minutes on a plugin-heavy instance). Same lesson as `deleting`: the row
+   * must show the click landed, and a second clone of the same source is
+   * absorbed instead of hitting the backend busy lock.
+   */
+  cloning: Record<string, true>
 
   load: () => Promise<void>
   /** Forces a re-read — used when the data root changes under the app. */
@@ -182,6 +189,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
   snapshotOps: {},
   deletingSnapshots: {},
   deleting: {},
+  cloning: {},
 
   async load() {
     // StrictMode mounts effects twice in development; loading once keeps the
@@ -601,11 +609,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
 
   async cloneInstance(id, name) {
     const source = get().byId(id)
-    if (!source) return null
+    if (!source || get().cloning[id]) return null
+    // Pending FIRST, exactly like `deleting`: the clone copies the whole
+    // dsh-home (minutes on a plugin-heavy instance), and before this the row
+    // sat unchanged until the copy resolved — repeat clicks just stacked
+    // backend busy-lock toasts.
+    set({ cloning: { ...get().cloning, [id]: true } })
     // A failed clone used to surface nowhere: the throw escaped as an
     // unhandled rejection and the list kept showing the old count. Report it
     // like every other destructive-write failure does.
-    let clone: Instance
+    let clone: Instance | null = null
     try {
       clone = await repository.cloneInstance(source, name, get().suggestPort())
     } catch (err) {
@@ -615,8 +628,14 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
         title: `克隆「${source.name}」失败`,
         message: e.message,
       })
-      return null
+    } finally {
+      set((s) => {
+        const cloning = { ...s.cloning }
+        delete cloning[id]
+        return { cloning }
+      })
     }
+    if (!clone) return null
     set({
       instances: [...get().instances, clone],
       states: { ...get().states, [clone.id]: STOPPED },

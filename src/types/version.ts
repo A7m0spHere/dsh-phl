@@ -63,6 +63,16 @@ export interface DshVersion {
 export const isVersionInstalled = (v: DshVersion) => v.state.kind === 'installed'
 
 /**
+ * The wizard's "install it here" affordance: only from a resting state with
+ * no operation running. `failed` counts because retry-in-place is the
+ * wizard's own recovery path. One predicate (audit A) — the four hand-written
+ * `=== 'available' || === 'failed'` copies it replaces would each have to be
+ * remembered when a new resting state lands.
+ */
+export const isVersionInstallable = (v: DshVersion) =>
+  v.state.kind === 'available' || v.state.kind === 'failed'
+
+/**
  * The single source of truth for "an operation on this version is in flight".
  * Every busy / active / keep predicate derives from this list — the per-set
  * literals that used to live in catalogStore, the refresh merge, the wizard
