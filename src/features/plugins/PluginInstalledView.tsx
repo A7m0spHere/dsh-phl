@@ -7,7 +7,7 @@ import { useUIStore, type PluginTransferState } from '@/stores'
 import type { InstalledPlugin, Plugin } from '@/types'
 import type { LatestVersionState } from '@/stores/catalogStore'
 import { Badge, Button, EmptyState, Notice, Switch, Tooltip } from '@/components/ui'
-import { STAGE_LABEL, SourceBadge, TransferInline } from './visuals'
+import { STAGE_LABEL, SourceBadge, TransferInline, compatHint } from './visuals'
 
 /** The row shape the parent computes for an installed plugin. */
 export type InstalledPluginRow = InstalledPlugin & {
@@ -182,8 +182,16 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                           </Badge>
                         </Tooltip>
                       )}
-                      {row.compat === 'bad' && <Badge tone="danger">不兼容当前版本</Badge>}
-                      {row.compat === 'unknown' && !row.linked && <Badge tone="warn">兼容性未知</Badge>}
+                      {row.compat === 'bad' && (
+                        <Tooltip content={compatHint('bad')} allowOverflow>
+                          <Badge tone="danger">不兼容当前版本</Badge>
+                        </Tooltip>
+                      )}
+                      {row.compat === 'unknown' && !row.linked && (
+                        <Tooltip content={compatHint('unknown')} allowOverflow>
+                          <Badge tone="warn">兼容性未知</Badge>
+                        </Tooltip>
+                      )}
                     </div>
                     <div className="mt-0.5 flex items-center gap-1.5 text-sm text-ink-faint">
                       <span className="font-mono">{row.version}</span>

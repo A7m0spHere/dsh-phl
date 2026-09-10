@@ -294,7 +294,17 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       useUIStore.getState().toast({ kind: 'info', title: '还没有全局配置库', message: '先在「模型与 API」页创建供应商配置。' })
       return null
     }
-    if (syncing) return null
+    if (syncing) {
+      // A silent return here made the button look dead: a different instance's
+      // sync was running, this row's own `syncing` was false so the button was
+      // enabled, and the click did nothing at all.
+      useUIStore.getState().toast({
+        kind: 'info',
+        title: '已有同步任务正在执行',
+        message: '请等待当前实例的同步完成后再试。',
+      })
+      return null
+    }
     set({ syncing: instanceId })
     try {
       let applied: ApiBinding

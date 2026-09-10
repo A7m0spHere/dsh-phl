@@ -4,6 +4,7 @@ import { registryBase } from './tauriVersions'
 import type { Instance, LaunchPhase } from '@/types'
 import { Cancelled, KeptRunningError, LaunchError, newTransferId } from './repository'
 import type { LaunchContext, LaunchProgress, LaunchOutcome, PhlRepository } from './repository'
+import { isVersionBusy } from '@/types/version'
 
 /**
  * The backend's `[state] kept-alive <pid> <port>：<why>` message (R3): the
@@ -52,6 +53,16 @@ async function launch(
         '尚未选择 DSH 版本',
         '这个实例还没有绑定 DSH 版本。',
         '在「运行环境」里选择一个已安装版本，或到「版本」页面先下载。',
+      )
+    }
+    // A version that is mid-install is not "未安装": telling the user to go
+    // install something that is already downloading reads as a contradiction
+    // and sends them off to start a second download of the same version.
+    if (ctx.version && isVersionBusy(ctx.version)) {
+      throw new LaunchError(
+        'DSH 版本正在安装',
+        `实例绑定的 ${ctx.version.name} 正在安装中，还不能用于启动。`,
+        '等「版本」页面的安装进度完成后重试。',
       )
     }
     throw new LaunchError(

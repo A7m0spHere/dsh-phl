@@ -1,11 +1,12 @@
 /** One market row: catalog entry + install state for the selected instance. */
 import { Fragment, memo } from 'react'
-import { ArrowUp, Check, Download, Star, X } from 'lucide-react'
+import { ArrowUp, Download, Star } from 'lucide-react'
 import { formatCount, formatRelative } from '@/lib/format'
 import { useCatalogStore, useUIStore, pluginKey } from '@/stores'
 import { PLUGIN_CATEGORY_LABELS, type Plugin, type PluginCategory } from '@/types'
 import { Badge, Button, Card } from '@/components/ui'
 import {
+  CompatBadge,
   SourceBadge,
   PluginAvatar,
   AuthorBadge,
@@ -93,16 +94,8 @@ export const RegistryCard = memo(function RegistryCard({
               <AuthorBadge plugin={plugin} />
               {!instanceId ? (
                 <Badge tone="neutral">创建实例后可安装</Badge>
-              ) : compat === 'ok' ? (
-                <Badge tone="ok" icon={<Check size={9} />}>
-                  兼容 {dshVersionName}
-                </Badge>
-              ) : compat === 'bad' ? (
-                <Badge tone="danger" icon={<X size={9} />}>
-                  不兼容 {dshVersionName}
-                </Badge>
               ) : (
-                <Badge tone="warn">未验证</Badge>
+                <CompatBadge state={compat} versionName={dshVersionName} />
               )}
               <SourceBadge plugin={plugin} />
               {[

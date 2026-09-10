@@ -288,9 +288,9 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                   <span className="text-ink-faint/50">·</span>
                   <button
                     className="text-accent-ink transition-colors hover:underline"
-                    onClick={() => void openExternal('https://www.npmjs.com/package/@deepseek-ai/dsh')}
+                    onClick={() => void openExternal(releaseUrl(version.name))}
                   >
-                    查看 npm 包
+                    在 GitHub 查看
                   </button>
                 </>
               )}

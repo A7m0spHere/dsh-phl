@@ -3,9 +3,11 @@ import {
 } from 'react'
 
 import {
+  Check,
   Github,
   Package2,
   Star,
+  X,
 } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import { openExternal } from '@/lib/desktop'
@@ -63,6 +65,43 @@ const INDETERMINATE_STAGES = new Set([
   'committing',
   'removing',
 ])
+
+/** The tri-state verdict a release record gives against the instance's DSH
+ *  version. It is a *recorded claim*, not a security review — the live
+ *  community registry carries no compatibility table yet, so in the desktop
+ *  app every market row reads `unknown`. Shared with `PluginInstalledView`. */
+export type CompatState = 'ok' | 'bad' | 'unknown'
+
+/** Hover explanation for each compat state. The `unknown` copy does the real
+ *  work: users read “未验证” as a safety warning, which it is not. */
+export const compatHint = (state: CompatState, versionName?: string): string => {
+  const pair = versionName ? `该插件与 DSH 版本「${versionName}」` : '该插件与当前 DSH 版本'
+  if (state === 'ok') return `${pair}已记录兼容。`
+  if (state === 'bad') return `${pair}存在已记录的冲突：安装后可能加载失败或行为异常，但不会损坏实例。`
+  return `${pair}还没有兼容性记录。这不是安全审核，也不代表插件有问题——可以正常安装；若装完加载失败或行为异常，在实例的插件列表里停用或卸载即可。`
+}
+
+/**
+ * The compat badge for market rows. `allowOverflow` because the cards are
+ * `overflow-hidden` and the unknown-state hint is too long for one line.
+ */
+export function CompatBadge({ state, versionName }: { state: CompatState; versionName?: string }) {
+  return (
+    <Tooltip content={compatHint(state, versionName)} allowOverflow>
+      {state === 'ok' ? (
+        <Badge tone="ok" icon={<Check size={9} />}>
+          兼容 {versionName}
+        </Badge>
+      ) : state === 'bad' ? (
+        <Badge tone="danger" icon={<X size={9} />}>
+          不兼容 {versionName}
+        </Badge>
+      ) : (
+        <Badge tone="warn">兼容性未知</Badge>
+      )}
+    </Tooltip>
+  )
+}
 
 export function SourceBadge({ plugin }: { plugin: Plugin }) {
   if (plugin.source.kind === 'npm') {

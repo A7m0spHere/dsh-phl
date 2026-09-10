@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CircleAlert, CircleCheck, ListTodo, Loader2, X } from 'lucide-react'
+import { AlertTriangle, CircleAlert, CircleCheck, ListTodo, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { cancelTransfer, desktop, type TaskInfo } from '@/lib/desktop'
 import { parseThrownError } from '@/lib/errorCodes'
@@ -35,6 +35,11 @@ export function TaskCenter() {
 
   const running = tasks.filter((x) => x.state === 'running')
   const settled = tasks.filter((x) => x.state !== 'running').slice(0, 12)
+  // One latest-failure per kind, from the store's own helper — it is the
+  // retry entry point and, surfaced as a badge, the reason the centre is worth
+  // opening after a toast has already faded (a failed launch/install/delete is
+  // otherwise invisible once the transient toast clears).
+  const failedCount = useTaskStore((s) => s.recentFailures().length)
 
   useEffect(() => {
     if (!open) return
@@ -59,13 +64,20 @@ export function TaskCenter() {
           open ? 'bg-surface-hover text-ink' : 'text-ink-faint hover:bg-surface-hover hover:text-ink',
         )}
       >
-        {running.length > 0 ? <Loader2 size={12} className="animate-spin text-accent" /> : <ListTodo size={12} />}
+        {running.length > 0 ? <Loader2 size={12} className="animate-spin text-accent" /> : failedCount > 0 ? <AlertTriangle size={12} className="text-danger" /> : <ListTodo size={12} />}
         任务
-        {running.length > 0 && (
+        {running.length > 0 ? (
           <span className="flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-accent-soft px-1 font-semibold text-accent-ink">
             {running.length}
           </span>
-        )}
+        ) : failedCount > 0 ? (
+          <span
+            aria-label={`${failedCount} 个失败任务`}
+            className="flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-danger/15 px-1 font-semibold text-danger"
+          >
+            {failedCount}
+          </span>
+        ) : null}
       </button>
 
       <AnimatePresence>

@@ -26,6 +26,7 @@ import { useMotion } from '@/lib/motion'
 import { linkedPluginNames } from '@/data/instances'
 import { useCatalogStore, useInstanceStore, useUIStore } from '@/stores'
 import { latestRelease } from '@/types'
+import { isVersionBusy } from '@/types/version'
 import {
   Badge,
   Button,
@@ -549,6 +550,8 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       {version ? (
                         version.state.kind === 'installed' ? (
                           <Badge tone="ok">已安装</Badge>
+                        ) : isVersionBusy(version) ? (
+                          <Badge tone="warn">安装中</Badge>
                         ) : (
                           <Badge tone="warn">未安装</Badge>
                         )
@@ -832,14 +835,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
             collapsible
             defaultOpen={instance.snapshots.length > 0}
             extra={
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={!!snapshotOp}
-                onClick={actions.snapshot}
-              >
-                {snapshotOp === 'create' ? '创建中…' : '创建快照'}
-              </Button>
+              <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={!!snapshotOp || running || busy}
+                  onClick={actions.snapshot}
+                >
+                  {snapshotOp === 'create' ? '创建中…' : '创建快照'}
+                </Button>
+              </Tooltip>
             }
           >
             {snapshotTransfer && (
@@ -869,9 +874,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
                 title="还没有快照"
                 description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），不会改变实例引用的 DSH 与 Runtime。"
                 action={
-                  <Button size="sm" variant="secondary" onClick={actions.snapshot}>
-                    创建第一个快照
-                  </Button>
+                  <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={running || busy}
+                      onClick={actions.snapshot}
+                    >
+                      创建第一个快照
+                    </Button>
+                  </Tooltip>
                 }
               />
             ) : (
@@ -890,22 +902,27 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       </div>
                     </div>
                     <div className="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover/snap:opacity-100">
-                      <Button
-                        size="xs"
-                        variant="secondary"
-                        disabled={!!snapshotOp || !!deletingSnapshots[`${instance.id}:${snap.id}`]}
-                        onClick={async () => {
-                          const ok = await confirm({
-                            title: `回滚到「${snap.label}」`,
-                            message: '当前 dsh-home 里的插件与配置会被快照内容整体替换。',
-                            detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。回滚不改变实例当前引用的 DSH 版本与 Runtime。`,
-                            confirmLabel: '回滚',
-                          })
-                          if (ok) await restoreSnapshot(instance.id, snap.id)
-                        }}
-                      >
-                        回滚
-                      </Button>
+                      <Tooltip content={running || busy ? '请先停止实例，再回滚' : ''}>
+                        <Button
+                          size="xs"
+                          variant="secondary"
+                          disabled={
+                            !!snapshotOp || running || busy ||
+                            !!deletingSnapshots[`${instance.id}:${snap.id}`]
+                          }
+                          onClick={async () => {
+                            const ok = await confirm({
+                              title: `回滚到「${snap.label}」`,
+                              message: '当前 dsh-home 里的插件与配置会被快照内容整体替换。',
+                              detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。回滚不改变实例当前引用的 DSH 版本与 Runtime。`,
+                              confirmLabel: '回滚',
+                            })
+                            if (ok) await restoreSnapshot(instance.id, snap.id)
+                          }}
+                        >
+                          回滚
+                        </Button>
+                      </Tooltip>
                       <IconButton
                         label="删除快照"
                         size="xs"

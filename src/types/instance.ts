@@ -7,6 +7,18 @@ import type { ApiBinding, ApiInheritance } from './apiConfig'
  */
 export type InstanceStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
+/**
+ * The statuses at which a snapshot cannot be created or restored: the instance
+ * is live, or mid-transition, so its `dsh-home` is being written and the tree
+ * is not a stable thing to capture or swap in. This one predicate is the single
+ * source of truth for that set — both the store guards (which reject the action
+ * with a "先停止实例" toast) and the detail-page controls (which disable the
+ * buttons with the same reason before the user commits) read it, so the entry
+ * point and the enforcement can never drift to different status lists.
+ */
+export const isInstanceLiveForSnapshot = (status: InstanceStatus): boolean =>
+  status === 'running' || status === 'starting' || status === 'stopping'
+
 /** Ordered phases of a launch; the UI narrates them one by one. */
 export type LaunchPhase =
   | 'resolve-version'

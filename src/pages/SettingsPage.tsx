@@ -117,7 +117,8 @@ export function SettingsPage() {
       startup: s.startup,
       minimizeToTray: s.minimizeToTray,
       closeStopsInstances: s.closeStopsInstances,
-        source: s.source,
+      autoOpenWebUi: s.autoOpenWebUi,
+      source: s.source,
       customSource: s.customSource,
       concurrency: s.concurrency,
       keepArchives: s.keepArchives,
@@ -516,6 +517,17 @@ export function SettingsPage() {
                     checked={settings.closeStopsInstances}
                     onChange={(v) => settings.set('closeStopsInstances', v)}
                     label="退出时停止所有实例"
+                  />
+                }
+              />
+              <SettingRow
+                title="启动实例后自动打开 WebUI"
+                description="关闭后，实例就绪时不再自动弹出 WebUI 窗口，需从就绪提示里手动打开"
+                control={
+                  <Switch
+                    checked={settings.autoOpenWebUi}
+                    onChange={(v) => settings.set('autoOpenWebUi', v)}
+                    label="启动实例后自动打开 WebUI"
                   />
                 }
               />
