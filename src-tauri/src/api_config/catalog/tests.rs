@@ -23,8 +23,11 @@ fn entry(provider: &str, id: &str) -> Entry {
         model: model(id),
     }
 }
+fn hints(provider: Option<&str>) -> Vec<String> {
+    provider.into_iter().map(|s| s.to_string()).collect()
+}
 fn hit<'a>(rows: &'a [Entry], id: &str, provider: Option<&str>) -> &'a Entry {
-    match lookup(rows, id, provider) {
+    match lookup(rows, id, &hints(provider)) {
         Match::Found(e) => e,
         _ => panic!("expected unique hit for {id}"),
     }
@@ -88,7 +91,7 @@ fn explicit_provider_resolves_nested_paths_and_duplicate_ids() {
     );
     assert_eq!(hit(&rows, "openai:gpt-5", Some("azure")).provider, "openai");
     assert_eq!(hit(&rows, "gpt-5", Some("azure")).provider, "azure");
-    assert!(matches!(lookup(&rows, "gpt-5", None), Match::Ambiguous));
+    assert!(matches!(lookup(&rows, "gpt-5", &[]), Match::Ambiguous));
 }
 
 #[test]
@@ -98,9 +101,9 @@ fn stripped_and_tail_matches_must_be_unique() {
     let rows = vec![entry("owner", "family/model")];
     assert_eq!(hit(&rows, "model", None).model.id, "family/model");
     let rows = vec![entry("a", "family/model"), entry("b", "other/model")];
-    assert!(matches!(lookup(&rows, "model", None), Match::Ambiguous));
-    assert!(matches!(lookup(&rows, "unknown", None), Match::Missing));
-    assert!(matches!(lookup(&rows, "", None), Match::Missing));
+    assert!(matches!(lookup(&rows, "model", &[]), Match::Ambiguous));
+    assert!(matches!(lookup(&rows, "unknown", &[]), Match::Missing));
+    assert!(matches!(lookup(&rows, "", &[]), Match::Missing));
 }
 
 #[test]
@@ -111,17 +114,17 @@ fn ambiguity_never_depends_on_catalog_order_or_falls_through() {
         entry("vendor", "model"),
     ];
     assert!(matches!(
-        lookup(&rows, "vendor/model", None),
+        lookup(&rows, "vendor/model", &[]),
         Match::Ambiguous
     ));
     rows.reverse();
     assert!(matches!(
-        lookup(&rows, "vendor/model", None),
+        lookup(&rows, "vendor/model", &[]),
         Match::Ambiguous
     ));
     let rows = vec![entry("openai", "gpt-5"), entry("anthropic", "claude")];
     assert!(matches!(
-        lookup(&rows, "anthropic/gpt-5", None),
+        lookup(&rows, "anthropic/gpt-5", &[]),
         Match::Missing
     ));
 }
@@ -133,14 +136,14 @@ fn enrichment_preserves_every_present_field_even_empty_and_false() {
         serde_json::from_value(json!({"id":"gpt-5","name":"mine","contextWindow":123,
         "maxTokens":45,"input":[],"reasoningEfforts":false}))
         .unwrap();
-    let r = enrich(m.clone(), &rows, None);
+    let r = enrich(m.clone(), &rows, &[], None);
     assert!(!r.changed);
     assert_eq!(r.model, m);
     m.reasoning_efforts = Some(ReasoningEfforts::Levels(BTreeMap::new()));
     m.name = Some(String::new());
-    assert_eq!(enrich(m.clone(), &rows, None).model, m);
+    assert_eq!(enrich(m.clone(), &rows, &[], None).model, m);
     m.max_tokens = None;
-    let r = enrich(m, &rows, None);
+    let r = enrich(m, &rows, &[], None);
     assert_eq!(r.model.context_window, Some(123));
     assert_eq!(r.model.max_tokens, Some(128000));
     assert_eq!(r.model.metadata_sources.len(), 1);
@@ -148,12 +151,12 @@ fn enrichment_preserves_every_present_field_even_empty_and_false() {
         r.model.metadata_sources["maxTokens"],
         MetadataSource::ModelsDev
     );
-    assert!(!enrich(r.model, &rows, None).changed);
+    assert!(!enrich(r.model, &rows, &[], None).changed);
 }
 
 #[test]
 fn fallback_is_labelled_per_field_and_never_claims_reasoning() {
-    let r = enrich(model("unknown-model"), &[], None);
+    let r = enrich(model("unknown-model"), &[], &[], None);
     assert!(!r.matched);
     assert_eq!(r.model.context_window, Some(262144));
     assert_eq!(r.model.max_tokens, Some(32768));
@@ -165,7 +168,7 @@ fn fallback_is_labelled_per_field_and_never_claims_reasoning() {
         .metadata_sources
         .values()
         .all(|s| *s == MetadataSource::Fallback));
-    let r = enrich(model("plain"), &parse(&sample()), None);
+    let r = enrich(model("plain"), &parse(&sample()), &[], None);
     assert!(r.matched);
     assert_eq!(
         r.model.metadata_sources["contextWindow"],
@@ -178,12 +181,13 @@ fn fallback_is_labelled_per_field_and_never_claims_reasoning() {
     let r = enrich(
         model("same"),
         &[entry("a", "same"), entry("b", "same")],
+        &[],
         None,
     );
     assert!(r.ambiguous);
     assert!(!r.matched);
     assert!(r.model.reasoning_efforts.is_none());
-    assert!(!enrich(model(""), &[], None).changed);
+    assert!(!enrich(model(""), &[], &[], None).changed);
 }
 
 #[test]
@@ -223,6 +227,153 @@ fn rejects_invalid_dsh_reasoning_declarations_without_mutating_them() {
     }
 }
 
+#[test]
+fn canonical_layer_resolves_dated_and_aliased_ids_only_when_unique() {
+    // The new-release shape: an endpoint speaks `gpt-5-20250807`, the catalog
+    // carries the base — literal layers miss, the canonical one lands.
+    let rows = vec![entry("openai", "gpt-5")];
+    assert_eq!(hit(&rows, "gpt-5-20250807", None).model.id, "gpt-5");
+    assert_eq!(hit(&rows, "gpt-5-latest", None).model.id, "gpt-5");
+    assert_eq!(hit(&rows, "gpt-5:0", None).model.id, "gpt-5");
+    // Ambiguity discipline is unchanged through the new layer.
+    let rows = vec![entry("openai", "gpt-5"), entry("azure", "gpt-5")];
+    assert!(matches!(
+        lookup(&rows, "gpt-5-20250807", &[]),
+        Match::Ambiguous
+    ));
+    assert_eq!(
+        hit(&rows, "gpt-5-20250807", Some("azure")).provider,
+        "azure"
+    );
+    // Word-shaped suffixes are NEVER stripped: `vision` is a product word,
+    // not an alias — stripping it would invent a match for a different model.
+    let rows = vec![entry("meta", "llama-3-instruct")];
+    assert!(matches!(
+        lookup(&rows, "llama-3-vision", &[]),
+        Match::Missing
+    ));
+}
+
+#[test]
+fn base_url_host_disambiguates_where_display_names_cannot() {
+    let rows = vec![
+        entry("deepseek", "deepseek-chat"),
+        entry("siliconflow", "deepseek-chat"),
+    ];
+    // The user's own label can never equal a catalog id — the old hint died
+    // here with `Ambiguous` for every self-built provider.
+    let legacy = hints(Some("我的硅基流动"));
+    assert!(matches!(
+        lookup(&rows, "deepseek-chat", &legacy),
+        Match::Ambiguous
+    ));
+    // The configured endpoint says exactly who serves it.
+    let host = host_providers(Some("https://api.siliconflow.cn/v1"));
+    assert_eq!(host, vec!["siliconflow".to_string()]);
+    assert_eq!(
+        hit(&rows, "deepseek-chat", Some(&host[0])).provider,
+        "siliconflow"
+    );
+    assert!(host_providers(Some("https://gateway.example.internal/v1")).is_empty());
+}
+
+#[test]
+fn fallback_sourced_fields_are_replaced_when_catalogs_learn_the_model() {
+    // First run: unknown release, everything lands on compat guesses.
+    let first = enrich(model("brand-new-model"), &[], &[], None);
+    assert_eq!(first.model.context_window, Some(262144));
+    assert_eq!(
+        first.model.metadata_sources["contextWindow"],
+        MetadataSource::Fallback
+    );
+    // The release reaches models.dev; the next enrichment must correct the
+    // guess (the old None-only rule made the guess permanent).
+    let rows = vec![Entry {
+        provider: "acme".into(),
+        model: ModelRef {
+            id: "brand-new-model".into(),
+            context_window: Some(131072),
+            ..Default::default()
+        },
+    }];
+    let second = enrich(first.model.clone(), &rows, &[], None);
+    assert_eq!(second.model.context_window, Some(131072));
+    assert_eq!(
+        second.model.metadata_sources["contextWindow"],
+        MetadataSource::ModelsDev
+    );
+    // A manual value survives any catalog.
+    let mut manual = first.model.clone();
+    manual.context_window = Some(777);
+    manual
+        .metadata_sources
+        .insert("contextWindow".into(), MetadataSource::Manual);
+    let third = enrich(manual, &rows, &[], None);
+    assert_eq!(third.model.context_window, Some(777));
+}
+
+#[test]
+fn openrouter_rows_parse_and_resolve_tail_vendor_and_canonical_forms() {
+    let rows = parse_openrouter(&json!({"data": [
+        {"id":"deepseek/deepseek-v4","context_length":1048576,
+         "architecture":{"input_modalities":["text","image"]}},
+        {"id":"openai/gpt-x","context_length":400000,
+         "supported_parameters":["tools","reasoning"]},
+    ]}));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].context_window, Some(1048576));
+    assert_eq!(
+        rows[0].input,
+        Some(vec![ModelInput::Text, ModelInput::Image])
+    );
+    // A bare tail name resolves when unique; a vendor-qualified id matches;
+    // a dated id falls back to the canonical base.
+    assert_eq!(
+        lookup_openrouter(&rows, "deepseek-v4", &[]).unwrap().id,
+        "deepseek/deepseek-v4"
+    );
+    assert_eq!(
+        lookup_openrouter(&rows, "openai/gpt-x", &[]).unwrap().id,
+        "openai/gpt-x"
+    );
+    assert_eq!(
+        lookup_openrouter(&rows, "openai/gpt-x-20260101", &[])
+            .unwrap()
+            .id,
+        "openai/gpt-x"
+    );
+    // Nothing invents: unknown ids and vendor ambiguity answer None.
+    assert!(lookup_openrouter(&rows, "nosuch-model", &[]).is_none());
+    let twin = parse_openrouter(&json!({"data":[
+        {"id":"a/pro","context_length":1},{"id":"b/pro","context_length":2}]}));
+    assert!(lookup_openrouter(&twin, "pro", &[]).is_none());
+    assert_eq!(
+        lookup_openrouter(&twin, "pro", &["b".into()]).unwrap().id,
+        "b/pro"
+    );
+}
+
+#[test]
+fn openrouter_is_consulted_only_for_openrouter_shaped_requests() {
+    assert!(uses_openrouter(&[model("openai/gpt-x")], None));
+    assert!(!uses_openrouter(&[model("gpt-x")], None));
+    assert!(uses_openrouter(
+        &[model("any")],
+        Some("https://openrouter.ai/api/v1")
+    ));
+    assert!(!uses_openrouter(
+        &[model("any")],
+        Some("https://api.deepseek.com")
+    ));
+}
+
+#[test]
+fn cache_ttl_is_daily_so_fresh_releases_arrive_fast() {
+    // A 48h-old cache must refresh on the next enrich attempt (the old week
+    // made new releases systematically invisible for days).
+    assert_eq!(TTL, 24 * 60 * 60);
+}
+
 #[tokio::test]
 #[ignore = "live models.dev network probe; run explicitly"]
 async fn live_catalog_probe() {
@@ -232,8 +383,8 @@ async fn live_catalog_probe() {
         .unwrap()
         .as_secs();
     let mut cache = CatalogCache::default();
-    cache.load(&root, URL, now).await;
-    let result = enrich(model("gpt-5"), &cache.entries, Some("openai"));
+    cache.load(&root, URL, now, false).await;
+    let result = enrich(model("gpt-5"), &cache.entries, &["openai".into()], None);
     let count = cache.entries.len();
     let persisted = root.join("cache/models-dev.json").exists();
     let _ = tokio::fs::remove_dir_all(&root).await;
@@ -293,10 +444,10 @@ async fn fresh_cache_needs_no_network_and_expired_cache_refreshes_atomically() {
     let root = temp_root("fresh");
     write_cache(&root, 100).await;
     let mut cache = CatalogCache::default();
-    cache.load(&root, "invalid-url", 100 + TTL - 1).await;
+    cache.load(&root, "invalid-url", 100 + TTL - 1, false).await;
     assert_eq!(cache.retry_at, 0, "fresh cache must not attempt a request");
     let (url, task) = server(sample().to_string()).await;
-    cache.load(&root, &url, 100 + TTL).await;
+    cache.load(&root, &url, 100 + TTL, false).await;
     task.await.unwrap();
     assert_eq!(cache.fetched_at, Some(100 + TTL));
     let saved: CacheFile = serde_json::from_slice(
@@ -315,11 +466,11 @@ async fn refresh_failure_uses_old_cache_and_backoff_avoids_repeated_requests() {
     let root = temp_root("stale");
     write_cache(&root, 100).await;
     let mut cache = CatalogCache::default();
-    cache.load(&root, "invalid-url", 100 + TTL).await;
+    cache.load(&root, "invalid-url", 100 + TTL, false).await;
     assert_eq!(cache.fetched_at, Some(100));
     assert!(!cache.entries.is_empty());
     let retry = cache.retry_at;
-    cache.load(&root, "invalid-url", 100 + TTL + 1).await;
+    cache.load(&root, "invalid-url", 100 + TTL + 1, false).await;
     assert_eq!(cache.retry_at, retry);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -328,16 +479,16 @@ async fn refresh_failure_uses_old_cache_and_backoff_avoids_repeated_requests() {
 async fn corrupt_empty_or_absent_catalog_degrades_without_breaking_enrichment() {
     let root = temp_root("missing");
     let mut cache = CatalogCache::default();
-    cache.load(&root, "invalid-url", 100).await;
+    cache.load(&root, "invalid-url", 100, false).await;
     assert!(cache.fetched_at.is_none());
-    assert!(enrich(model("x"), &cache.entries, None).changed);
+    assert!(enrich(model("x"), &cache.entries, &[], None).changed);
     tokio::fs::create_dir_all(root.join("cache")).await.unwrap();
     tokio::fs::write(root.join("cache/models-dev.json"), b"broken")
         .await
         .unwrap();
     let mut cache = CatalogCache::default();
     let (url, task) = server("{}".into()).await;
-    cache.load(&root, &url, 100).await;
+    cache.load(&root, &url, 100, false).await;
     task.await.unwrap();
     assert!(cache.fetched_at.is_none());
     tokio::fs::remove_dir_all(root).await.unwrap();
@@ -352,7 +503,7 @@ async fn invalid_refresh_does_not_replace_good_disk_cache() {
         .unwrap();
     let (url, task) = server("[]".into()).await;
     let mut cache = CatalogCache::default();
-    cache.load(&root, &url, 100 + TTL).await;
+    cache.load(&root, &url, 100 + TTL, false).await;
     task.await.unwrap();
     assert_eq!(cache.fetched_at, Some(100));
     assert_eq!(
@@ -373,8 +524,8 @@ async fn cache_write_failure_keeps_downloaded_metadata_usable() {
         .unwrap();
     let (url, task) = server(sample().to_string()).await;
     let mut cache = CatalogCache::default();
-    cache.load(&root, &url, 100).await;
+    cache.load(&root, &url, 100, false).await;
     task.await.unwrap();
-    assert!(enrich(model("gpt-5"), &cache.entries, None).matched);
+    assert!(enrich(model("gpt-5"), &cache.entries, &[], None).matched);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

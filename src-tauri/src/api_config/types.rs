@@ -68,6 +68,10 @@ impl<'de> Deserialize<'de> for FalseValue {
 pub enum MetadataSource {
     #[serde(rename = "models.dev")]
     ModelsDev,
+    /// Second-tier catalog (public OpenRouter model list) — a fact from a
+    /// live vendor index, never a compat default.
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     #[serde(rename = "fallback")]
     Fallback,
     #[serde(rename = "manual")]

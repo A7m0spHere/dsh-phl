@@ -68,6 +68,12 @@ interface SettingsState {
    * 能力完成后开放" (roadmap O-03); until then it must not look live.
    */
   logLevel: LogLevel
+  /**
+   * Let model enrichment consult the public OpenRouter model list as a second
+   * tier (only for OpenRouter routes / `vendor/model` ids; no key is sent).
+   * Consumed by every `enrichModelMetadata` call.
+   */
+  enrichFromOpenRouter: boolean
 
   /** First-run guide has been completed or skipped. */
   guideSeen: boolean
@@ -105,6 +111,7 @@ const defaults = {
   pendingReleaseAlerts: true,
   portStart: 3080,
   logLevel: 'info' as LogLevel,
+  enrichFromOpenRouter: true,
 }
 /*
  * Removed fake settings (roadmap O-03): `isolateNodeModules` (instance

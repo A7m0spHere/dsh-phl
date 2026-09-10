@@ -107,5 +107,8 @@ export async function enrichModelMetadata(
   return invoke('plugin:model-metadata|enrich_model_metadata', {
     models: args.models,
     provider: args.provider ?? null,
+    baseUrl: args.baseUrl ?? null,
+    forceRefresh: args.forceRefresh ?? null,
+    useOpenRouter: args.useOpenRouter ?? null,
   })
 }

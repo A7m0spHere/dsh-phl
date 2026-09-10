@@ -57,7 +57,8 @@ interface ApiConfigState {
   /** Saves queued behind the one in flight (the storage page waits for these). */
   pendingSaves: number
   enriching: boolean
-  enrichMissingModels: () => Promise<void>
+  /** `force` re-downloads the model catalogs before this pass ("更新目录并补全"). */
+  enrichMissingModels: (force?: boolean) => Promise<void>
   /** Instance id whose binding is currently being materialized. */
   syncing: string | null
   /** Last-known live snapshot per instance (the file truth; refreshed on demand). */
@@ -114,10 +115,11 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
   syncing: null,
   snapshots: {},
 
-  async enrichMissingModels() {
+  async enrichMissingModels(force?: boolean) {
     const { config, enriching, saving } = get()
     if (!config || enriching || saving) return
     const root = useSettingsStore.getState().root
+    const useOpenRouter = useSettingsStore.getState().enrichFromOpenRouter
     set({ enriching: true })
     try {
       const batches: import('@/types').ModelMetadataBatch[] = []
@@ -125,7 +127,16 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       for (const provider of config.providers) {
         const candidates = provider.models.filter((m) => m.id.trim() && hasMissingMetadata(m))
         if (!candidates.length) { providers.push(provider); continue }
-        const batch = await repository.enrichModelMetadata({ models: candidates, provider: provider.name })
+        // baseUrl: the endpoint host is the provider's real identity — it
+        // disambiguates same-named models where the user's own display name
+        // never could. force: "更新目录并补全" re-downloads the catalog now.
+        const batch = await repository.enrichModelMetadata({
+          models: candidates,
+          provider: provider.name,
+          baseUrl: provider.baseURL,
+          forceRefresh: force || undefined,
+          useOpenRouter,
+        })
         batches.push(batch)
         let cursor = 0
         providers.push({ ...provider, models: provider.models.map((m) => candidates.includes(m) ? batch.results[cursor++].model : m) })
@@ -138,6 +149,7 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       const combined: import('@/types').ModelMetadataBatch = {
         results: batches.flatMap((b) => b.results),
         catalogStatus: batches.find((b) => b.catalogStatus !== 'fresh')?.catalogStatus ?? 'fresh',
+        openrouterConsulted: batches.some((b) => b.openrouterConsulted),
       }
       if (combined.results.some((r) => r.changed) && !await get().save({ ...config, providers })) return
       useUIStore.getState().toast({ kind: 'info', title: '模型信息补全完成', message: metadataSummary(combined) })
