@@ -3,9 +3,12 @@
 //! CredRead/CredWrite, *not* a home-grown crypto scheme) — and the API
 //! library keeps only references. Nothing here ever logs a secret.
 //!
-//! Resolution order everywhere a key is consumed: the caller's one-time
-//! input → the credential store → the environment variable the provider
-//! names. Old `api.json` files that carry plaintext keys are migrated into
+//! Resolution order everywhere a key is consumed (the launch-time injector
+//! is the reference implementation): an environment variable the provider
+//! names — inherited system env or an instance env — always wins; the
+//! config's one-time key comes next; the credential store is the fallback
+//! that makes "paste the key once in PHL" work for every instance.
+//! Old `api.json` files that carry plaintext keys are migrated into
 //! the store on load and the file is rewritten without them.
 
 /* ------------------------------- trait --------------------------------- */
