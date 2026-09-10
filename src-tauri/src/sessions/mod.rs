@@ -351,10 +351,21 @@ async fn copy_sessions_inner_with(
         let located = copy::locate_source(&source.home, &dir)?;
         sources.push(located);
     }
-    let mut outcomes = Vec::new();
+    let total = targets.len() * sources.len();
+    let mut outcomes = Vec::with_capacity(total);
     for target in &targets {
         for src in &sources {
-            let outcome = copy::copy_one(src, target, on_progress).await?;
+            let outcome = copy::copy_one(src, target).await?;
+            // The matrix owns the counters: every landed pair advances the
+            // UI from `i/N`, which a select-all copy needs to read honestly.
+            if let Some(ch) = on_progress {
+                let _ = ch.send(copy::SessionProgress {
+                    done: outcomes.len() + 1,
+                    total,
+                    target_id: outcome.target_id.clone(),
+                    new_session_dir: outcome.new_session_dir.clone(),
+                });
+            }
             outcomes.push(outcome);
         }
     }

@@ -12,7 +12,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::ipc::Channel;
 
 use super::{codec, CopyOutcome, SessionEndpoint, ZSTD_ARTIFACT};
 use crate::errors;
@@ -210,10 +209,15 @@ fn copy_one_sync(src: &SourceSession, target: &SessionEndpoint) -> Result<CopyOu
 }
 
 /// Public async entry: run one copy off the async thread.
+///
+/// Progress is deliberately NOT reported here. The only driver of a real
+/// (session × target) matrix is `copy_sessions_inner_with`, which owns the
+/// done/total counters — the old per-copy event carried a constant
+/// `done: 0, total: 0`, so a select-all copy looked stuck at zero no matter
+/// how many sessions had already landed.
 pub(crate) async fn copy_one(
     src: &SourceSession,
     target: &SessionEndpoint,
-    on_progress: Option<&Channel<SessionProgress>>,
 ) -> Result<CopyOutcome, String> {
     let src_owned = SourceSession {
         project_dir: src.project_dir.clone(),
@@ -227,18 +231,9 @@ pub(crate) async fn copy_one(
         home: target.home.clone(),
         manifest: target.manifest.clone(),
     };
-    let outcome = tokio::task::spawn_blocking(move || copy_one_sync(&src_owned, &target_owned))
+    tokio::task::spawn_blocking(move || copy_one_sync(&src_owned, &target_owned))
         .await
-        .map_err(|e| format!("复制任务异常退出: {e}"))??;
-    if let Some(ch) = on_progress {
-        let _ = ch.send(SessionProgress {
-            done: 0,
-            total: 0,
-            target_id: outcome.target_id.clone(),
-            new_session_dir: outcome.new_session_dir.clone(),
-        });
-    }
-    Ok(outcome)
+        .map_err(|e| format!("复制任务异常退出: {e}"))?
 }
 
 #[cfg(test)]

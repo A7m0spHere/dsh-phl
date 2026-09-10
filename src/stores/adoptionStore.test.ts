@@ -171,6 +171,21 @@ it('the picker lazily lists the source home and tracks toggles', async () => {
   expect(useAdoptionStore.getState().selectedSessionDirs).toEqual(['session-b'])
 })
 
+it('select-all fills and empties the picker in one click', async () => {
+  useAdoptionStore.setState({ selectedId: 'dsh-abc' })
+  mocks.listHomeSessions.mockResolvedValue([session('a'), session('b'), session('c')])
+  useAdoptionStore.getState().setSessionStrategy('selected')
+  await vi.waitFor(() => expect(useAdoptionStore.getState().sourceSessions?.length).toBe(3))
+  useAdoptionStore.getState().setSessionDirs(useAdoptionStore.getState().sourceSessions!.map((s) => s.sessionDir))
+  expect(useAdoptionStore.getState().selectedSessionDirs).toEqual([
+    'session-a',
+    'session-b',
+    'session-c',
+  ])
+  useAdoptionStore.getState().setSessionDirs([])
+  expect(useAdoptionStore.getState().selectedSessionDirs).toEqual([])
+})
+
 it('choosing another source candidate clears the stale picker', () => {
   useAdoptionStore.setState({
     selectedId: 'dsh-abc',
