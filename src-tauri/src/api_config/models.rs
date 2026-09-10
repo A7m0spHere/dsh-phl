@@ -8,6 +8,8 @@ use tauri::State;
 
 use crate::credentials::{CredentialStore, Creds};
 
+use super::load_config_file;
+
 /* ---------------------------- model discovery ---------------------------- */
 
 /// One entry of a provider's `/models` listing.
@@ -97,23 +99,133 @@ pub(crate) fn api_error_message(status: u16, body: &str) -> String {
 /// matching prose.
 pub(crate) const ENV_MISSING: &str = "ENV_MISSING:";
 
+/// The network origin of a model-list URL: scheme + lowercase host + effective
+/// port. Matching only the host is insufficient for a stored secret: a caller
+/// could otherwise turn a trusted `https://api.example` provider into
+/// `http://api.example` (cleartext) or target an unrelated service listening
+/// on another port. Paths may differ because compatible gateways legitimately
+/// expose the same origin under `/v1`, `/paas/v1`, and similar prefixes.
+fn url_origin(url: &str) -> Option<(String, String, u16)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let port = parsed.port_or_known_default()?;
+    Some((scheme, host, port))
+}
+
+/// The credential→destination trust test (2026-09-10 confused-proxy fix).
+///
+/// A provider's saved *system* credential may only be spent on the host its
+/// own backend-trusted config names. There must be a provider identity, the
+/// backend must know a base URL for it, and that base URL's origin must match
+/// the destination the caller actually asked for. Anything less — an unknown
+/// provider, a provider that never stored a base URL, or a caller who paired
+/// `provider_id` with a different scheme, host, port, or invalid `base_url` —
+/// keeps the secret in the store.
+fn saved_credential_trusted(
+    provider_id: Option<&str>,
+    target_url: &str,
+    trusted_base_url: Option<&str>,
+) -> bool {
+    provider_id.is_some()
+        && trusted_base_url
+            .map(models_url)
+            .as_deref()
+            .and_then(url_origin)
+            == url_origin(target_url)
+}
+
+#[cfg(test)]
+mod credential_destination_tests {
+    use super::saved_credential_trusted;
+
+    #[test]
+    fn saved_credentials_require_the_same_network_origin() {
+        assert!(saved_credential_trusted(
+            Some("p-demo"),
+            "https://api.example.test/v1/models",
+            Some("https://API.example.test/compatible-mode/v1"),
+        ));
+        assert!(saved_credential_trusted(
+            Some("p-demo"),
+            "https://api.example.test:443/v1/models",
+            Some("https://api.example.test/v1"),
+        ));
+
+        assert!(!saved_credential_trusted(
+            Some("p-demo"),
+            "http://api.example.test/v1/models",
+            Some("https://api.example.test/v1"),
+        ));
+        assert!(!saved_credential_trusted(
+            Some("p-demo"),
+            "https://api.example.test:8443/v1/models",
+            Some("https://api.example.test/v1"),
+        ));
+        assert!(!saved_credential_trusted(
+            Some("p-demo"),
+            "https://other.example.test/v1/models",
+            Some("https://api.example.test/v1"),
+        ));
+        assert!(!saved_credential_trusted(
+            None,
+            "https://api.example.test/v1/models",
+            Some("https://api.example.test/v1"),
+        ));
+    }
+}
+
 /// `GET {base}/models` with the provider's auth headers.
 ///
 /// The key is resolved in strict priority order: explicit one-time `api_key`
 /// (used and discarded — this command never writes it anywhere), then the
-/// environment variable the library entry references. PHL as a *desktop*
-/// process rarely sees a variable the user only exported in their terminal
-/// session, which is why the temp-key escape hatch exists at all.
+/// saved system credential for `provider_id`, then the environment variable
+/// the library entry references. PHL as a *desktop* process rarely sees a
+/// variable the user only exported in their terminal session, which is why the
+/// temp-key escape hatch exists at all.
+///
+/// The saved credential is a *system* secret, so it may never be sent to an
+/// arbitrary caller-chosen host: it is only used when the request destination
+/// matches the provider's own base URL as recorded in the backend's trusted
+/// `ApiConfig` (`trusted_base_url`). A mismatch — the WebView paired a
+/// `provider_id` with some other `base_url` — falls through to the temp key /
+/// environment, never the stored secret (2026-09-10 hardening: the confused-
+/// proxy fix). A provider that stored no base URL has no trusted destination,
+/// so its saved credential is likewise never spent over the network.
 #[tauri::command]
 pub async fn fetch_provider_models(
     creds: State<'_, Creds>,
+    state: State<'_, crate::paths::PhlState>,
     base_url: String,
     api: Option<String>,
     api_key_env: String,
     api_key: Option<String>,
     provider_id: Option<String>,
 ) -> Result<Vec<RemoteModel>, String> {
-    fetch_models_inner(&creds, base_url, api, api_key_env, api_key, provider_id).await
+    // Resolve the provider's *trusted* base URL from the backend's own copy
+    // of the config — never from what the caller sent alongside the request.
+    let trusted_base_url = match (provider_id.as_deref(), state.root().as_path()) {
+        (Some(id), root) => load_config_file(root).await.and_then(|cfg| {
+            cfg.providers
+                .into_iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.base_url)
+        }),
+        (None, _) => None,
+    };
+    fetch_models_inner(
+        &creds,
+        base_url,
+        api,
+        api_key_env,
+        api_key,
+        provider_id,
+        trusted_base_url.as_deref(),
+    )
+    .await
 }
 
 pub(crate) async fn fetch_models_inner(
@@ -123,6 +235,7 @@ pub(crate) async fn fetch_models_inner(
     api_key_env: String,
     api_key: Option<String>,
     provider_id: Option<String>,
+    trusted_base_url: Option<&str>,
 ) -> Result<Vec<RemoteModel>, String> {
     let url = models_url(&base_url);
     if url.is_empty() {
@@ -135,14 +248,24 @@ pub(crate) async fn fetch_models_inner(
     if env_name.is_empty() {
         return Err("未填写密钥环境变量名，且未提供临时密钥".into());
     }
+    // The saved system credential may only be spent on the provider's own
+    // host; a caller-supplied `base_url` that points elsewhere must not be
+    // able to extract it. This is the whole trust binding: identity of the
+    // credential (provider_id) is matched to the destination (trusted host).
+    let saved_cred_host_ok =
+        saved_credential_trusted(provider_id.as_deref(), &url, trusted_base_url);
     let key = api_key
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
         .or_else(|| {
-            provider_id
-                .as_deref()
-                .and_then(|id| creds.get(id).ok().flatten())
-                .filter(|v| !v.trim().is_empty())
+            saved_cred_host_ok
+                .then(|| {
+                    provider_id
+                        .as_deref()
+                        .and_then(|id| creds.get(id).ok().flatten())
+                        .filter(|v| !v.trim().is_empty())
+                })
+                .flatten()
         })
         .or_else(|| {
             std::env::var(env_name)

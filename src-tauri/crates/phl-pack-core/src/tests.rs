@@ -274,6 +274,55 @@ fn normalize_entry_accepts_dirs_and_rejects_escapes() {
     );
 }
 
+/// The names that pass a traversal-only check yet are unsafe *as filenames* on
+/// Windows: an embedded `:` opens an NTFS alternate data stream invisible to
+/// the archive's own name listing (report §1.2), and reserved device names /
+/// trailing dots cannot be created. A legitimate dotfile payload must stay
+/// allowed — that is the deliberate difference from the app-crate id rule.
+#[test]
+fn normalize_entry_rejects_windows_unsafe_names_allows_dotfiles() {
+    // ADS via colon, wherever the colon sits.
+    assert!(normalize_entry("sessions/a:secret").is_err());
+    assert!(normalize_entry("phlpack.json:hidden").is_err());
+    assert!(normalize_entry("embedded/plugins/CON").is_err());
+    assert!(normalize_entry("sessions/NUL.txt").is_err());
+    assert!(normalize_entry("assets/icon.").is_err()); // trailing dot
+    assert!(normalize_entry("assets/icon ").is_err()); // trailing space
+                                                       // A legitimate leading-dot payload file is still fine.
+    assert!(normalize_entry("overrides/.env").is_ok());
+    assert!(normalize_entry("sessions/.credentials.yaml").is_ok());
+}
+
+#[test]
+fn validation_rejects_names_that_collide_on_case_insensitive_filesystems() {
+    let mut files = base_files();
+    files.push(("assets/README.md".to_string(), b"one".to_vec()));
+    files.push(("assets/readme.md".to_string(), b"two".to_vec()));
+    let mut cur = build_zip(files, &[]);
+    let size = cur.get_ref().len() as u64;
+    assert!(matches!(
+        read_pack(&mut cur, size),
+        Err(PackError::DuplicateEntry(_))
+    ));
+}
+
+#[test]
+fn sessions_on_disk_cannot_contradict_the_privacy_declaration() {
+    let mut files = base_files();
+    files[0].1 = manifest_with_integrity(json!({}));
+    files.push((
+        "sessions/project/session-1/session.jsonl".to_string(),
+        b"{}\n".to_vec(),
+    ));
+    let mut cur = build_zip(files, &[]);
+    let size = cur.get_ref().len() as u64;
+    let err = read_pack(&mut cur, size).unwrap_err();
+    assert!(
+        matches!(err, PackError::Consistency(ref message) if message.contains("sessionsIncluded")),
+        "unexpected error: {err:?}"
+    );
+}
+
 #[test]
 fn integrity_hash_observes_cancel_inside_one_large_reader() {
     use std::sync::atomic::{AtomicUsize, Ordering};

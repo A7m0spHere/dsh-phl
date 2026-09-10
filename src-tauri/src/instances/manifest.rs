@@ -147,6 +147,43 @@ pub(crate) fn profile_root_of(dir: &Path, manifest: &InstanceManifest) -> PathBu
         .join(&manifest.profile)
 }
 
+/// Validate the fields of an `InstanceManifest` that participate in a
+/// filesystem path, a launch command, or a resource lookup, before it is
+/// allowed to reach disk. This is the one gate every write path shares
+/// (`write_manifest` calls it), so `id`, `profile`, `runtime_id`, `port`, and
+/// the external home can never be persisted in a shape that later steers a
+/// `create_dir_all` / `remove_dir_all` / `spawn` outside the object it names.
+///
+/// Deliberately narrow: it re-applies the *same* segment/version invariants the
+/// create and adopt paths already enforce (so a legitimate pre-existing
+/// manifest re-saves unchanged), plus the port bound and the external-home
+/// sanity `home_of` assumes. It does not second-guess `version_id` — the
+/// caller has already run `canonicalize_version_binding`, which repairs or
+/// empties an unsafe binding rather than rejecting the whole manifest, so
+/// legacy instances keep loading.
+pub(crate) fn validate_instance_manifest_for_persistence(
+    manifest: &InstanceManifest,
+) -> Result<(), String> {
+    crate::paths::sanitize_segment(&manifest.id, "实例 id")?;
+    crate::paths::sanitize_segment(&manifest.profile, "profile")?;
+    // An unset runtime is allowed ("" = no runtime yet, shown as 未绑定); a set
+    // one must be a filesystem-safe id like the version segments.
+    if !manifest.runtime_id.is_empty() {
+        crate::versions::install::sanitize_version(&manifest.runtime_id)
+            .map_err(|_| format!("非法的 runtime id: {}", manifest.runtime_id))?;
+    }
+    if manifest.port > 65535 {
+        return Err(format!("端口超出范围: {}", manifest.port));
+    }
+    if matches!(manifest.management_mode, ManagementMode::External) {
+        match manifest.external_home.as_deref().map(str::trim) {
+            Some(home) if !home.is_empty() && Path::new(home).is_absolute() => {}
+            _ => return Err("外部实例缺少绝对 DSH_HOME 路径，无法保存其清单".to_string()),
+        }
+    }
+    Ok(())
+}
+
 /// The manifest format this build reads and writes. Bump only together with
 /// a migration story: older versions must keep parsing, and this build must
 /// refuse (not guess at) anything written by a newer one.
@@ -168,18 +205,30 @@ static MANIFEST_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 /// What reading an `instance.json` actually found. The distinctions matter:
 /// `Missing` means "not an instance at all", `Corrupt` is reclaimable junk,
-/// and `UnsupportedSchema` is a *valid instance this build cannot parse* —
-/// it must stay invisible to every destructive path.
+/// `UnsupportedSchema` is a *valid instance this build cannot parse* — it must
+/// stay invisible to every destructive path, and `Unreadable` is a manifest
+/// that exists but could not be read (permission denied, I/O error) — the one
+/// failure mode that must never be mistaken for "absent", because treating an
+/// unreadable-but-present instance as reclaimable junk hands a `remove_dir_all`
+/// to exactly the objects a user cannot otherwise see.
+#[derive(Debug)]
 pub(crate) enum ManifestRead {
     Ok(Box<InstanceManifest>),
     Missing,
     Corrupt(String),
     UnsupportedSchema { found: u32, supported: u32 },
+    Unreadable(String),
 }
 
 pub(crate) async fn classify_manifest(dir: &Path) -> ManifestRead {
-    let Ok(raw) = tokio::fs::read_to_string(manifest_path(dir)).await else {
-        return ManifestRead::Missing;
+    let raw = match tokio::fs::read_to_string(manifest_path(dir)).await {
+        Ok(raw) => raw,
+        // Only a genuinely absent file is "not an instance". Anything else —
+        // a permission refusal, an I/O error, a directory where the manifest
+        // should be — is an *unknown* state that must fail closed, not be
+        // folded into Missing and later deleted as junk.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ManifestRead::Missing,
+        Err(e) => return ManifestRead::Unreadable(format!("{e}")),
     };
     let value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(value) => value,
@@ -203,6 +252,14 @@ pub(crate) async fn classify_manifest(dir: &Path) -> ManifestRead {
             // Legacy manifests migrate in memory; the stamp reaches disk the
             // next time this manifest is written, with the original saved.
             manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+            // Same in-memory heal for the version binding: manifests written
+            // by a pre-normalisation build (bare `0.1.5-rc.1` adoption wire
+            // shape) would otherwise reach every consumer in that shape, and
+            // each one matching against the catalog's `dsh-<ver>` id would
+            // misreport the instance as referencing an uninstalled version.
+            // Canonicalising here fixes all of them at once; `write_manifest`
+            // lands it on disk at the next save.
+            super::canonicalize_version_binding(&mut manifest);
             ManifestRead::Ok(Box::new(manifest))
         }
         Err(e) => ManifestRead::Corrupt(e.to_string()),
@@ -226,6 +283,13 @@ pub(crate) async fn read_manifest(dir: &Path) -> Option<InstanceManifest> {
             eprintln!("[phl] 无法解析 {}: {e}", manifest_path(dir).display());
             None
         }
+        // Present but unreadable: hide from the ordinary list, but unlike
+        // Corrupt it is *not* surfaced as reclaimable junk (see the orphan
+        // match) — a permission hiccup must not become a delete button.
+        ManifestRead::Unreadable(e) => {
+            eprintln!("[phl] 无法读取 {}: {e}", manifest_path(dir).display());
+            None
+        }
         ManifestRead::UnsupportedSchema { found, supported } => {
             eprintln!(
                 "[phl] {}: schema 版本 {found} 超出当前支持的 {supported}，已隐藏该实例（请升级 PHL）",
@@ -243,6 +307,10 @@ pub(crate) async fn load_manifest(dir: &Path, id: &str) -> Result<InstanceManife
     match classify_manifest(dir).await {
         ManifestRead::Ok(manifest) => Ok(*manifest),
         ManifestRead::Missing => Err(format!("实例不存在或缺少清单: {id}")),
+        // The manifest exists but cannot be read: an id-addressed destructive
+        // operation must not proceed on an object whose contents it cannot
+        // confirm — fail closed rather than guess.
+        ManifestRead::Unreadable(e) => Err(format!("无法读取实例 {id} 的清单（{e}），操作已中止")),
         ManifestRead::Corrupt(e) => Err(format!("实例 {id} 清单损坏: {e}")),
         ManifestRead::UnsupportedSchema { found, supported } => Err(format!(
             "实例 {id} 的清单 schema 版本过新: {found}（当前支持 {supported}），请升级 PHL 后再操作"
@@ -274,6 +342,11 @@ pub(crate) async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> R
     // where the canonical `dsh-<ver>` id belongs) must never reach disk,
     // whoever the writer was. See `instances::canonicalize_version_binding`.
     super::canonicalize_version_binding(&mut manifest);
+    // Single choke point: every field that later gets pasted into a filesystem
+    // path, a launch command, or a resource lookup is validated here, so no
+    // caller (create / adopt / pack / save / launch-sync) can write an
+    // `instance.json` that would steer a subsequent operation outside its lane.
+    validate_instance_manifest_for_persistence(&manifest)?;
 
     let path = manifest_path(dir);
     // One-time backup when this write changes the on-disk schema — a legacy
@@ -312,6 +385,55 @@ pub(crate) async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> R
 mod tests {
     use super::*;
 
+    fn temp_manifest(tag: &str, version_id: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("phl-manifest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let value = serde_json::json!({
+            "id": "leg-1",
+            "name": "legacy",
+            "kind": "sandbox",
+            "hue": 210,
+            "versionId": version_id,
+            "runtimeId": "node-22",
+            "port": 7100,
+            "autoPort": false,
+            "profile": "web",
+            "createdAt": "2026-01-01T00:00:00Z",
+        });
+        std::fs::write(
+            manifest_path(&dir),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn classify_heals_a_legacy_bare_version_binding_on_read() {
+        // The pre-fix adoption wire shape: a bare `0.1.5-rc.1` on disk.
+        // Readers must see the canonical id the catalog and the orphan banner
+        // match against; the file itself stays as-is until the next save.
+        let dir = temp_manifest("bare-bind", "0.1.5-rc.1");
+        let manifest = match classify_manifest(&dir).await {
+            ManifestRead::Ok(m) => *m,
+            other => panic!("expected a readable manifest, got {other:?}"),
+        };
+        assert_eq!(manifest.version_id, "dsh-0.1.5-rc.1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn classify_collapses_an_unsafe_binding_to_unbound_on_read() {
+        let dir = temp_manifest("evil-bind", "../versions-escape");
+        let manifest = match classify_manifest(&dir).await {
+            ManifestRead::Ok(m) => *m,
+            other => panic!("expected a readable manifest, got {other:?}"),
+        };
+        assert_eq!(manifest.version_id, "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn manifest_temp_names_are_unique_and_invisible_to_copies() {
         // Two writers (save_instance under the instance lock, and the launch
@@ -328,5 +450,118 @@ mod tests {
             "a temp file left by a crash must not ride into a clone or snapshot: {name}"
         );
         assert_eq!(first.parent(), Some(dir.as_path()));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("phl-mf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_manifest() -> InstanceManifest {
+        InstanceManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            id: "leg-1".into(),
+            name: "Legacy".into(),
+            note: None,
+            kind: "sandbox".into(),
+            hue: 210,
+            version_id: "dsh-0.1.0".into(),
+            runtime_id: "node-22".into(),
+            port: 7100,
+            auto_port: false,
+            profile: "web".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            last_run_at: None,
+            total_runtime: 0,
+            favorite: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            api: None,
+            management_mode: Default::default(),
+            source: Default::default(),
+            external_home: None,
+            adopted_from: None,
+        }
+    }
+
+    /// A read that fails for a reason *other* than absence must not be
+    /// classified `Missing` — that fold is what let an instance a user simply
+    /// could not read be surfaced as reclaimable junk and deleted.
+    #[tokio::test]
+    async fn an_unreadable_manifest_is_not_reported_as_missing() {
+        let dir = scratch_dir("unreadable");
+        // A directory standing where instance.json belongs: the read errors
+        // with a non-NotFound kind, which must map to Unreadable.
+        std::fs::create_dir_all(manifest_path(&dir)).unwrap();
+        match classify_manifest(&dir).await {
+            ManifestRead::Unreadable(_) => {}
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+        // And a genuinely absent one still maps to Missing (not a regression).
+        let empty = scratch_dir("absent");
+        assert!(matches!(
+            classify_manifest(&empty).await,
+            ManifestRead::Missing
+        ));
+    }
+
+    #[test]
+    fn persistence_validation_refuses_path_escaping_fields() {
+        // A legitimate manifest passes.
+        assert!(validate_instance_manifest_for_persistence(&sample_manifest()).is_ok());
+        // A profile that climbs out of the home is refused.
+        let mut m = sample_manifest();
+        m.profile = "../../escape".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // An id with a path separator is refused.
+        let mut m = sample_manifest();
+        m.id = "a/b".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // A trailing-dot profile (collides after Windows trimming) is refused.
+        let mut m = sample_manifest();
+        m.profile = "web.".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // An invalid runtime id is refused.
+        let mut m = sample_manifest();
+        m.runtime_id = "node/../evil".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // An unset runtime (empty) stays allowed — it is 未绑定, not unsafe.
+        let mut m = sample_manifest();
+        m.runtime_id = String::new();
+        assert!(validate_instance_manifest_for_persistence(&m).is_ok());
+        // An external instance must carry an absolute home.
+        let mut m = sample_manifest();
+        m.management_mode = ManagementMode::External;
+        m.external_home = Some("relative/home".into());
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        let mut m = sample_manifest();
+        m.management_mode = ManagementMode::External;
+        m.external_home = Some(
+            if cfg!(windows) {
+                "C:\\dsh-home"
+            } else {
+                "/dsh-home"
+            }
+            .into(),
+        );
+        assert!(validate_instance_manifest_for_persistence(&m).is_ok());
+    }
+
+    /// The real write boundary: an unsafe profile must be refused by
+    /// `write_manifest` before anything reaches disk, not merely by the create
+    /// path — this is what closes the save-side hole the audit found.
+    #[tokio::test]
+    async fn write_manifest_refuses_a_profile_that_would_escape_the_home() {
+        let dir = scratch_dir("save-profile");
+        let mut m = sample_manifest();
+        m.profile = "web/../evil".into();
+        let err = write_manifest(&dir, &m).await.unwrap_err();
+        assert!(err.contains("profile"), "unexpected error: {err}");
+        assert!(
+            !manifest_path(&dir).exists(),
+            "a rejected manifest must never be written"
+        );
     }
 }

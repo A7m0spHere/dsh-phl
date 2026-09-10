@@ -334,18 +334,29 @@ pub(crate) fn recreate_link(dst: &Path, target: &Path, as_dir: bool) -> Result<(
     #[cfg(windows)]
     {
         if as_dir {
+            use std::os::windows::process::CommandExt;
             let mut command = std::process::Command::new("cmd");
             command
-                .args(["/C", "mklink", "/J"])
-                .arg(dst)
-                .arg(target)
+                // Keep the command text fixed and pass both paths through the
+                // child environment. `cmd /C` reparses its command line, so
+                // ordinary `Command::arg` quoting is not enough for a path
+                // containing `&`, `^`, `(`, `%`, or `!`; it can turn a clone
+                // into a syntax error or a second command. Expansion happens
+                // inside explicit quotes, with delayed expansion disabled.
+                .args(["/D", "/V:OFF", "/C"])
+                // `cmd.exe` does not use CommandLineToArgvW for the command
+                // after /C. Passing that text through ordinary `.arg()` makes
+                // Rust escape its inner quotes for a parser cmd does not use,
+                // so append the already-quoted fixed command verbatim.
+                .raw_arg(r#"mklink /J "%PHL_JUNCTION_DST%" "%PHL_JUNCTION_TARGET%""#)
+                .env("PHL_JUNCTION_DST", dst.as_os_str())
+                .env("PHL_JUNCTION_TARGET", target.as_os_str())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             // cmd.exe is a console program: without this it flashes a black
             // window every time a clone recreates a directory link. This is
             // already a windows-only block, so no second cfg gate is needed.
-            use std::os::windows::process::CommandExt;
             command.creation_flags(crate::launch::CREATE_NO_WINDOW);
             let junction = command.status().map(|s| s.success()).unwrap_or(false);
             if junction {
@@ -677,6 +688,22 @@ mod tests {
     /// a junction on Windows (needs no privilege), a symlink elsewhere.
     fn dir_link(target: &Path, link: &Path) {
         recreate_link(link, target, true).expect("create dir link");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_creation_treats_shell_metacharacters_as_path_text() {
+        let root = tmp("junction-&()^%!");
+        let target = root.join("target & (prod)^%!");
+        let link = root.join("link & (copy)^%!");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("sentinel.txt"), b"ok").unwrap();
+
+        recreate_link(&link, &target, true).expect("metacharacter path junction");
+        assert_eq!(std::fs::read(link.join("sentinel.txt")).unwrap(), b"ok");
+
+        std::fs::remove_dir(&link).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A populated fake data root: `<root>/versions/v1/node_modules/dep`.

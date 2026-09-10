@@ -342,6 +342,22 @@ async fn delete_instance_inner(
     // operation: a running instance's files are in use, and forcing the
     // delete would leave a half-deleted tree behind a live process.
     snapshot::ensure_not_running(processes, id)?;
+    // Fail closed on an object this build cannot understand. A manifest from a
+    // *newer* PHL, or one that simply could not be read, names a real instance
+    // whose contents are unknown to us — deleting the directory on that basis
+    // trades a version mismatch for permanent data loss. Corrupt and Missing
+    // manifests stay deletable (there is nothing a newer build could recover).
+    match classify_manifest(&dir).await {
+        ManifestRead::UnsupportedSchema { found, supported } => {
+            return Err(format!(
+                "实例 {id} 的清单 schema 版本 {found} 超出当前支持的 {supported}，拒绝删除未知格式（请升级 PHL 后再操作）"
+            ))
+        }
+        ManifestRead::Unreadable(e) => {
+            return Err(format!("无法确认实例 {id} 的清单（{e}），为安全起见拒绝删除"))
+        }
+        _ => {}
+    }
     task.set_phase("removing");
     remove_tree_progress(&dir, task)
         .await
@@ -596,6 +612,10 @@ pub(crate) async fn scan_orphan_instances_inner(root: &Path) -> Result<Vec<Orpha
         }
         match classify_manifest(&path).await {
             ManifestRead::Ok(_) | ManifestRead::UnsupportedSchema { .. } => continue,
+            // Present but unreadable is *not* junk to reclaim — a transient
+            // permission/IO failure must never surface a delete affordance on
+            // a real instance.
+            ManifestRead::Unreadable(_) => continue,
             ManifestRead::Missing | ManifestRead::Corrupt(_) => {}
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -631,6 +651,11 @@ async fn delete_orphan_instance_inner(root: &Path, name: &str) -> Result<(), Str
             return Err(format!(
                 "该目录是 schema 版本 {found} 的实例（当前支持 {supported}），请升级 PHL 后再删除"
             ))
+        }
+        // Could not read the manifest: refusing to reclaim is the fail-closed
+        // choice — an unreadable object is not proven junk.
+        ManifestRead::Unreadable(e) => {
+            return Err(format!("无法读取该目录的实例清单（{e}），为安全起见未删除"))
         }
         ManifestRead::Missing | ManifestRead::Corrupt(_) => {}
     }
@@ -1118,6 +1143,45 @@ mod tests {
         assert!(
             assert_inside_instances(root, &root.join("instances").join("a").join("b")).is_err()
         );
+    }
+
+    /// Fail-closed delete: an instance whose manifest is written by a *newer*
+    /// PHL (a schema this build cannot parse) must not be destroyed, even
+    /// addressed by id over IPC. Deleting it would trade a version mismatch for
+    /// permanent data loss of an object a newer build could still read.
+    #[tokio::test]
+    async fn delete_refuses_a_newer_schema_manifest() {
+        let root = temp_root("del-schema");
+        create_instance_inner(root.as_path(), manifest("newer-001", "Newer"))
+            .await
+            .unwrap();
+        let dir = instance_dir(root.as_path(), "newer-001").unwrap();
+        // Rewrite the manifest claiming a schema beyond this build's support.
+        let mut body = serde_json::to_value(manifest("newer-001", "Newer")).unwrap();
+        body["schemaVersion"] = serde_json::json!(MANIFEST_SCHEMA_VERSION + 1);
+        std::fs::write(
+            manifest_path(&dir),
+            serde_json::to_vec_pretty(&body).unwrap(),
+        )
+        .unwrap();
+
+        let err = delete_instance_inner(
+            root.as_path(),
+            "newer-001",
+            &Processes::default(),
+            &test_task(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("schema") || err.contains("拒绝"),
+            "unexpected: {err}"
+        );
+        assert!(
+            dir.exists(),
+            "a newer-format instance must not be destroyed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

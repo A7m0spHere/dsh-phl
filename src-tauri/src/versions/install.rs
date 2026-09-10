@@ -87,11 +87,12 @@ pub(crate) fn sanitize_version(name: &str) -> Result<String, String> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
-        // `.` is an allowed character, so both of these otherwise pass the
-        // whitelist — and `<root>/versions/..` resolves to the data root,
-        // which `remove_version_dir` would then `remove_dir_all`.
-        && name != "."
-        && name != "..";
+        // The shared Win32 invariant, same rules the instance/id segments use:
+        // `.`/`..`/`...` navigation (which once resolved `<root>/versions/..`
+        // and let `remove_version_dir` delete the whole data root), trailing
+        // `.`/space that Windows silently trims into a colliding name, and
+        // reserved device names that cannot exist as a directory at all.
+        && crate::paths::is_windows_safe_name(name);
     if ok {
         Ok(name.to_string())
     } else {
@@ -141,25 +142,56 @@ pub(crate) async fn promote_staged(
         }
     }
     if let Err(e) = tokio::fs::rename(staging, dest).await {
-        if had_previous {
-            let _ = tokio::fs::rename(backup, dest).await;
-        }
         let _ = tokio::fs::remove_dir_all(staging).await;
-        return Err(format!("无法放置新版本: {e}"));
+        return Err(
+            rollback_message(had_previous, backup, dest, "无法放置新版本", e.to_string()).await,
+        );
     }
     if let Err(e) = final_check(dest) {
         // The new tree is in place but wrong; the backup is the only copy of
         // what worked before, so it goes back before anything else happens.
         let _ = tokio::fs::remove_dir_all(dest).await;
-        if had_previous {
-            let _ = tokio::fs::rename(backup, dest).await;
-        }
-        return Err(format!("最终校验失败，已恢复原版本: {e}"));
+        return Err(rollback_message(had_previous, backup, dest, "最终校验失败", e).await);
     }
     // Success: the backup is now redundant space, not a rollback point —
     // the staging dir is gone (renamed), so nothing references it.
     let _ = tokio::fs::remove_dir_all(backup).await;
     Ok(())
+}
+
+/// Compose the honest outcome of a failed commit: what went wrong, and whether
+/// the pre-transaction tree is actually back at `dest`. Never claims "已恢复
+/// 原版本" unless the restore really happened, and never claims it at all when
+/// there was no previous version (a fresh install just failed, nothing to
+/// bring back).
+async fn rollback_message(
+    had_previous: bool,
+    backup: &Path,
+    dest: &Path,
+    what_failed: &str,
+    cause: String,
+) -> String {
+    if !had_previous {
+        return format!("{what_failed}，已移除不完整的新版本（此前无已安装版本）: {cause}");
+    }
+    match restore_backup(backup, dest).await {
+        Ok(()) => format!("{what_failed}，已恢复原版本: {cause}"),
+        // The old tree is still parked in `backup` and could not be put back —
+        // claiming a restore here would send the user looking in the wrong
+        // place for a version PHL just made unavailable.
+        Err(re) => format!(
+            "{what_failed}（{cause}），且恢复原版本失败（{re}）；请从备份目录 {} 手动恢复原版本",
+            backup.display()
+        ),
+    }
+}
+
+/// Put the pre-transaction tree back at `dest`; surfaces the failure instead
+/// of discarding it, so a caller never claims a restore that did not happen.
+async fn restore_backup(backup: &Path, dest: &Path) -> Result<(), String> {
+    tokio::fs::rename(backup, dest)
+        .await
+        .map_err(|e| format!("rename {}→{} 失败: {e}", backup.display(), dest.display()))
 }
 
 /// One transaction-scoped directory name: `<parent>/.phl-txn/<name>.<role>-<token>`.
@@ -459,4 +491,33 @@ pub(crate) async fn remove_version_dir_inner(
         _ => e.to_string(),
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    /// The P0: every shape that used to slip past the `[A-Za-z0-9._-+]`
+    /// whitelist and resolve `<root>/versions/..` (or a trimmed collision) to
+    /// somewhere the destructive `remove_version_dir` must never walk.
+    #[test]
+    fn version_segment_refuses_windows_dangerous_shapes() {
+        for bad in ["...", "..", ".", "1.0.", " 1.0", "CON", "nul.txt", "COM1"] {
+            assert!(sanitize_version(bad).is_err(), "{bad:?} must be refused");
+        }
+        // Legal ids must NOT be refused by the stricter rule.
+        for good in [
+            "0.1.2",
+            "dsh-0.1.2",
+            "22.1.0-linux",
+            "0.1.2+beta",
+            "1.2.3-rc1",
+        ] {
+            assert!(sanitize_version(good).is_ok(), "{good:?} must be accepted");
+        }
+        // bound_id is the other entry a bare version reaches the fs through.
+        assert!(bound_id_for_version("...").is_none());
+        assert!(bound_id_for_version("1.0.").is_none());
+        assert_eq!(bound_id_for_version("0.1.2").as_deref(), Some("dsh-0.1.2"));
+    }
 }
