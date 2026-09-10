@@ -256,20 +256,6 @@ pub(crate) fn port_free(port: u16) -> bool {
     port != 0 && TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-pub(crate) async fn count_plugins(profile_dir: &Path) -> usize {
-    let Ok(mut entries) = tokio::fs::read_dir(profile_dir.join("node_modules")).await else {
-        return 0;
-    };
-    let mut count = 0;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        count += 1;
-    }
-    count
-}
-
 /// Per-instance retention for `launch-*.log` (O-12). A long-running instance
 /// writes one file per launch, so without a cap an old instance's `logs/`
 /// grows unbounded. Keep the newest `keep` files by name (the ISO timestamp

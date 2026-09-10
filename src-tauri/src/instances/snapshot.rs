@@ -330,9 +330,9 @@ pub async fn restore_instance_snapshot(
     result
 }
 
-/// Test / internal-call wrapper: no cancel channel, progress discarded.
-/// The *command* wires the real flag and channel — this default must never
-/// reach an IPC path.
+/// Test-only wrapper: no cancel channel, progress discarded. Production
+/// goes through the command above, which wires the real flag and channel.
+#[cfg(test)]
 pub(crate) async fn restore_snapshot_inner(
     root: &Path,
     id: &str,

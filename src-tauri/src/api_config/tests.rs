@@ -4,7 +4,7 @@ use super::models::{
 };
 use super::sync::{import_inner, sections_hash, snapshot_inner};
 use super::*;
-use crate::credentials::{Creds, CredentialStore};
+use crate::credentials::{CredentialStore, Creds};
 use std::path::PathBuf;
 /// A credential store backed by the real OS on Windows; the test entries
 /// it touches are namespaced and cleaned up by each test that uses one.
@@ -580,8 +580,14 @@ async fn resolve_launch_keys_orders_config_key_above_the_store() {
     assert_eq!(
         keys,
         vec![
-            (c.providers[0].api_key_env.clone(), "sk-from-config".to_string()),
-            (c.providers[1].api_key_env.clone(), "sk-from-store".to_string()),
+            (
+                c.providers[0].api_key_env.clone(),
+                "sk-from-config".to_string()
+            ),
+            (
+                c.providers[1].api_key_env.clone(),
+                "sk-from-store".to_string()
+            ),
         ],
         "config key first, store fallback second"
     );

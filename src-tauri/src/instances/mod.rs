@@ -48,7 +48,7 @@ pub(crate) use manifest::{
     InstanceSource, ManagementMode,
 };
 #[cfg(test)]
-use snapshot::{delete_snapshot_inner, restore_snapshot_inner, run_snapshot_create};
+use snapshot::{delete_snapshot_inner, run_snapshot_create};
 use snapshot::{scan_snapshots, SnapshotFile};
 
 /* ----------------------------- wire types ----------------------------- */
@@ -975,6 +975,7 @@ mod tests {
     use super::bundle::import_instance_bundle_inner;
     use super::copy::dir_size_skipping;
     use super::manifest::MANIFEST_SCHEMA_VERSION;
+    use super::snapshot::restore_snapshot_inner;
     use super::*;
     use bundle::{export_instance_bundle_inner, read_bundle_inner};
     use copy::{copy_tree, skipped, CopyCtx};
