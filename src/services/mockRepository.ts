@@ -17,6 +17,7 @@ import type {
   Snapshot,
 } from '@/types'
 import { LAUNCH_PHASES } from '@/types'
+import { isVersionBusy } from '@/types/version'
 import {
   Cancelled,
   LaunchError,
@@ -296,6 +297,15 @@ class MockRepository implements PhlRepository {
       // the failure surfaces with the right label attached to it.
       if (phase === 'resolve-version') {
         if (!ctx.version || ctx.version.state.kind !== 'installed') {
+          // Mirror the desktop flow: a mid-install version is not "未安装".
+          if (ctx.version && isVersionBusy(ctx.version)) {
+            await sleep(340, signal)
+            throw new LaunchError(
+              'DSH 版本正在安装',
+              `实例绑定的 ${ctx.version.name} 正在安装中，还不能用于启动。`,
+              '等「版本」页面的安装进度完成后重试。',
+            )
+          }
           await sleep(340, signal)
           throw new LaunchError(
             'DSH 版本未安装',

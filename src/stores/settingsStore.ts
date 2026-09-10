@@ -39,6 +39,13 @@ interface SettingsState {
   minimizeToTray: boolean
   closeStopsInstances: boolean
   /**
+   * After a desktop instance finishes launching, open (or focus) its WebUI in
+   * the embedded window automatically. On by default — it is what a launcher
+   * is for — but surfaced so a user who drives DSH from their own browser can
+   * silence the popup. Browser builds never open a window regardless.
+   */
+  autoOpenWebUi: boolean
+  /**
    * Check GitHub for a newer PHL build shortly after launch. The check only
    * reads a signed manifest — nothing is downloaded or installed without an
    * explicit click in 设置 → 关于.
@@ -102,6 +109,7 @@ const defaults = {
   startup: 'none' as StartupBehaviour,
   minimizeToTray: true,
   closeStopsInstances: true,
+  autoOpenWebUi: true,
   autoUpdateCheck: true,
   source: 'official' as DownloadSource,
   customSource: '',

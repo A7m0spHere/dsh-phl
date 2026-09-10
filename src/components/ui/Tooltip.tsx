@@ -44,7 +44,36 @@ export function Tooltip({
     setOpen(false)
   }
 
+  // A click or Enter on the trigger re-focuses it, which re-arms `show()`
+  // through `onFocus` — so a tooltip opened by hover would survive after the
+  // pointer leaves, stuck above whatever the click revealed (the card's
+  // overflow-hidden then clips it into a black bar). Dismiss on press, like
+  // the scroll listener below dismisses on scroll.
+  const onPointerDown = () => {
+    if (open) hide()
+  }
+
+  // Blur alone is not enough to dismiss: when an element opens its panel in a
+  // body portal (the Menu), focus leaves the anchor span, and the browser can
+  // report the blur without a window focus to land on — native focusout on
+  // the span covers every real focus move (portal panel included) and the
+  // contains-check keeps focus shuffling inside the trigger from closing it.
+  useEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor) return
+    const onFocusOut = (e: FocusEvent) => {
+      if (!anchor.contains(e.relatedTarget as Node | null)) hide()
+    }
+    anchor.addEventListener('focusout', onFocusOut)
+    return () => anchor.removeEventListener('focusout', onFocusOut)
+  }, [])
+
   const show = () => {
+    // An empty tooltip would still render a bare dark pill on hover (the
+    // bubble is styled, not gated on content) — callers legitimately pass an
+    // empty string when the hint only applies in some state (e.g. a snapshot
+    // button's "stop the instance first" note). Nothing to show: don't arm.
+    if (content == null || content === '') return
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => {
       if (allowOverflow) {
@@ -117,6 +146,7 @@ export function Tooltip({
       className={cn('relative inline-flex', className)}
       onMouseEnter={show}
       onMouseLeave={hide}
+      onPointerDown={onPointerDown}
       onFocus={show}
       onBlur={hide}
     >

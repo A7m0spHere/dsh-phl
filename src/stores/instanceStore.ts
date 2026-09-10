@@ -4,6 +4,7 @@ import { repository, Cancelled, KeptRunningError, LaunchError, type CopyProgress
 import { adoptProcesses, isDesktop, onInstanceExited, openDshWebUi } from '@/lib/desktop'
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
+import { isInstanceLiveForSnapshot } from '@/types/instance'
 import { useCatalogStore } from './catalogStore'
 import { useSettingsStore } from './settingsStore'
 import { useUIStore } from './uiStore'
@@ -318,12 +319,17 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       // A launcher's delivered promise: getting to the running app must not
       // cost an extra click. Desktop opens (or focuses) the instance's
       // embedded WebUI window; the browser mock build keeps the manual
-      // action instead of spawning unasked tabs on every mock launch.
-      if (isDesktop) void get().openWebUi(id)
+      // action instead of spawning unasked tabs on every mock launch. The
+      // auto-open is user-switchable (设置 → 常规) — when off, the instance is
+      // ready and the toast's own 打开 button is the only thing that opens it.
+      const autoOpen = isDesktop && useSettingsStore.getState().autoOpenWebUi
+      if (autoOpen) void get().openWebUi(id)
       ui.toast({
         kind: 'success',
         title: `${instance.name} 已就绪`,
-        message: isDesktop ? 'WebUI 已在独立窗口打开' : `WebUI 运行在 localhost:${outcome.port}`,
+        message: autoOpen
+          ? 'WebUI 已在独立窗口打开'
+          : `WebUI 运行在 localhost:${outcome.port}`,
         action: { label: '打开', run: () => void get().openWebUi(id) },
       })
     } catch (err) {
@@ -432,7 +438,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     const instance = get().byId(id)
     if (!instance || snapshotControllers.has(id)) return null
     const status = get().stateOf(id).status
-    if (status === 'running' || status === 'starting' || status === 'stopping') {
+    if (isInstanceLiveForSnapshot(status)) {
       useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再创建快照' })
       return null
     }
@@ -493,7 +499,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     // busy-lock error while the first was still copying.
     if (snapshotControllers.has(id)) return
     const status = get().stateOf(id).status
-    if (status === 'running' || status === 'starting' || status === 'stopping') {
+    if (isInstanceLiveForSnapshot(status)) {
       useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再还原快照' })
       return
     }

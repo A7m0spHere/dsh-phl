@@ -326,6 +326,18 @@
   }
 }
 
+/* The in-app "动画：关闭" (uiStore.setMotion → data-motion="off") neutralises
+   every CSS animation and transition — not just the Framer Motion tree — so a
+   user who asked for no movement never sees one. Scoped to the root attribute
+   so it composes with (and is independent of) the OS preference below. */
+[data-motion='off'] *,
+[data-motion='off'] *::before,
+[data-motion='off'] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
 /* Respect the OS-level preference regardless of the in-app setting. */
 @media (prefers-reduced-motion: reduce) {
   *,

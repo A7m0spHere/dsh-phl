@@ -394,7 +394,17 @@ export const useUIStore = create<UIState>()(
         document.documentElement.style.zoom = scale === 100 ? '' : String(scale / 100)
         set({ scale })
       },
-      setMotion: (motion) => set({ motion }),
+      setMotion: (motion) => {
+        // The in-app "关闭" must reach non-Framer CSS animation too, not just
+        // the motion hook: `animate-spin` and `transition-*` keep running
+        // otherwise, so a user who turned animation off still sees movement.
+        // The attribute mirrors the level; `index.css` neutralises animation +
+        // transition under `data-motion="off"`. The system
+        // `prefers-reduced-motion` media query stays a separate, untouched
+        // floor (it reduces regardless of this setting).
+        document.documentElement.setAttribute('data-motion', motion)
+        set({ motion })
+      },
       setLayout: (layout) => set({ layout }),
       setPref: (key, value) => set({ [key]: value } as Partial<UIState>),
 
@@ -463,6 +473,9 @@ export const useUIStore = create<UIState>()(
         state.setAccent(state.accent)
         state.setDensity(state.density)
         state.setScale(state.scale)
+        // Re-apply the motion attribute too, so a reload with 动画=关闭 keeps
+        // CSS animations off before the user touches the setting again.
+        state.setMotion(state.motion)
       },
     },
   ),

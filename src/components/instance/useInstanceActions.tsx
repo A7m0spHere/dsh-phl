@@ -1,6 +1,7 @@
 import { parseThrownError } from '@/lib/errorCodes'
 import { useCallback, useMemo } from 'react'
 import {
+  ArrowUpRight,
   Copy,
   FolderOpen,
   Package,
@@ -36,6 +37,10 @@ export function useInstanceActions(instance: Instance | undefined) {
   const store = useInstanceStore()
   const ui = useUIStore()
   const id = instance?.id
+  // Card and detail page share this menu. The route subscription is what
+  // re-renders the card list when navigation happens, so the 查看详情 entry
+  // can hide itself on the page that already *is* the detail.
+  const onDetailPage = useUIStore((s) => s.route.name === 'instance' && s.route.id === id)
 
   const clone = useCallback(async () => {
     if (!instance) return
@@ -227,6 +232,16 @@ export function useInstanceActions(instance: Instance | undefined) {
         disabled: !running,
         onSelect: openWebUIInBrowser,
       },
+      ...(onDetailPage
+        ? []
+        : [
+            {
+              id: 'detail',
+              label: '查看详情',
+              icon: <ArrowUpRight size={13} />,
+              onSelect: () => ui.push({ name: 'instance', id }),
+            },
+          ]),
       {
         id: 'favorite',
         label: instance.favorite ? '取消置顶' : '置顶',
@@ -272,7 +287,7 @@ export function useInstanceActions(instance: Instance | undefined) {
         onSelect: remove,
       },
     ]
-  }, [instance, id, store, rename, clone, snapshot, remove, revealFolder, openWebUI, openWebUIInBrowser])
+  }, [instance, id, store, ui, onDetailPage, rename, clone, snapshot, remove, revealFolder, openWebUI, openWebUIInBrowser])
 
   return {
     clone,
