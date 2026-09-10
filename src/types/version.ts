@@ -61,8 +61,37 @@ export interface DshVersion {
 }
 
 export const isVersionInstalled = (v: DshVersion) => v.state.kind === 'installed'
-export const isVersionBusy = (v: DshVersion) =>
-  v.state.kind === 'queued' ||
-  v.state.kind === 'downloading' ||
-  v.state.kind === 'extracting' ||
-  v.state.kind === 'verifying'
+
+/**
+ * The single source of truth for "an operation on this version is in flight".
+ * Every busy / active / keep predicate derives from this list — the per-set
+ * literals that used to live in catalogStore, the refresh merge, the wizard
+ * and the pages each drifted the moment a kind was added
+ * (`installing-deps` and `removing` both landed in some and not others).
+ *
+ * `removing` belongs here even though it never enters the transfer queue:
+ * the tree walk is disk work that must count as busy for the data-root
+ * migration guard and must disable the row's buttons.
+ */
+export const VERSION_TRANSITIONING_KINDS: readonly VersionInstallState['kind'][] = [
+  'queued',
+  'downloading',
+  'extracting',
+  'verifying',
+  'installing-deps',
+  'removing',
+]
+
+export const isVersionBusyKind = (kind: VersionInstallState['kind']) =>
+  VERSION_TRANSITIONING_KINDS.includes(kind)
+
+export const isVersionBusy = (v: DshVersion) => isVersionBusyKind(v.state.kind)
+
+/**
+ * Whether a refresh from disk may overwrite this row's optimistic state.
+ * In-flight kinds lag the disk (the marker is written when the operation
+ * completes); `failed` is kept too because the disk has no shape for it —
+ * dropping it would flip a failed row back to "available" on the next poll.
+ */
+export const keepVersionStateOnRefresh = (kind: VersionInstallState['kind']) =>
+  isVersionBusyKind(kind) || kind === 'failed'

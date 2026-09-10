@@ -1,5 +1,6 @@
 import { Cancelled, repository } from '@/services'
 import type { DshVersion } from '@/types'
+import { keepVersionStateOnRefresh } from '@/types/version'
 import { parseThrownError } from '@/lib/errorCodes'
 import { acquireTransferSlot, releaseTransferSlot } from './transferCoordinator'
 import { maybeHintMirror, observePendingReleases, officialRegistryLooksSlow } from './catalogNotifications'
@@ -19,11 +20,12 @@ export function createVersionActions(
       set({ versionsSyncing: true, versionsSyncAttemptedAt: Date.now() })
       try {
         const next = await repository.listVersions()
-        const keep = new Set(['queued', 'downloading', 'extracting', 'verifying', 'failed'])
         const prev = new Map(get().versions.map((version) => [version.id, version]))
         const merged = next.map((version) => {
           const old = prev.get(version.id)
-          return old && keep.has(old.state.kind) ? { ...version, state: old.state } : version
+          return old && keepVersionStateOnRefresh(old.state.kind)
+            ? { ...version, state: old.state }
+            : version
         })
         const added = merged.filter((version) => !prev.has(version.id))
         set({ versions: merged, versionsLoaded: true, versionsSyncedAt: Date.now() })
