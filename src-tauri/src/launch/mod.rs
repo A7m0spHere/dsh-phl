@@ -77,6 +77,26 @@ pub struct LaunchEvent {
     pub detail: Option<String>,
 }
 
+/// The slice of the global launch timeline owned by the install-deps
+/// self-heal. `prepare-home` (the next stage) is pinned at 0.12, so the
+/// window must stay below that floor with room to spare.
+const DEPS_PROGRESS_WINDOW: (f64, f64) = (0.02, 0.10);
+
+/// Map a *phase-local* 0..1 progress (what `install_version_deps` reports:
+/// an indeterminate ramp per npm attempt, ending at 1.0 on success) onto the
+/// global launch timeline. Handing the raw value to the frontend is what made
+/// the launch bar regress — `95% → 100% → prepare-home 12%` — because the
+/// installer's number is progress *inside* its phase, not across the launch.
+pub(crate) fn map_launch_phase_progress(stage: &str, phase_progress: f64) -> f64 {
+    match stage {
+        "install-deps" => {
+            let (lo, hi) = DEPS_PROGRESS_WINDOW;
+            lo + (hi - lo) * phase_progress.clamp(0.0, 1.0)
+        }
+        _ => phase_progress,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessEntry {
     pub pid: u32,
@@ -653,17 +673,30 @@ async fn run_launch(
     // Repair it on the spot so existing installs self-heal on first launch.
     let version_dir = root.join("versions").join(&version_name);
     if crate::versions::version_deps_missing(&version_dir) {
+        // The installer's ramp restarts per npm attempt, so the *global*
+        // timeline is additionally floored at the highest value already sent:
+        // within its window the launch bar only ever moves forward.
+        let emitted = std::sync::Mutex::new(map_launch_phase_progress("install-deps", 0.0));
         let _ = on_progress.send(LaunchEvent {
             stage: "install-deps".into(),
-            progress: 0.1,
+            progress: *emitted.lock().unwrap(),
             detail: Some(version_name.clone()),
         });
         let node = resolve_node(root, &runtime_name)?;
+        let floor = &emitted;
+        let version_for_detail = version_name.clone();
         crate::versions::install_version_deps(&node, &version_dir, registry_base, cancel, |p| {
+            let mapped = map_launch_phase_progress("install-deps", p);
+            let mut last = floor.lock().unwrap();
+            if mapped > *last {
+                *last = mapped;
+            } else {
+                return;
+            }
             let _ = on_progress.send(LaunchEvent {
                 stage: "install-deps".into(),
-                progress: p,
-                detail: Some(version_name.clone()),
+                progress: mapped,
+                detail: Some(version_for_detail.clone()),
             });
         })
         .await
@@ -1012,6 +1045,50 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::path::PathBuf;
+
+    #[test]
+    fn deps_selfheal_progress_maps_into_a_monotonic_global_window() {
+        // The shape `install_version_deps` really emits: a per-attempt ramp
+        // (capped at 0.95) that RESTARTS when a pruned 404 retries, and a
+        // final 1.0 on success.
+        let phase: Vec<f64> = vec![0.10, 0.55, 0.95, 0.05, 0.80, 0.95, 1.0];
+        let mapped: Vec<f64> = phase
+            .iter()
+            .map(|p| map_launch_phase_progress("install-deps", *p))
+            .collect();
+        // Inside its window the ramp restarts, so raw mapped values may dip
+        // — that is what the launch-side floor absorbs.
+        let mut floor = 0.0f64;
+        let global: Vec<f64> = mapped
+            .iter()
+            .map(|m| {
+                floor = floor.max(*m);
+                floor
+            })
+            .collect();
+        for w in global.windows(2) {
+            assert!(w[1] >= w[0], "global launch bar regressed: {global:?}");
+        }
+        // The window must sit strictly below every later stage's pinned
+        // value, or the hand-off regresses at exactly the boundary.
+        let deps_ceiling = *global.last().unwrap();
+        for later in [0.12, 0.24, 0.30, 0.36, 0.97, 1.0] {
+            assert!(
+                deps_ceiling < later,
+                "install-deps ceiling {deps_ceiling} must stay below the later stage at {later}"
+            );
+        }
+        // Other stages are the global scale already: pass-through.
+        for stage in [
+            "prepare-home",
+            "link-plugins",
+            "allocate-port",
+            "spawn",
+            "await-ready",
+        ] {
+            assert_eq!(map_launch_phase_progress(stage, 0.42), 0.42);
+        }
+    }
 
     #[test]
     fn uncertain_or_live_registration_blocks_a_second_launch() {
