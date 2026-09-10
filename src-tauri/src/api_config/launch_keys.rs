@@ -66,9 +66,12 @@ pub(crate) fn provider_launch_keys(
         .collect()
 }
 
-/// Launch-time key resolution with the credential store in the chain: a
-/// one-time key carried on the config wins, then the OS credential store,
-/// then nothing (the caller falls back to the system variable). Credentials
+/// Launch-time key resolution, below the environment in the priority chain:
+/// a one-time key carried on the config wins, then the OS credential store.
+/// The *caller* decides the first rank — an instance env or a real system
+/// variable of the same name is never overwritten (see the injector in
+/// `launch::launch_local_inner`), so what this returns is only consulted for
+/// names the environment does not already define. Credentials
 /// that cannot be read are skipped, not fatal — a broken store degrades to
 /// today's env-var behavior.
 pub(crate) async fn resolve_launch_keys(

@@ -1,10 +1,10 @@
-use super::launch_keys::provider_launch_keys;
+use super::launch_keys::{provider_launch_keys, resolve_launch_keys};
 use super::models::{
     api_error_message, fetch_models_inner, models_url, parse_models_body, ENV_MISSING,
 };
 use super::sync::{import_inner, sections_hash, snapshot_inner};
 use super::*;
-use crate::credentials::Creds;
+use crate::credentials::{Creds, CredentialStore};
 use std::path::PathBuf;
 /// A credential store backed by the real OS on Windows; the test entries
 /// it touches are namespaced and cleaned up by each test that uses one.
@@ -546,6 +546,45 @@ fn launch_keys_follow_the_binding_and_blankness() {
         ..Default::default()
     };
     assert!(provider_launch_keys(&c, &none).is_empty());
+}
+
+#[tokio::test]
+async fn resolve_launch_keys_orders_config_key_above_the_store() {
+    // Pins the documented chain BELOW the environment (the launcher's own
+    // gate keeps env first): a one-time config key wins over the stored
+    // credential, and the store fills only what the config does not carry.
+    let creds = test_creds();
+    let pid = std::process::id();
+    let mut c = config();
+    c.providers[0].id = format!("p-test-cfg-{pid}");
+    c.providers[0].api_key_env = format!("PHL_TEST_CFG_{pid}");
+    c.providers[0].api_key = Some("sk-from-config".into());
+    c.providers[1].id = format!("p-test-sto-{pid}");
+    c.providers[1].api_key_env = format!("PHL_TEST_STO_{pid}");
+    c.providers[1].api_key = None;
+    let binding = ApiBinding {
+        inheritance: "custom".into(),
+        provider_ids: vec![c.providers[0].id.clone(), c.providers[1].id.clone()],
+        ..Default::default()
+    };
+    if let Err(e) = creds.set(&c.providers[0].id, "sk-that-must-lose") {
+        // The platform store is Windows-only until T-301/T-302 land; the
+        // chain below the store cannot be exercised elsewhere.
+        eprintln!("skipping credential-store assertions: {e}");
+        return;
+    }
+    creds.set(&c.providers[1].id, "sk-from-store").unwrap();
+    let keys = resolve_launch_keys(&c, &binding, &creds).await;
+    let _ = creds.delete(&c.providers[0].id);
+    let _ = creds.delete(&c.providers[1].id);
+    assert_eq!(
+        keys,
+        vec![
+            (c.providers[0].api_key_env.clone(), "sk-from-config".to_string()),
+            (c.providers[1].api_key_env.clone(), "sk-from-store".to_string()),
+        ],
+        "config key first, store fallback second"
+    );
 }
 
 #[tokio::test]
