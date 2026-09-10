@@ -7,6 +7,8 @@ export type RuntimeInstallState =
   /** Waiting for a transfer slot (the concurrency cap is enforced now). */
   | { kind: 'queued' }
   | { kind: 'downloading'; progress: number; bytesDone: number; bytesPerSec: number }
+  /** SHASUMS fetch + checksum compare — real work, no ratio to show. */
+  | { kind: 'verifying' }
   | { kind: 'extracting'; progress: number }
   | { kind: 'installed'; installedAt: string }
   | { kind: 'failed'; reason: string }

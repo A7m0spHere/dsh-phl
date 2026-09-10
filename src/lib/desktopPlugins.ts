@@ -29,7 +29,15 @@ export interface RemotePluginMeta {
   releases: []
 }
 
-export type PluginProgressStage = 'preparing' | 'downloading' | 'verifying' | 'installing'
+/** Exactly the Rust `PluginProgressEvent` wire words (camelCase serde tags).
+ *  `installingDeps` (pnpm) and `committing` carry no numbers — unit variants. */
+export type PluginProgressStage =
+  | 'preparing'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'installingDeps'
+  | 'committing'
 
 /** Mirrors the Rust `PluginCatalogWire` — entries plus fetch provenance. */
 export interface RemotePluginCatalog {
@@ -61,9 +69,9 @@ export interface InstallPluginArgs {
   instanceId: string
   onProgress: (event: {
     stage: PluginProgressStage
-    progress: number
-    bytesDone: number
-    bytesPerSec: number
+    progress?: number
+    bytesDone?: number
+    bytesPerSec?: number
   }) => void
 }
 

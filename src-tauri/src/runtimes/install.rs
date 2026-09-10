@@ -27,6 +27,9 @@ pub(crate) struct RuntimeMarker {
     pub(crate) version: String,
 }
 
+// The install pipeline threads flag + task + channel through every stage;
+// bundling them would obscure which installer owns which cancel/registry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_runtime_install(
     flag: &Arc<AtomicBool>,
     dist_base: &str,
@@ -34,6 +37,7 @@ pub(crate) async fn run_runtime_install(
     version: &str,
     root: &Path,
     keep_archive: bool,
+    task: &crate::resources::Task,
     on_progress: &Channel<ProgressEvent>,
 ) -> Result<(), String> {
     // `version_name` is `node-<major>` (the install directory, and what the
@@ -78,31 +82,36 @@ pub(crate) async fn run_runtime_install(
         &part_path,
         None,
         &|progress, bytes_done, bytes_per_sec| {
-            let _ = on_progress.send(ProgressEvent::Downloading {
+            let ev = ProgressEvent::Downloading {
                 progress,
                 bytes_done,
                 bytes_per_sec,
-            });
+            };
+            // One event, two consumers: the page's bar and the task center.
+            crate::versions::sync_task_progress(task, &ev);
+            let _ = on_progress.send(ev);
         },
     )
     .await?;
 
-    on_progress
-        .send(ProgressEvent::Verifying)
-        .map_err(|e| e.to_string())?;
+    let ev = ProgressEvent::Verifying;
+    crate::versions::sync_task_progress(task, &ev);
+    on_progress.send(ev).map_err(|e| e.to_string())?;
     let client = http_client();
     let shasums = fetch_shasums(&client, base, &version).await?;
     check_shasums(&shasums, &filename, &downloaded.sha256)?;
 
-    on_progress
-        .send(ProgressEvent::Extracting { progress: 0.0 })
-        .map_err(|e| e.to_string())?;
+    let ev = ProgressEvent::Extracting { progress: 0.0 };
+    crate::versions::sync_task_progress(task, &ev);
+    on_progress.send(ev).map_err(|e| e.to_string())?;
     if platform.ends_with(".zip") {
         extract_zip(
             &part_path,
             &staging,
             &|progress| {
-                let _ = on_progress.send(ProgressEvent::Extracting { progress });
+                let ev = ProgressEvent::Extracting { progress };
+                crate::versions::sync_task_progress(task, &ev);
+                let _ = on_progress.send(ev);
             },
             flag,
         )
@@ -114,7 +123,9 @@ pub(crate) async fn run_runtime_install(
             &part_path,
             &staging,
             &|progress| {
-                let _ = on_progress.send(ProgressEvent::Extracting { progress });
+                let ev = ProgressEvent::Extracting { progress };
+                crate::versions::sync_task_progress(task, &ev);
+                let _ = on_progress.send(ev);
             },
             flag,
         )
@@ -134,6 +145,8 @@ pub(crate) async fn run_runtime_install(
     // Health gate before the swap: the extracted tree must carry a runnable
     // node that reports exactly the requested version. A runtime that cannot
     // start its own binary must never replace a working one.
+    task.set_phase("checking");
+    task.set_progress(None);
     if let Err(e) = check_runtime_health(&staging, &version).await {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(format!("Runtime 校验未通过，安装中止: {e}"));
@@ -149,6 +162,7 @@ pub(crate) async fn run_runtime_install(
 
     // Swap in through the shared promote path: backup, rename, final verify
     // (marker version must match), rollback of the old tree on any failure.
+    task.set_phase("committing");
     crate::versions::promote_staged(&staging, &dest, &backup, &|installed: &Path| {
         let marker = std::fs::read_to_string(installed.join("phl-runtime.json"))
             .map_err(|e| format!("Runtime 标记读取失败: {e}"))?;

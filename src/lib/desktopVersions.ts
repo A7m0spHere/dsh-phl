@@ -97,11 +97,14 @@ export interface DownloadArgs {
   keepArchive: boolean
   /** Catalog size in bytes — the CDN often streams without content-length. */
   totalBytes?: number
+  /** Exactly the Rust `ProgressEvent` wire shape (`rename_all = "camelCase"`):
+   *  the npm dependency stage arrives as `installingDeps`, and the unit
+   *  variants carry no numbers. */
   onProgress: (event: {
-    stage: 'downloading' | 'extracting' | 'verifying'
-    progress: number
-    bytesDone: number
-    bytesPerSec: number
+    stage: 'downloading' | 'extracting' | 'verifying' | 'installingDeps'
+    progress?: number
+    bytesDone?: number
+    bytesPerSec?: number
   }) => void
 }
 

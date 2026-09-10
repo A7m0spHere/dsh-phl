@@ -83,7 +83,11 @@ export function createVersionActions(
               maybeHintMirror(() => officialRegistryLooksSlow(startedAt, progress.bytesDone ?? 0))
             } else if (progress.stage === 'extracting') {
               patch({ kind: 'extracting', progress: progress.progress ?? 0 })
-            } else if (progress.stage === 'installing-deps') {
+            } else if (progress.stage === 'installingDeps' || progress.stage === 'installing-deps') {
+              // The wire word is camelCase (the Rust enum's serde rename); the
+              // kebab form is the browser mock's. Before this matched, the
+              // longest stage of a cold install fell through to "verifying"
+              // and the page pinned the bar at a fake 97%.
               if (depsStartedAt === 0) depsStartedAt = Date.now()
               patch({ kind: 'installing-deps', progress: progress.progress ?? 0 })
               maybeHintMirror(() => Date.now() - depsStartedAt > 60_000)

@@ -116,6 +116,18 @@ fn manifest_plugins(json: serde_json::Value) -> Vec<PackPlugin> {
     serde_json::from_value(json).unwrap()
 }
 
+/// A throwaway task handle for tests that call into phase-reporting
+/// internals: the row lives in a map that nothing lists, so phase writes are
+/// observed only by whoever holds the handle — which is exactly "discard".
+fn test_task() -> crate::resources::Task {
+    crate::resources::Tasks::default()
+        .begin(
+            crate::resources::TaskInfo::new("pack-test".into(), "pack-install", "test".into(), &[]),
+            None,
+        )
+        .unwrap()
+}
+
 /// Write one embedded plugin folder into a staging profile the way unpack would
 /// (package.json + a source file), and return that folder path.
 fn stage_plugin(profile: &Path, folder: &str, package_json: &str) -> PathBuf {
@@ -141,6 +153,7 @@ async fn embedded_plugin_gets_a_marker_and_cordis_registration() {
             {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
         ])),
         &profile,
+        &test_task(),
     )
     .await
     .unwrap();
@@ -190,6 +203,7 @@ async fn scoped_embedded_plugin_registers_under_its_true_npm_name() {
             {"id":"acme/toolkit","version":"2.3.4","source":{"type":"embedded","path":"embedded/plugins/@acme/toolkit"}}
         ])),
         &profile,
+        &test_task(),
     )
     .await
     .unwrap();
@@ -225,6 +239,7 @@ async fn an_embedded_plugin_without_a_manifest_is_a_hard_error() {
             {"id":"ghost","version":"1.0","source":{"type":"embedded","path":"embedded/plugins/ghost"}}
         ])),
         &profile,
+        &test_task(),
     )
     .await;
     assert!(
@@ -260,6 +275,7 @@ async fn a_stale_carried_marker_is_overwritten_not_trusted() {
             {"id":"who/mine","version":"0.1.0","source":{"type":"embedded","path":"embedded/plugins/mine"}}
         ])),
         &profile,
+        &test_task(),
     )
     .await
     .unwrap();

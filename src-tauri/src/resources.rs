@@ -174,6 +174,11 @@ pub struct TaskInfo {
     pub label: String,
     pub resources: Vec<String>,
     pub phase: String,
+    /// A real 0..=1 ratio for the current phase, or `None` when the phase is
+    /// indeterminate (verification, npm/pnpm dependency installs). The task
+    /// center must not render a bar for `None` — inventing a percentage is
+    /// exactly the fake progress this field exists to eliminate.
+    pub progress: Option<f64>,
     pub state: TaskState,
     pub cancel_requested: bool,
     pub error: Option<String>,
@@ -190,6 +195,7 @@ impl TaskInfo {
             label,
             resources: resources.iter().map(|r| r.key()).collect(),
             phase: "started".into(),
+            progress: None,
             state: TaskState::Running,
             cancel_requested: false,
             error: None,
@@ -293,6 +299,15 @@ impl Task {
     pub fn set_phase(&self, phase: &str) {
         if let Some(info) = self.inner.lock().expect("tasks").get_mut(&self.id) {
             info.phase = phase.to_string();
+        }
+    }
+
+    /// Pairs with [`set_phase`](Self::set_phase): `Some(0.0..=1.0)` for a
+    /// phase with a real ratio, `None` to mark the phase indeterminate so the
+    /// UI drops the bar instead of showing a stale or fabricated number.
+    pub fn set_progress(&self, progress: Option<f64>) {
+        if let Some(info) = self.inner.lock().expect("tasks").get_mut(&self.id) {
+            info.progress = progress;
         }
     }
 

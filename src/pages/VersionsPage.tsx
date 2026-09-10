@@ -346,7 +346,7 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               <div className="pt-3">
                 <ProgressBar
                   value={'progress' in state ? state.progress : 0.97}
-                  indeterminate={state.kind === 'queued'}
+                  indeterminate={state.kind === 'queued' || state.kind === 'installing-deps'}
                   active={state.kind === 'downloading'}
                   height={4}
                 />
@@ -358,14 +358,20 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
                         ? `${formatBytes(state.bytesDone)} / ${formatBytes(version.size)}`
                         : state.kind === 'extracting'
                           ? '正在解压到版本目录…'
-                          : '正在校验完整性…'}
+                          : state.kind === 'installing-deps'
+                            ? // npm has no machine-readable progress without a TTY;
+                              // an indeterminate bar beats a fake percentage.
+                              '正在安装依赖（npm），冷安装可能需要几分钟…'
+                            : '正在校验完整性…'}
                   </span>
                   <span className="num">
                     {state.kind === 'downloading'
                       ? formatSpeed(state.bytesPerSec)
-                      : 'progress' in state
-                        ? `${Math.round(state.progress * 100)}%`
-                        : ''}
+                      : state.kind === 'installing-deps'
+                        ? ''
+                        : 'progress' in state
+                          ? `${Math.round(state.progress * 100)}%`
+                          : ''}
                   </span>
                 </div>
               </div>

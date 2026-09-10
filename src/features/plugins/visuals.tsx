@@ -48,7 +48,13 @@ export const STAGE_LABEL: Record<string, string> = {
   downloading: '下载中',
   verifying: '校验中',
   installing: '安装中',
+  deps: '安装依赖（pnpm）…',
+  committing: '提交变更…',
 }
+
+/** Stages with no trustworthy ratio — npm/pnpm only draw their bar on a TTY,
+ *  so the card shows an indeterminate pulse instead of freezing at 100%. */
+const INDETERMINATE_STAGES = new Set(['queued', 'preparing', 'verifying', 'deps', 'committing'])
 
 export function SourceBadge({ plugin }: { plugin: Plugin }) {
   if (plugin.source.kind === 'npm') {
@@ -189,6 +195,7 @@ export function TransferInline({ instanceId, pluginId }: { instanceId: string; p
           <div className="pt-3">
             <ProgressBar
               value={transfer.progress}
+              indeterminate={INDETERMINATE_STAGES.has(transfer.stage)}
               height={4}
               active={transfer.stage === 'downloading'}
             />
@@ -203,7 +210,11 @@ export function TransferInline({ instanceId, pluginId }: { instanceId: string; p
                 <span className="num">
                   {transfer.stage === 'downloading' && transfer.bytesPerSec > 0
                     ? formatSpeed(transfer.bytesPerSec)
-                    : `${Math.round(transfer.progress * 100)}%`}
+                    : INDETERMINATE_STAGES.has(transfer.stage)
+                      ? // A fabricated percentage under "安装中" read as progress
+                        // the pipeline never had — show elapsed work, not a number.
+                        ''
+                      : `${Math.round(transfer.progress * 100)}%`}
                 </span>
                 <Button size="sm" variant="ghost" onClick={() => cancel(instanceId, pluginId)}>
                   取消

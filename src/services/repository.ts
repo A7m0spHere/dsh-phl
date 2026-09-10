@@ -102,10 +102,15 @@ export interface TransferProgress {
   bytesDone?: number
   bytesPerSec?: number
   /**
-   * `extracting` and `installing-deps` are the version pipeline (tar unpack,
-   * then npm materialising the version's own dependencies); plugins use
-   * `preparing` (resolve tarball) and `installing` (unpack + register) so the
-   * UI can label the PCL-style stages precisely.
+   * Stage words arrive exactly as the Rust backends serialize them — the
+   * progress enums carry `#[serde(rename_all = "camelCase")]`, so the npm
+   * dependency stage is `installingDeps` on the wire (the old frontend
+   * switch looked for kebab `installing-deps` and silently fell through to
+   * "verifying" — the frozen 97% bar). `installing-deps` remains in the union
+   * for the browser mock. `extracting` / `installingDeps` are the version
+   * pipeline (tar unpack, then npm materialising the version's own deps);
+   * plugins use `preparing` / `installing` / `committing` so the UI can label
+   * the stages precisely.
    */
   stage:
     | 'preparing'
@@ -113,7 +118,9 @@ export interface TransferProgress {
     | 'extracting'
     | 'verifying'
     | 'installing-deps'
+    | 'installingDeps'
     | 'installing'
+    | 'committing'
 }
 
 /** Progress of a local tree copy (snapshot create / clone). */
