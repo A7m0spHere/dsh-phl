@@ -270,6 +270,10 @@ pub(crate) async fn write_manifest(dir: &Path, manifest: &InstanceManifest) -> R
     // stamp must reflect this build, not round-trip stale state.
     let mut manifest = manifest.clone();
     manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+    // Last-line guarantee: a phantom version binding (a bare or unsafe string
+    // where the canonical `dsh-<ver>` id belongs) must never reach disk,
+    // whoever the writer was. See `instances::canonicalize_version_binding`.
+    super::canonicalize_version_binding(&mut manifest);
 
     let path = manifest_path(dir);
     // One-time backup when this write changes the on-disk schema — a legacy

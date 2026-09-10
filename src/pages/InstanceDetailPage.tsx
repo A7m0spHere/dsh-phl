@@ -19,6 +19,7 @@ import {
 import { cn } from '@/lib/cn'
 import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
 import { instanceSessionCount } from '@/lib/desktop'
+import { resolveBoundVersion } from '@/lib/instanceVersion'
 import { formatBytes, formatDateTime, formatDuration, formatRelative } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
@@ -58,7 +59,7 @@ export function InstanceDetailPanel({ id }: { id: string }) {
   const states = useInstanceStore((s) => s.states)
   const push = useUIStore((s) => s.push)
   const instance = instances.find((i) => i.id === id)
-  const version = useCatalogStore((s) => s.versions.find((v) => v.id === instance?.versionId))
+  const version = useCatalogStore((s) => resolveBoundVersion(s.versions, instance?.versionId))
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance?.runtimeId))
 
   return (
@@ -173,7 +174,9 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const beginEdit = () => {
     if (!instance) return
     setEdit({
-      versionId: instance.versionId,
+      // Start editing from the RESOLVED id: a legacy bare-version binding
+      // becomes canonical on save, so the bad value cannot outlive the edit.
+      versionId: resolveBoundVersion(versions, instance.versionId)?.id ?? instance.versionId,
       runtimeId: instance.runtimeId,
       port: instance.port,
       autoPort: instance.autoPort,
@@ -199,7 +202,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
     })
   }
 
-  const version = versions.find((v) => v.id === instance?.versionId)
+  const version = resolveBoundVersion(versions, instance?.versionId)
   const runtime = runtimes.find((r) => r.id === instance?.runtimeId)
 
   const pluginRows = useMemo(() => {
@@ -387,9 +390,9 @@ export function InstanceDetailPage({ id }: { id: string }) {
               <p>{state.error.detail}</p>
               {state.error.hint && <p className="mt-1 text-ink-faint">{state.error.hint}</p>}
               <div className="mt-2.5 flex gap-2">
-                {version && version.state.kind !== 'installed' && (
+                {(!version || version.state.kind !== 'installed') && (
                   <Button size="sm" variant="primary" onClick={() => navigate({ name: 'versions' })}>
-                    去安装 DSH {version.name}
+                    {version ? `去安装 DSH ${version.name}` : '去「版本」页安装 DSH'}
                   </Button>
                 )}
                 {runtime && runtime.state.kind !== 'installed' && (
@@ -450,6 +453,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       value={edit.versionId}
                       onChange={(e) => setEdit({ ...edit, versionId: e.target.value })}
                     >
+                      {/* A controlled select renders blank when its value is
+                          not among the options — which is exactly the state a
+                          legacy or unbound instance opens in. Keep the
+                          current value visible so the dropdown is never an
+                          empty mystery. */}
+                      {!versions.some((v) => v.id === edit.versionId) && (
+                        <option value={edit.versionId}>
+                          {edit.versionId ? `当前绑定：${edit.versionId}（未识别）` : '未绑定版本'}
+                        </option>
+                      )}
                       {versions.map((v) => (
                         <option key={v.id} value={v.id}>
                           {v.name}
@@ -529,11 +542,15 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   label="DSH 版本"
                   value={
                     <span className="flex items-center gap-2">
-                      {version?.name ?? instance.versionId}
-                      {version?.state.kind === 'installed' ? (
-                        <Badge tone="ok">已安装</Badge>
+                      {version?.name ?? (instance.versionId || '未绑定版本')}
+                      {version ? (
+                        version.state.kind === 'installed' ? (
+                          <Badge tone="ok">已安装</Badge>
+                        ) : (
+                          <Badge tone="warn">未安装</Badge>
+                        )
                       ) : (
-                        <Badge tone="warn">未安装</Badge>
+                        <Badge tone="warn">未绑定</Badge>
                       )}
                       {version?.legacy && <Badge tone="neutral">Legacy</Badge>}
                     </span>
@@ -552,13 +569,22 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   }
                 />
                 <DataRow label="Profile" value={instance.profile} />
+                {instance.managementMode === 'external' && (
+                  <p className="mt-1 text-xs leading-relaxed text-ink-faint">
+                    原地接入：源 DSH 自带的可执行程序不在 PHL 管理范围内，其版本也不会被读取；启动时由上方绑定的版本运行这份环境。
+                  </p>
+                )}
               </div>
               <div>
                 <DataRow
                   label="端口"
                   value={
                     <span className="flex items-center gap-2">
-                      <Chip>:{instance.port}</Chip>
+                      {instance.port ? (
+                        <Chip>:{instance.port}</Chip>
+                      ) : (
+                        <span className="text-sm text-ink-faint">未分配</span>
+                      )}
                       {instance.autoPort && <span className="text-sm text-ink-faint">自动分配</span>}
                     </span>
                   }

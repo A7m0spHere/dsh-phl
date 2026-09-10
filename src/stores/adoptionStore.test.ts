@@ -48,11 +48,18 @@ vi.mock('@/lib/desktop', () => ({
   chooseDshExecutable: mocks.chooseDshExecutable,
 }))
 vi.mock('@/lib/desktopCore', () => ({ isDesktop: true }))
+// The store reads the catalog for version pre-binding; the repository surface
+// is irrelevant here (same stub pattern as catalogStore.test).
+vi.mock('@/services', () => ({
+  repository: {},
+  Cancelled: class Cancelled extends Error {},
+}))
 vi.mock('./instanceStore', () => ({
   useInstanceStore: { getState: () => ({ admitInstance: mocks.admit, load: mocks.load }) },
 }))
 vi.mock('./uiStore', () => ({ useUIStore: { getState: () => ({ toast: mocks.toast, push: mocks.push }) } }))
 import { useAdoptionStore } from './adoptionStore'
+import { useCatalogStore } from './catalogStore'
 
 function candidate(over: Partial<RemoteDshCandidate> = {}): RemoteDshCandidate {
   return {
@@ -107,7 +114,7 @@ it('does not advance from discovery when the pick is already managed', () => {
 })
 
 it('records a submission failure without admitting an instance', async () => {
-  useAdoptionStore.setState({ selectedId: 'dsh-abc', name: '我的 DSH' })
+  useAdoptionStore.setState({ selectedId: 'dsh-abc', name: '我的 DSH', versionId: 'dsh-0.1.2-rc.1' })
   mocks.previewAdoption.mockResolvedValue({
     sourceHome: '/home/me/.dsh', mode: 'managed-copy', sessionStrategy: 'all', profile: 'web',
     detectedVersion: '0.1.2-rc.1', pluginCount: 5, sessionCount: 12, copyBytes: 10,
@@ -121,7 +128,7 @@ it('records a submission failure without admitting an instance', async () => {
 })
 
 it('admits and reloads the instance list on a successful commit', async () => {
-  useAdoptionStore.setState({ selectedId: 'dsh-abc', name: '我的 DSH' })
+  useAdoptionStore.setState({ selectedId: 'dsh-abc', name: '我的 DSH', versionId: 'dsh-0.1.2-rc.1' })
   mocks.previewAdoption.mockResolvedValue({
     sourceHome: '/home/me/.dsh', mode: 'managed-copy', sessionStrategy: 'none', profile: 'web',
     detectedVersion: '0.1.2-rc.1', pluginCount: 5, sessionCount: 0, copyBytes: 10,
@@ -191,6 +198,7 @@ it('passes the selected dirs through preview and commit', async () => {
     name: '我的 DSH',
     sessionStrategy: 'selected',
     selectedSessionDirs: ['session-a'],
+    versionId: 'dsh-0.1.2-rc.1',
   })
   mocks.previewAdoption.mockResolvedValue(selectedPreview())
   mocks.adoptInstance.mockResolvedValue({
@@ -210,7 +218,54 @@ it('passes the selected dirs through preview and commit', async () => {
   await useAdoptionStore.getState().commit()
   const commitReq = mocks.adoptInstance.mock.calls[0][0]
   expect(commitReq.sessionDirs).toEqual(['session-a'])
+  // The binding travels as the canonical id, never the bare detected version.
+  expect(commitReq.manifest.versionId).toBe('dsh-0.1.2-rc.1')
   expect(mocks.toast).toHaveBeenCalledWith(
     expect.objectContaining({ message: expect.stringContaining('已迁移 1 条') }),
   )
+})
+
+/* ---------------------------- version binding ---------------------------- */
+
+it('refuses to preview without a version binding', async () => {
+  useAdoptionStore.setState({ selectedId: 'dsh-abc', name: 'x' })
+  await useAdoptionStore.getState().toPreview()
+  expect(useAdoptionStore.getState().step).toBe('discover')
+  expect(mocks.previewAdoption).not.toHaveBeenCalled()
+})
+
+it('pre-binds the detected version when PHL has it installed', () => {
+  useCatalogStore.setState({
+    versions: [
+      { id: 'dsh-0.1.2-rc.1', name: '0.1.2-rc.1', state: { kind: 'installed' } },
+      { id: 'dsh-0.2.0', name: '0.2.0', state: { kind: 'available' } },
+    ],
+  } as never)
+  useAdoptionStore.setState({ selectedId: 'dsh-abc' })
+  useAdoptionStore.getState().toConfigure()
+  expect(useAdoptionStore.getState().versionId).toBe('dsh-0.1.2-rc.1')
+  useCatalogStore.setState({ versions: [] })
+})
+
+it('leaves the binding empty when the detection matches nothing', () => {
+  useCatalogStore.setState({
+    versions: [
+      { id: 'dsh-0.2.0', name: '0.2.0', state: { kind: 'installed' } },
+      { id: 'dsh-0.3.0', name: '0.3.0', state: { kind: 'installed' } },
+    ],
+  } as never)
+  useAdoptionStore.setState({ selectedId: 'dsh-abc' })
+  useAdoptionStore.getState().toConfigure()
+  expect(useAdoptionStore.getState().versionId).toBe('')
+  useCatalogStore.setState({ versions: [] })
+})
+
+it('auto-binds the only installed version when the detection differs', () => {
+  useCatalogStore.setState({
+    versions: [{ id: 'dsh-0.2.0', name: '0.2.0', state: { kind: 'installed' } }],
+  } as never)
+  useAdoptionStore.setState({ selectedId: 'dsh-abc' })
+  useAdoptionStore.getState().toConfigure()
+  expect(useAdoptionStore.getState().versionId).toBe('dsh-0.2.0')
+  useCatalogStore.setState({ versions: [] })
 })

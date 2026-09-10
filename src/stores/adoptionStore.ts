@@ -16,6 +16,7 @@ import {
   type RemoteSessionInfo,
 } from '@/lib/desktop'
 import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
+import { useCatalogStore } from './catalogStore'
 import { useInstanceStore } from './instanceStore'
 import { useUIStore } from './uiStore'
 
@@ -47,6 +48,13 @@ interface AdoptionState {
   name: string
   mode: AdoptionMode
   sessionStrategy: AdoptionSessionStrategy
+  /**
+   * The DSH version the adopted instance will run — a canonical `dsh-<ver>`
+   * catalog id, not the bare detected version. The copied environment is
+   * configuration only; the program files always come from PHL's version
+   * store, so adoption without a real binding could never launch.
+   */
+  versionId: string
   // The "选择对话" picker: the source home's conversations (lazily listed)
   // and the session dir names the user checked. Only read when the strategy
   // is `selected`.
@@ -71,6 +79,7 @@ interface AdoptionState {
   back: () => void
   setName: (name: string) => void
   setMode: (mode: AdoptionMode) => void
+  setVersionId: (id: string) => void
   setSessionStrategy: (s: AdoptionSessionStrategy) => void
   loadSourceSessions: () => Promise<void>
   toggleSessionDir: (dir: string) => void
@@ -94,6 +103,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
   name: '',
   mode: 'managed-copy',
   sessionStrategy: 'all',
+  versionId: '',
   sourceSessions: null,
   sourceSessionsError: null,
   selectedSessionDirs: [],
@@ -115,6 +125,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       name: '',
       mode: 'managed-copy',
       sessionStrategy: 'all',
+      versionId: '',
       sourceSessions: null,
       sourceSessionsError: null,
       selectedSessionDirs: [],
@@ -173,13 +184,16 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
   },
 
   select(id) {
-    // A different source home invalidates the lazily-listed conversations.
+    // A different source home invalidates the lazily-listed conversations —
+    // and the pre-bound version, which was chosen from this candidate's
+    // detection.
     if (get().selectedId !== id) {
       set({
         selectedId: id,
         sourceSessions: null,
         sourceSessionsError: null,
         selectedSessionDirs: [],
+        versionId: '',
       })
     } else {
       set({ selectedId: id })
@@ -200,6 +214,10 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
     // External in-place adoption always keeps the home's own history; force the
     // strategy so the preview never computes a meaningless exclusion.
     set(mode === 'external' ? { mode, sessionStrategy: 'all' } : { mode })
+  },
+
+  setVersionId(versionId) {
+    set({ versionId })
   },
 
   setSessionStrategy(s) {
@@ -242,13 +260,30 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
     }
     // Seed the name from the display label; strip a leading `~/.` noise.
     if (!get().name) set({ name: candidate.displayName.replace(/^~[\\/]/, '') || '接入的 DSH' })
+    // Pre-bind a version: the detected one when PHL has it installed (the
+    // common case for a home that was itself PHL-managed before), otherwise
+    // the only installed version when there is exactly one. Anything else
+    // stays empty and the picker requires an explicit choice — an adopted
+    // environment cannot launch without a real `dsh-<ver>` binding, and the
+    // bare detected string must never be persisted as one.
+    if (!get().versionId) {
+      const installed = useCatalogStore.getState().versions.filter((v) => v.state.kind === 'installed')
+      const detected = candidate.detectedVersion
+      const match = detected
+        ? installed.find((v) => v.id === `dsh-${detected}` || v.name === detected)
+        : undefined
+      set({ versionId: match?.id ?? (installed.length === 1 ? installed[0].id : '') })
+    }
     set({ step: 'configure' })
   },
 
   async toPreview() {
     const candidate = get().selected()
     if (!candidate) return
-    const { name, mode, sessionStrategy, selectedSessionDirs } = get()
+    const { name, mode, sessionStrategy, selectedSessionDirs, versionId } = get()
+    // No binding, no preview: the version is a required choice on the
+    // configure step (see the pre-binding note in `toConfigure`).
+    if (!versionId) return
     // The picker's own contract: "选择对话" without any check is a user error,
     // not a backend round-trip.
     if (sessionStrategy === 'selected' && selectedSessionDirs.length === 0) return
@@ -259,7 +294,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
         mode,
         sessionStrategy,
         sessionDirs: sessionStrategy === 'selected' ? selectedSessionDirs : [],
-        manifest: adoptionManifest(candidate, name),
+        manifest: adoptionManifest(candidate, name, versionId),
       })
       set({ preview, previewState: 'ready' })
     } catch (err) {
@@ -281,7 +316,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
           mode: preview.mode,
           sessionStrategy: preview.sessionStrategy,
           sessionDirs: preview.sessionStrategy === 'selected' ? selectedSessionDirs : [],
-          manifest: adoptionManifest(candidate, get().name),
+          manifest: adoptionManifest(candidate, get().name, get().versionId),
         },
         (p) => set({ progress: p.progress }),
       )
@@ -309,15 +344,18 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
 /**
  * The identity + environment manifest adoption persists. Only the fields the
  * user names here are sent; Rust owns the management fields (mode, external
- * home, provenance). `versionId` borrows the detected version so the version
- * flow can offer to install it; `runtimeId` maps the detected Node major to
- * PHL's `node-<major>` runtime, falling back to `node-system` (the runtime
- * entry that runs `node` off PATH) when the version is unknown — `node` alone
- * is not a runtime id and would never resolve.
+ * home, provenance). `versionId` is the canonical `dsh-<ver>` binding chosen
+ * on the configure step — never the bare detected version, which would bind
+ * the instance to a phantom (see `lib/instanceVersion`). `runtimeId` maps the
+ * detected Node major to PHL's `node-<major>` runtime, falling back to
+ * `node-system` (the runtime entry that runs `node` off PATH) when the
+ * version is unknown — `node` alone is not a runtime id and would never
+ * resolve.
  */
 function adoptionManifest(
   candidate: RemoteDshCandidate,
   name: string,
+  versionId: string,
 ): import('@/lib/desktop').RemoteInstanceManifest {
   return {
     id: newInstanceId(name || candidate.displayName),
@@ -325,7 +363,7 @@ function adoptionManifest(
     note: '接入的本机 DSH',
     kind: 'sandbox',
     hue: 0,
-    versionId: candidate.detectedVersion ?? '',
+    versionId,
     runtimeId: candidate.nodeVersion
       ? `node-${candidate.nodeVersion.split('.')[0]}`
       : 'node-system',

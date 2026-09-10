@@ -45,6 +45,15 @@ async function launch(
   // matrix come from the catalog, and the failures read with the same titles
   // as the mock flow did.
   if (!ctx.version || ctx.version.state.kind !== 'installed') {
+    // An unbound instance (empty binding) is a missing decision, not a
+    // missing download — say which, so the hint points at the picker.
+    if (!(instance.versionId ?? '').trim()) {
+      throw new LaunchError(
+        '尚未选择 DSH 版本',
+        '这个实例还没有绑定 DSH 版本。',
+        '在「运行环境」里选择一个已安装版本，或到「版本」页面先下载。',
+      )
+    }
     throw new LaunchError(
       'DSH 版本未安装',
       `实例固定使用 ${ctx.version?.name ?? instance.versionId}，但它还没有安装到本机。`,
