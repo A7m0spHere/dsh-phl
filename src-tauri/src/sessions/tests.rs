@@ -88,6 +88,58 @@ async fn copies_into_a_managed_target_and_reports_the_fork() {
 }
 
 #[tokio::test]
+async fn fan_out_progress_counts_every_landed_pair() {
+    // The select-all path: 2 sessions × 2 targets must stream (1,4)..(4,4).
+    // The old per-copy event carried a constant done:0/total:0, which made a
+    // four-unit copy read as if nothing had landed.
+    use tauri::ipc::InvokeResponseBody;
+    let r = root("progress");
+    make_instance(&r, "src", MM::ManagedCopy, None).await;
+    make_instance(&r, "dst-a", MM::ManagedCopy, None).await;
+    make_instance(&r, "dst-b", MM::ManagedCopy, None).await;
+    let src_home = r.join("instances").join("src").join("dsh-home");
+    seed_session(&src_home, "session-one");
+    seed_session(&src_home, "session-two");
+    let procs = Processes::default();
+
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = {
+        let seen = seen.clone();
+        tauri::ipc::Channel::new(move |body| {
+            // Channel::send serializes via IpcResponse — capture whichever
+            // encoding this build uses.
+            let raw = match body {
+                InvokeResponseBody::Raw(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                InvokeResponseBody::Json(text) => text,
+            };
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            seen.lock().unwrap().push((
+                v["done"].as_u64().unwrap() as usize,
+                v["total"].as_u64().unwrap() as usize,
+            ));
+            Ok(())
+        })
+    };
+    let out = copy_sessions_inner_with(
+        &r,
+        &procs,
+        "src",
+        &["session-one".into(), "session-two".into()],
+        &["dst-a".into(), "dst-b".into()],
+        Some(&sink),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.len(), 4);
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        vec![(1, 4), (2, 4), (3, 4), (4, 4)]
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+#[tokio::test]
 async fn external_target_is_refused_before_any_write() {
     let r = root("ext");
     make_instance(&r, "src", MM::ManagedCopy, None).await;

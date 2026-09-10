@@ -19,6 +19,7 @@ import {
   listSessions,
   type RemoteSessionCopyOutcome,
   type RemoteSessionInfo,
+  type RemoteSessionProgress,
 } from '@/lib/desktop'
 import { isDesktop } from '@/lib/desktopCore'
 import { formatDateTime } from '@/lib/format'
@@ -43,6 +44,9 @@ export function SessionCopyPanel({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [targets, setTargets] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  /** Live (session × target) completion while a copy runs — select-all makes
+   *  this a grid worth counting. */
+  const [progress, setProgress] = useState<RemoteSessionProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -89,9 +93,15 @@ export function SessionCopyPanel({
     })
     if (!ok) return
     setBusy(true)
+    setProgress(null)
     setError(null)
     try {
-      const out: RemoteSessionCopyOutcome[] = await copySessions(instanceId, dirs, tgts)
+      const out: RemoteSessionCopyOutcome[] = await copySessions(
+        instanceId,
+        dirs,
+        tgts,
+        (p) => setProgress(p),
+      )
       toast({
         kind: 'success',
         title: '历史对话已复制',
@@ -108,6 +118,7 @@ export function SessionCopyPanel({
       toast({ kind: 'error', title: '复制失败', message: msg })
     } finally {
       setBusy(false)
+      setProgress(null)
     }
   }
 
@@ -137,7 +148,24 @@ export function SessionCopyPanel({
   return (
     <div className="mt-2 flex flex-col gap-2 rounded-lg bg-surface-sunken p-2.5 ring-1 ring-inset ring-line">
       <div>
-        <p className="mb-1 text-xs font-medium text-ink-muted">选择对话（{sessions.length}）</p>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-xs font-medium text-ink-muted">
+            选择对话（{sessions.length}）
+            {selected.size > 0 && <span className="ml-1.5 text-accent-ink">已选 {selected.size}</span>}
+          </p>
+          <button
+            className="text-xs text-accent hover:underline"
+            onClick={() =>
+              setSelected(
+                selected.size === sessions.length
+                  ? new Set()
+                  : new Set(sessions.map((s) => s.sessionDir)),
+              )
+            }
+          >
+            {selected.size === sessions.length ? '取消全选' : `全选（${sessions.length}）`}
+          </button>
+        </div>
         <div className="max-h-44 space-y-1 overflow-y-auto">
           {sessions.map((s) => (
             <label
@@ -201,7 +229,9 @@ export function SessionCopyPanel({
           onClick={() => void run()}
         >
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Copy size={12} />}
-          复制到其他实例（{selected.size}→{targets.size}）
+          {busy && progress
+            ? `正在复制 ${progress.done}/${progress.total}…`
+            : `复制到其他实例（${selected.size}→${targets.size}）`}
         </Button>
       </div>
     </div>

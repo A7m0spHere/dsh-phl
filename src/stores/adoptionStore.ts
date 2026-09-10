@@ -83,6 +83,7 @@ interface AdoptionState {
   setSessionStrategy: (s: AdoptionSessionStrategy) => void
   loadSourceSessions: () => Promise<void>
   toggleSessionDir: (dir: string) => void
+  setSessionDirs: (dirs: string[]) => void
   toConfigure: () => void
   toPreview: () => Promise<void>
   commit: () => Promise<void>
@@ -248,6 +249,12 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
         ? s.selectedSessionDirs.filter((d) => d !== dir)
         : [...s.selectedSessionDirs, dir],
     }))
+  },
+
+  /** 全选/取消全选 for the picker — a long conversation list must not cost
+   *  one click per row. Replaces the selection with `dirs` verbatim. */
+  setSessionDirs(dirs) {
+    set({ selectedSessionDirs: [...dirs] })
   },
 
   toConfigure() {

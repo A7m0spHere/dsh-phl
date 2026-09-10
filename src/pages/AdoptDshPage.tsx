@@ -482,6 +482,7 @@ function SessionPicker() {
   const error = useAdoptionStore((s) => s.sourceSessionsError)
   const selected = useAdoptionStore((s) => s.selectedSessionDirs)
   const toggle = useAdoptionStore((s) => s.toggleSessionDir)
+  const setDirs = useAdoptionStore((s) => s.setSessionDirs)
   const reload = useAdoptionStore((s) => s.loadSourceSessions)
 
   return (
@@ -505,9 +506,25 @@ function SessionPicker() {
       )}
       {!error && sessions !== null && sessions.length > 0 && (
         <>
-          <p className="mb-1 text-xs font-medium text-ink-muted">
-            选择对话（{sessions.length}）· 已选 {selected.length}
-          </p>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-ink-muted">
+              选择对话（{sessions.length}）· 已选 {selected.length}
+            </p>
+            {/* 全选/取消全选 — a long conversation list must not cost one
+                click per row (same affordance as the detail page panel). */}
+            <button
+              className="text-xs text-accent hover:underline"
+              onClick={() =>
+                setDirs(
+                  selected.length === sessions.length
+                    ? []
+                    : sessions.map((s) => s.sessionDir),
+                )
+              }
+            >
+              {selected.length === sessions.length ? '取消全选' : `全选（${sessions.length}）`}
+            </button>
+          </div>
           <div className="max-h-44 space-y-1 overflow-y-auto">
             {sessions.map((s) => (
               <label key={s.sessionDir} className="flex cursor-pointer items-center gap-2 text-sm">
