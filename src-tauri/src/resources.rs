@@ -139,6 +139,10 @@ impl ResourceLocks {
     }
 
     /// Keys currently held — diagnostics only, never used for check-then-act.
+    /// Test view of the held keys. Production code must never enumerate the
+    /// lock set for display: conflicts surface through the coded Busy error
+    /// (with its `held_by` wording), and task rows carry their own resources.
+    #[cfg(test)]
     pub fn snapshot(&self) -> Vec<String> {
         let mut keys: Vec<String> = self
             .held
@@ -465,7 +469,9 @@ pub struct TaskList {
 /// second, un-labelled channel for the same facts and was deleted per audit.
 #[tauri::command]
 pub fn list_tasks(tasks: State<'_, Tasks>) -> TaskList {
-    TaskList { tasks: tasks.list() }
+    TaskList {
+        tasks: tasks.list(),
+    }
 }
 
 /* ------------------------------ tests ------------------------------ */

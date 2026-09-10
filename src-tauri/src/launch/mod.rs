@@ -39,8 +39,8 @@ pub(crate) use registry::{
 };
 
 pub(crate) use process::{
-    allocate_port, build_command, count_plugins, kill_tree, log_tail, node_binary, read_web_url,
-    resolve_node, CREATE_NO_WINDOW,
+    allocate_port, build_command, kill_tree, log_tail, node_binary, read_web_url, resolve_node,
+    CREATE_NO_WINDOW,
 };
 #[cfg(test)]
 pub(crate) use process::{check_kill_output, parse_web_url, port_free, redact_web_token};
@@ -769,7 +769,15 @@ async fn run_launch(
         detail: Some(dsh_home.to_string_lossy().into_owned()),
     });
 
-    let plugin_count = count_plugins(&dsh_home.join("profiles").join(&profile)).await;
+    // One plugin definition for the whole app: `instances::scan_plugins` is
+    // what the instance page lists and what DSH's own paperwork (install
+    // marker / cordis mount) says is a plugin. This used to count top-level
+    // `node_modules` entries — transitive deps counted, `@scope` collapsed
+    // to one, and the launch timeline's "N 个插件" disagreed with the page
+    // about the same concept.
+    let plugin_count = crate::instances::scan_plugins(&dsh_home.join("profiles").join(&profile))
+        .await
+        .len();
     let _ = on_progress.send(LaunchEvent {
         stage: "link-plugins".into(),
         progress: 0.24,

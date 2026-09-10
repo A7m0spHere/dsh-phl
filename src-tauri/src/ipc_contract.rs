@@ -193,7 +193,9 @@ fn manifest_round_trip_keeps_adoption_fields_and_defaults_v1() {
 #[test]
 fn task_registry_wire_shape_is_stable() {
     let tasks = crate::resources::Tasks::default();
-    let list = crate::resources::TaskList { tasks: tasks.list() };
+    let list = crate::resources::TaskList {
+        tasks: tasks.list(),
+    };
     let value = serde_json::to_value(&list).expect("serialize");
     assert_eq!(keys(&value), set(&["tasks"]));
     assert_eq!(value["tasks"], json!([]));
