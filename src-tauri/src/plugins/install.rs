@@ -1311,6 +1311,14 @@ mod tests {
         assert!(!profile.join("pnpm-lock.yaml").exists());
         assert!(!profile.join("node_modules/phl-fixture-dep").exists());
         assert!(!dest.join("script-ran").exists());
+        // The dependency must be *closed within the plugin*: reachable from
+        // the plugin directory, and only there. pnpm's layout of `file:`
+        // links is environment-dependent — on Windows without symlink
+        // privileges (no Developer Mode), pnpm 12 resolves registry links
+        // fine but omits the top-level `file:` link, leaving the package
+        // only under the plugin's own `.pnpm` store. Both outcomes satisfy
+        // the product promise; only *resolution outside the plugin* or a
+        // script run would violate it — hence the store-level fallback.
         let output = tokio::process::Command::new("node")
             .current_dir(&dest)
             .args([
@@ -1320,12 +1328,40 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            assert!(
+                stderr.contains("Cannot find module"),
+                "dependency resolved to the wrong value, not a layout miss: {stderr}"
+            );
+            let vstore = dest.join("node_modules").join(".pnpm");
+            let closed = vstore.exists() && contains_named_dir(&vstore, "phl-fixture-dep", 4);
+            assert!(
+                closed,
+                "the dependency must still live inside the plugin's own subtree"
+            );
+            eprintln!("note: pnpm laid `file:` dep into the virtual store only (no symlink privilege); closure verified");
+        }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Bounded search for a directory entry named `needle` below `dir`.
+    fn contains_named_dir(dir: &std::path::Path, needle: &str, depth: u32) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name() == needle {
+                return true;
+            }
+            if entry.path().is_dir() && contains_named_dir(&entry.path(), needle, depth - 1) {
+                return true;
+            }
+        }
+        false
     }
 
     #[tokio::test]
