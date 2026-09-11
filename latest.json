@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0-alpha.3",
-  "notes": "# PHL 0.1.0-alpha.3\r\n\r\n这一版加入了**应用内自动更新**：装上它之后，以后的新版本可以在应用里直接下载安装，不用再手动换包。\r\n\r\n## 新增\r\n\r\n**设置 → 关于 里多了更新面板。** 显示当前版本与状态，可以手动「检查更新」；有新版本时一键「下载并安装」，\r\nWindows 上安装器装完会自动重启应用。启动后也会**自动检查一次**（可在同一面板关掉）——\r\n它只读取一份清单，不会自动下载任何东西。\r\n\r\n更新包经过**签名校验**：清单里带 minisign 签名，应用用内置公钥验证，验不过就不下载。\r\n所以即使安装包仍未做 Authenticode 签名，更新链路本身是可信的。\r\n\r\n## 说明\r\n\r\n- 自动更新**从这一版开始生效**：如果装的是 alpha.2 或更早，需要手动装一次 alpha.3，之后才能自动更新。\r\n- 安装包仍未做代码签名，首次下载与运行仍有 SmartScreen 提示（见下）。\r\n- alpha 阶段：界面与数据格式仍可能变化。",
-  "pub_date": "2026-09-10T01:48:27Z",
+  "version": "0.1.0-alpha.4",
+  "notes": "# PHL 0.1.0-alpha.4\r\n\r\n这一版集中修正实例、Runtime、整合包与任务状态的可靠性问题，并让安装、启动和失败状态更容易看懂。\r\n\r\n## 可靠性与安全\r\n\r\n- 收紧 Windows 路径与实例清单校验，避免特殊目录名、未知清单格式或不可读清单进入破坏性操作。\r\n- 删除 Runtime 前会检查实例引用，并先把目录移出可见安装区；失败时不会把半删除目录继续显示为可用。\r\n- 数据目录迁移只接受 PHL 当前管理的源目录；迁移、克隆和快照中的 junction 路径不再受命令行元字符影响。\r\n- `.phlpack` 拒绝 NTFS 备用数据流、大小写碰撞以及“声明不含会话但实际携带会话”的包；CLI 解包不再覆盖已有目录，失败构建也不会留下假产物。\r\n- 已保存的供应商密钥只会发往该供应商配置中登记的同一网络源（协议、主机和端口均一致）。\r\n- 多个 PHL 进程写入运行实例登记时会合并记录，长任务的临时句柄释放也不会再把成功任务短暂标成“被中断”。\r\n\r\n## 使用体验\r\n\r\n- 接入本机 DSH 后会保存规范的版本绑定；版本正在安装时，启动提示会明确显示“安装中”，不会再误报“未安装”。\r\n- 版本、Runtime、插件、快照和删除任务统一显示真实阶段与失败结果；任务中心会保留最近失败提示。\r\n- 会话迁移支持全选，复制进度按实际完成量显示。\r\n- 设置新增“启动实例后自动打开 WebUI”；关闭后仍可从就绪提示手动打开。\r\n- 运行中的实例会提前禁用创建/回滚快照，并说明需要先停止；“关闭动画”现在也会停用 CSS 动画与过渡。\r\n- 插件兼容性标签补充解释，实例菜单增加“查看详情”，GitHub-only DSH 版本直接打开对应 Release。\r\n- 模型元数据缓存更快跟进新模型，并避免把旧回退信息误当成上游事实。\r\n\r\n## 说明\r\n\r\n- alpha.3 用户可以在“设置 → 关于”中直接更新；alpha.2 及更早版本仍需先手动安装 alpha.3 或更高版本。\r\n- 安装包仍未做 Authenticode 代码签名，首次下载与运行可能出现 SmartScreen 提示。\r\n- alpha 阶段的数据格式与界面仍可能调整；同一数据目录不支持用多个 PHL 窗口同时管理同一个实例。",
+  "pub_date": "2026-09-11T01:39:44Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSUVNLT2ZsMDMzcmhMOVJvMkZPSzFxakdBNlA3a2MzeTZ4S0tvays3MkRtQnRWSndHS3JTY0Q2d3lFdXV4My9Pam4wYnFoZnVaYk03ZlVON01qd243TGhEYWtKZmJmZWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDA0OTA2CWZpbGU6UEhMXzAuMS4wLWFscGhhLjNfeDY0LXNldHVwLmV4ZQptSnd4TDYrbFYvQTFMT0UvWlQ3NUQxZmJmelF6ZG1qaXFwMWhJc2dUUlVlNDBKMWFDN1dVNGQyUzZaaVVvcEZLVUtMWW5iY251ZWw1enh2MXdXN05Ddz09Cg==",
-      "url": "https://github.com/A7m0spHere/dsh-phl/releases/download/v0.1.0-alpha.3/PHL_0.1.0-alpha.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSUVNLT2ZsMDMzcnBrbGE3Tnd4WGtIcFY5RWF0VnUxcHVuQUFIdjIzblZWREZsR2lsdGMrbWpOMTBoRTF3OWEwaGRzWjlmUE9tWmVTTFpnSEFjRVZiWFB3ZEJiY2IrdkFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDkwNzgzCWZpbGU6UEhMXzAuMS4wLWFscGhhLjRfeDY0LXNldHVwLmV4ZQo5TGVKR29Ib2lwVHR1aWlIQmdDSVBtRTQyL24rRmpzb3ErdUNSR2gwNkNHSFZOTmxrelZ3M0tBODhvdkUzLzE3c0tITXNrejNRZ25sRnNRU1JDblFEUT09Cg==",
+      "url": "https://github.com/A7m0spHere/dsh-phl/releases/download/v0.1.0-alpha.4/PHL_0.1.0-alpha.4_x64-setup.exe"
     }
   }
 }
