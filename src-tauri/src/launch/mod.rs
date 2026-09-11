@@ -43,7 +43,9 @@ pub(crate) use process::{
     CREATE_NO_WINDOW,
 };
 #[cfg(test)]
-pub(crate) use process::{check_kill_output, parse_web_url, port_free, redact_web_token};
+pub(crate) use process::{
+    check_kill_output, parse_web_url, port_free, redact_web_token, MIN_WEB_PORT,
+};
 
 /// Emitted when a launched DSH process exits for any reason — crash, manual
 /// stop, normal shutdown. The frontend folds this into the instance's UI
@@ -1337,6 +1339,31 @@ mod tests {
         if let Ok(port) = picked {
             assert_ne!(port, 0, "port 0 must never be allocated");
         }
+    }
+
+    #[test]
+    fn auto_allocation_never_lands_on_a_reserved_port() {
+        // The adoption regression (2026-09-11): a stored `port: 0` advanced
+        // to 1, Windows happily binds 1, and Chromium refuses to open it
+        // (`ERR_UNSAFE_PORT`). The scan must resume inside the openable range.
+        let processes = Processes::default();
+        let picked = allocate_port(&processes, "inst", 0, true).unwrap();
+        assert!(picked >= MIN_WEB_PORT, "reserved port allocated: {picked}");
+        // A legacy row already poisoned with a reserved port self-heals the
+        // same way on the next launch.
+        let picked = allocate_port(&processes, "inst", 1, true).unwrap();
+        assert!(picked >= MIN_WEB_PORT, "reserved port allocated: {picked}");
+    }
+
+    #[test]
+    fn explicit_reserved_port_is_refused_with_a_code() {
+        // Without the scan to rescue the choice, a configured reserved port
+        // must fail the launch loudly — never spawn a DSH nobody can open.
+        let processes = Processes::default();
+        let err = allocate_port(&processes, "inst", 1, false).unwrap_err();
+        assert!(err.contains("保留端口"), "{err}");
+        assert!(err.starts_with("[port-conflict]"), "{err}");
+        assert!(allocate_port(&processes, "inst", 0, false).is_err());
     }
 
     fn temp_dir(tag: &str) -> PathBuf {

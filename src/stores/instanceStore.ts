@@ -1,3 +1,4 @@
+import { MIN_WEB_PORT } from '@/lib/ports'
 import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
 import { repository, Cancelled, KeptRunningError, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
@@ -290,8 +291,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     patch({ status: 'starting', progress: 0, phase: 'resolve-version' })
 
     try {
+      // The stored port can predate the reserved-port floor (the adoption
+      // draft used `port: 0`, and the old scan advanced 0 → 1 — a port
+      // Chromium refuses to open). With auto-port on, re-suggest here; the
+      // successful `outcome.port` write-back below heals the record for good.
+      const launchTarget =
+        instance.autoPort && instance.port < MIN_WEB_PORT
+          ? { ...instance, port: get().suggestPort() }
+          : instance
       const outcome = await repository.launch(
-        instance,
+        launchTarget,
         {
           version: catalog.versionById(instance.versionId),
           runtime: catalog.runtimeById(instance.runtimeId),
@@ -824,6 +833,25 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     if (!instance) return
     const state = get().states[id]
     const url = state?.webUrl ?? `http://localhost:${instance.port}`
+    // A record predating the port floor can still carry a reserved port in
+    // `webUrl` (the launch log quoted it, adoption replayed it). Opening the
+    // window would only render Chromium's ERR_UNSAFE_PORT page — unexplainable
+    // to the user — so name the cause and the fix instead.
+    try {
+      const port = Number(new URL(url).port)
+      if (port > 0 && port < MIN_WEB_PORT) {
+        useUIStore.getState().toast({
+          kind: 'warn',
+          title: `${instance.name} 的 WebUI 端口 ${port} 无法在浏览器中打开`,
+          message: '这是浏览器封锁的保留端口。停止实例后重新启动，会自动换用可用端口。',
+          duration: 9000,
+          action: { label: '停止', run: () => void get().stop(id) },
+        })
+        return
+      }
+    } catch {
+      // Unparseable URL: let the open itself surface the failure as before.
+    }
     const result = await openDshWebUi(id, url, instance.name)
     if (!result.ok) {
       useUIStore.getState().toast({

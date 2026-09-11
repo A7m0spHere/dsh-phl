@@ -17,7 +17,7 @@ vi.mock('@/lib/desktop', () => ({
 }))
 vi.mock('@/lib/desktopCore', () => ({ isDesktop: true }))
 vi.mock('./instanceStore', () => ({
-  useInstanceStore: { getState: () => ({ admitInstance: mocks.admit, load: mocks.load }) },
+  useInstanceStore: { getState: () => ({ admitInstance: mocks.admit, load: mocks.load, suggestPort: () => 6100 }) },
 }))
 vi.mock('./uiStore', () => ({ useUIStore: { getState: () => ({ toast: mocks.toast, push: mocks.push }) } }))
 import { usePackStore } from './packStore'

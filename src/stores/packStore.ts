@@ -64,7 +64,10 @@ function requestManifest(preview: RemotePackPreview, name: string): PackInstallR
     // binding bug that adoption had (Rust normalizes this too, on re-install).
     versionId: toBoundVersionId(preview.dshVersion),
     runtimeId: preview.runtime,
-    port: 0,
+    // A real suggested port, not `0` (same trap the adoption draft had,
+    // 2026-09-11: the launch auto-scan advanced 0 → 1, a port Chromium
+    // refuses to open — ERR_UNSAFE_PORT).
+    port: useInstanceStore.getState().suggestPort(),
     autoPort: true,
     profile: 'web',
     createdAt: new Date().toISOString(),

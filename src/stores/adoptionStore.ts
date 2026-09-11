@@ -374,7 +374,12 @@ function adoptionManifest(
     runtimeId: candidate.nodeVersion
       ? `node-${candidate.nodeVersion.split('.')[0]}`
       : 'node-system',
-    port: 0,
+    // A real suggestion, not `0`: "0" was meant as "auto, unset", but the
+    // launch auto-scan advanced 0 → 1 — which binds fine on Windows and
+    // Chromium then refuses to open (`ERR_UNSAFE_PORT`, 2026-09-11). The
+    // Rust allocator now floors reserved ports too; the draft simply never
+    // starts with a phantom port.
+    port: useInstanceStore.getState().suggestPort(),
     autoPort: true,
     profile: candidate.profile || 'web',
     createdAt: new Date().toISOString(),

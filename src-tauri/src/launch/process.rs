@@ -201,6 +201,14 @@ pub(crate) fn node_binary() -> &'static str {
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// The smallest port PHL will hand to DSH. Chromium refuses to *navigate* to
+/// the reserved/system service ports (its `ERR_UNSAFE_PORT` blocklist covers
+/// most of 1–1023, port 1 included), even though binding them succeeds on
+/// Windows — so an instance allocated one is a dead WebUI window that PHL
+/// itself reports as running. The adoption flow used to persist `port: 0`,
+/// the auto-scan advanced to 1, and that is exactly what happened (2026-09-11).
+pub(crate) const MIN_WEB_PORT: u16 = 1024;
+
 /// Picks the port to listen on. PHL's own running instances are named in the
 /// error; anything else on the machine is caught by the bind test. Pure and
 /// synchronous — the async caller turns `Err` into a launch failure.
@@ -212,6 +220,17 @@ pub(crate) fn allocate_port(
 ) -> Result<u16, String> {
     let map = processes.0.lock().expect("processes lock");
     if !auto {
+        if wanted < MIN_WEB_PORT {
+            // The same blocklist as the auto branch, but without a scan to
+            // rescue the choice: say why the configured port can never open.
+            return Err(crate::errors::coded(
+                crate::errors::ErrCode::PortConflict,
+                format!(
+                    "端口 {wanted} 是系统保留端口，浏览器会拒绝打开它的页面；\
+                     请改用 {MIN_WEB_PORT} 以上的端口，或开启自动分配"
+                ),
+            ));
+        }
         if let Some((other, _)) = map
             .iter()
             .find(|(id, e)| e.port == wanted && id.as_str() != instance_id)
@@ -230,7 +249,11 @@ pub(crate) fn allocate_port(
         }
         return Ok(wanted);
     }
-    let mut port = wanted;
+    // A stored port below the floor (the old adoption's `port: 0`, or a port
+    // allocated before this guard existed) must not seed the scan: advancing
+    // 0 → 1 used to "succeed" on Windows and strand the WebUI behind
+    // `ERR_UNSAFE_PORT`. The scan always resumes inside the openable range.
+    let mut port = wanted.max(MIN_WEB_PORT);
     for _ in 0..100 {
         let phl_taken = map
             .iter()

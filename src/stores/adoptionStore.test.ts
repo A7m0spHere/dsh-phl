@@ -55,7 +55,7 @@ vi.mock('@/services', () => ({
   Cancelled: class Cancelled extends Error {},
 }))
 vi.mock('./instanceStore', () => ({
-  useInstanceStore: { getState: () => ({ admitInstance: mocks.admit, load: mocks.load }) },
+  useInstanceStore: { getState: () => ({ admitInstance: mocks.admit, load: mocks.load, suggestPort: () => 6100 }) },
 }))
 vi.mock('./uiStore', () => ({ useUIStore: { getState: () => ({ toast: mocks.toast, push: mocks.push }) } }))
 import { useAdoptionStore } from './adoptionStore'
@@ -149,6 +149,11 @@ it('admits and reloads the instance list on a successful commit', async () => {
   })
   await useAdoptionStore.getState().toPreview()
   await useAdoptionStore.getState().commit()
+  // The manifest must carry a real suggested port, never the old `0`:
+  // the launch scan used to advance 0 → 1 and strand the WebUI behind
+  // Chromium's reserved-port blocklist (2026-09-11).
+  const submitted = mocks.adoptInstance.mock.calls.at(-1)?.[0] as { manifest: { port: number } }
+  expect(submitted.manifest.port).toBe(6100)
   expect(mocks.admit).toHaveBeenCalled()
   expect(mocks.load).toHaveBeenCalled()
   expect(useAdoptionStore.getState().submitting).toBe(false)
