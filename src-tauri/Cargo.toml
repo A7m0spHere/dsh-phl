@@ -1,6 +1,6 @@
 [package]
 name = "dsh-phl"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 description = "PHL — DSH Instance & Runtime Manager"
 authors = ["dsh-phl"]
 license = "MIT"
