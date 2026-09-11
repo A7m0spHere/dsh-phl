@@ -24,6 +24,15 @@ mod webui;
 #[cfg(test)]
 mod ipc_contract;
 
+/// The Windows E2E release gate: drives the real pipelines (download →
+/// install → create → launch → stop → adopt → snapshot → pack → migrate)
+/// headlessly against throwaway roots, with system-level fault injection
+/// (force-kill, mid-stream download abort, late-exiting processes). It runs
+/// on the `windows-e2e` CI job via `cargo test --workspace -- --ignored
+/// release_e2e`; see `docs/windows-e2e-release-gate.md` for the scenario map.
+#[cfg(all(test, windows))]
+mod release_e2e;
+
 /// Emitted when the OS (or the custom title bar) asks the window to close.
 /// The frontend answers with its own confirmation dialog instead of letting
 /// the window vanish under a user who has instances running.

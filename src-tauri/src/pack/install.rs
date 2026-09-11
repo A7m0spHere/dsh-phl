@@ -306,7 +306,7 @@ fn mark(
     });
 }
 
-async fn install_inner(
+pub(crate) async fn install_inner(
     root: &Path,
     task: crate::resources::Task,
     path: &str,

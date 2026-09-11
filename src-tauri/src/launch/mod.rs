@@ -33,9 +33,8 @@ use crate::versions::{now_iso, sanitize_version};
 pub(crate) mod process;
 pub(crate) mod registry;
 
-use registry::ProcessState;
 pub(crate) use registry::{
-    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, Registry,
+    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, ProcessState, Registry,
 };
 
 pub(crate) use process::{
@@ -158,7 +157,9 @@ pub struct Processes(pub Mutex<HashMap<String, ProcessEntry>>);
 pub struct Launches(pub Mutex<HashMap<String, Arc<AtomicBool>>>);
 
 impl Launches {
-    fn take(&self, id: &str) -> Arc<AtomicBool> {
+    // `pub(crate)` for the release E2E gate's launch shell, which mirrors the
+    // `launch_instance` command's flag bookkeeping without a Tauri runtime.
+    pub(crate) fn take(&self, id: &str) -> Arc<AtomicBool> {
         self.0
             .lock()
             .expect("launches lock")
@@ -176,7 +177,7 @@ impl Launches {
             .store(true, Ordering::SeqCst);
     }
 
-    fn release(&self, id: &str) {
+    pub(crate) fn release(&self, id: &str) {
         self.0.lock().expect("launches lock").remove(id);
     }
 
@@ -219,11 +220,21 @@ pub async fn launch_instance(
         .map_err(|e| crate::errors::coded(crate::errors::ErrCode::Busy, e.to_string()))?;
     ensure_launch_available(&processes, &registry, &instance_id, probe_process)?;
     let cancel = launches.take(&transfer_id);
+    // The one job the concrete `AppHandle` does inside `run_launch`: hand the
+    // retained child to the GUI exit watcher. Factoring it into a callback
+    // keeps the startup pipeline itself runtime-free, so the release E2E
+    // gate can drive the *same* code headlessly (`release_e2e::driver`).
+    let retain_child = {
+        let app = app.clone();
+        move |id: &str, pid: u32, child: tokio::process::Child| {
+            watch_child_process(app.clone(), id.to_string(), pid, child)
+        }
+    };
     let result = run_launch(
-        &app,
         &processes,
         &registry,
         &cancel,
+        &retain_child,
         &phl.root(),
         &instance_id,
         &version_name,
@@ -246,7 +257,8 @@ pub async fn launch_instance(
 /// The UI can be stale after an uncertain adoption or a failed cancellation.
 /// Check the registration under the instance lock before any startup writes:
 /// another spawn must not overwrite the handle of an unconfirmed process.
-fn ensure_launch_available(
+/// `pub(crate)` for the release E2E gate's launch shell (`release_e2e::driver`).
+pub(crate) fn ensure_launch_available(
     processes: &Processes,
     registry: &Registry,
     id: &str,
@@ -404,7 +416,12 @@ async fn terminate_and_forget(
 /// been reused by somebody else. A process with no record is ours by
 /// construction (PHL started it in this session); a process that is already
 /// gone needs no permission at all — the caller still cleans up.
-fn stop_permission(registry: &Registry, instance_id: &str, pid: u32) -> Result<(), String> {
+/// (pub(crate) for the release E2E gate: same stop semantics the UI exercises.)
+pub(crate) fn stop_permission(
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+) -> Result<(), String> {
     let Some(rec) = registry.record_of(instance_id) else {
         return Ok(());
     };
@@ -428,7 +445,8 @@ fn stop_permission(registry: &Registry, instance_id: &str, pid: u32) -> Result<(
 /// kernel already reports gone IS the desired outcome — typically a kept-alive
 /// instance (R3) that exited on its own since the launch failure — so the
 /// retry succeeds instead of bouncing the user off the same error forever.
-async fn terminate_or_gone(
+/// `pub(crate)` for the release E2E gate's stop shell (`release_e2e::driver`).
+pub(crate) async fn terminate_or_gone(
     processes: &Processes,
     registry: &Registry,
     instance_id: &str,
@@ -627,11 +645,16 @@ fn watch_adopted_process<R: tauri::Runtime>(app: AppHandle<R>, rec: PersistedPro
 /* ------------------------------- launch ------------------------------- */
 
 #[allow(clippy::too_many_arguments)]
-async fn run_launch(
-    app: &AppHandle,
+pub(crate) async fn run_launch(
     processes: &Processes,
     registry: &Registry,
     cancel: &AtomicBool,
+    // Hands a *retained* child (kept registration after cancel/timeout, or
+    // the successfully launched process) to whoever watches its exit. The GUI
+    // app passes `watch_child_process`; the headless gate passes a recorder —
+    // the child stays alive and the gate stops it through the production
+    // `terminate_or_gone` path.
+    retain_child: &(dyn Fn(&str, u32, tokio::process::Child) + Send + Sync),
     root: &Path,
     instance_id: &str,
     version_name: &str,
@@ -902,7 +925,7 @@ async fn run_launch(
             {
                 Ok(()) => Err("cancelled".into()),
                 Err(e) => {
-                    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+                    retain_child(&instance_id, pid, child);
                     Err(e)
                 }
             };
@@ -945,7 +968,7 @@ async fn run_launch(
                     "等待 120 秒仍未就绪，已终止进程。\n--- 日志末尾 ---\n{tail}"
                 )),
                 Err(e) => {
-                    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+                    retain_child(&instance_id, pid, child);
                     Err(format!("{e}。\n--- 日志末尾 ---\n{tail}"))
                 }
             };
@@ -979,7 +1002,7 @@ async fn run_launch(
         detail: Some(format!("localhost:{port}")),
     });
 
-    watch_child_process(app.clone(), instance_id.clone(), pid, child);
+    retain_child(&instance_id, pid, child);
 
     // `dsh web` prints its authenticated URL before binding; a short poll
     // allows for delayed log flushing.

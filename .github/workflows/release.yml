@@ -129,6 +129,31 @@ jobs:
             Copy-Item $_.FullName dist-release/
           }
 
+      # ── Release gates ────────────────────────────────────────────────────
+      # Everything above produced bytes; everything below proves those bytes
+      # behave on a clean Windows machine BEFORE a Release exists and before
+      # the updater manifest points any installed app at them. A failing gate
+      # publishes nothing. (docs/windows-e2e-release-gate.md)
+      - name: E2E gate — headless journeys & fault injection
+        shell: bash
+        working-directory: src-tauri
+        run: cargo test --workspace -- --ignored release_e2e --test-threads=1
+
+      - name: E2E gate — installer smoke (install · launch · upgrade · uninstall)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report
+
+      - name: Upload the gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-release-gate
+          path: e2e-report
+          if-no-files-found: warn
+
       # The CLI signs the installer (.sig) but does not write latest.json - that
       # is tauri-action's job. Building it here keeps the pipeline hand-rolled:
       # the manifest is derived from the version, the release notes and the

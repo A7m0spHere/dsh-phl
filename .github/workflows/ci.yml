@@ -91,6 +91,45 @@ jobs:
       - run: cargo check --workspace
         shell: bash
 
+  # The headless Windows E2E lane: the real install→launch→adopt→snapshot→
+  # pack→migrate journeys plus system-level fault injection (force-kill,
+  # download abort/resume, locked destination, late exit), all against mock
+  # registries on a throwaway data root. `--test-threads=1` is load-bearing:
+  # the cases bind real sockets and spawn real children.
+  # ~6 min including the compile; see docs/windows-e2e-release-gate.md for
+  # what the installer lane adds on top (it lives in release.yml / dispatch).
+  windows-e2e:
+    name: Windows E2E (journeys · fault injection)
+    runs-on: windows-latest
+    needs: [frontend, rust]
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # The gate's fake Node runtime IS the host's node: the health check
+      # runs the installed binary, so node must be present (it is, via
+      # setup-node) and on PATH for `node --version` probing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo test --workspace -- --ignored release_e2e --test-threads=1
+        shell: bash
+
   # Full NSIS bundle is the slowest step and not required per-commit; it runs
   # on demand only. Official releases go through release.yml (tag-triggered),
   # which builds and publishes separately — CI never builds for a tag.
@@ -117,6 +156,26 @@ jobs:
 
       - run: npm run app:build
         shell: bash
+
+      # The dispatch build is also the installer-lane rehearsal: run the full
+      # OS smoke (silent install → CDP first-launch → upgrade → uninstall)
+      # against the exact bundle the job produced, before it is uploaded.
+      - name: Installer smoke (CDP lane)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report
+        env:
+          PHL_SMOKE_KEEP: "0"
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-report
+          path: e2e-report
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:

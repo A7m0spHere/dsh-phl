@@ -33,7 +33,7 @@ use crate::versions::Transfers;
 const DATA_DIRS: [&str; 5] = ["instances", "versions", "runtimes", "config", "cache"];
 
 /// The journal's file name, resolved beside the root pointer.
-const JOURNAL_NAME: &str = "migration.json";
+pub(crate) const JOURNAL_NAME: &str = "migration.json";
 /// Cross-drive copies land here first, then get renamed into place.
 const STAGING_DIR: &str = ".phl-staging";
 
@@ -223,7 +223,7 @@ impl MigrationJournal {
     }
 }
 
-fn read_journal(path: &Path) -> Result<Option<MigrationJournal>, String> {
+pub(crate) fn read_journal(path: &Path) -> Result<Option<MigrationJournal>, String> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw)
             .map(Some)
@@ -275,7 +275,7 @@ pub async fn storage_migration_undo(
 /// Roll a non-committed migration back: everything that arrived in `to`
 /// (moved and half-copied alike) is walked back to `from`, then the journal
 /// is deleted. Data that never left the source stays untouched.
-async fn undo_migration(
+pub(crate) async fn undo_migration(
     path: &Path,
     journal: &MigrationJournal,
     task: &crate::resources::Task,
@@ -610,7 +610,7 @@ fn complete_move(
 /// The finish step itself: the data of a committed migration is complete at
 /// `to`, only the pointer commit is missing. Takes the state by reference so
 /// it is testable without a Tauri `State`, and returns the adopted root.
-fn finish_committed_migration(phl: &PhlState, path: &Path) -> Result<String, String> {
+pub(crate) fn finish_committed_migration(phl: &PhlState, path: &Path) -> Result<String, String> {
     let journal = read_journal(path)?.ok_or_else(|| "迁移记录不存在，无法确认".to_string())?;
     if !journal.committed {
         return Err("迁移尚未完成数据搬运，请继续迁移或撤销".into());
@@ -646,7 +646,7 @@ pub async fn storage_migration_finish(
     .await
 }
 
-async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
+pub(crate) async fn move_root_inner<F: Fn(MoveProgress) + Send + Sync>(
     flag: &Arc<AtomicBool>,
     task: &crate::resources::Task,
     journal_path: Option<&Path>,
