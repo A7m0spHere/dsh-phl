@@ -4,6 +4,8 @@
 
 ## 1. 结论与产品方向
 
+2026-09-11 Alpha 发布轮：**`v0.1.0-alpha.4` 已发布，远端资产与更新清单全部核验通过。** 发布准备提交的 Rust job 被 runner 上的 Rust 1.98 新增 `some_filter` lint 拦下（`-D warnings` 致错，run `34549713203`），按 Clippy 建议单行改 `then_some`（`6ba04c7`）后 main CI 全绿（run `34550242283`）；annotated tag 触发的 Release 在干净 runner 上 16 分钟成功（run `34550553053`），GitHub Release 为 prerelease，签名清单已推 `updates` 分支。远端核验：本机下载安装包 3,130,382 字节，SHA-256 `2CFF1981…DD79D1` 与 `.sha256` sidecar、GitHub digest 三方一致；`.sig` 与清单 `signature` 逐字节一致，keyid 匹配 `tauri.conf.json` 公钥（与 alpha.3 相同，旧版应用内更新器会接受此版），对下载文件 BLAKE2b-512 + Ed25519 验签通过；updater 端点在线返回 0.1.0-alpha.4。真机冷安装/卸载与一键更新点击仍开放。详见 [本轮发布验收](docs/alpha-release-acceptance-2026-09-11.md)。
+
 2026-09-10 应用内自动更新：**接入 Tauri updater。** 启动后 8 秒静默读取 GitHub 上的签名清单（`updates` 分支的 `latest.json`，minisign 校验，公钥在 `tauri.conf.json`），有更新时提示；下载与安装是「设置 → 关于」里的一次点击，Windows 上安装器装完自动重启。发布流水线在打标签时用 `TAURI_SIGNING_PRIVATE_KEY` 签出 `.sig` 并生成清单（`createUpdaterArtifacts` 走 CI 专用合并配置，本地无密钥也能构建），随后推到 `updates` 分支并附到 Release。已在真实桌面端验证：本地清单服务 → 应用识别到新版本并显示更新说明；公钥与签名的 keyid 一致。详见 [自动更新说明](docs/auto-update.md)。
 
 2026-09-09 发布就绪：**代码与供应链检查已就绪，实机验收按「维护者自测通过、问题走 issue」记账。** `cargo audit`（513 个 crate）**0 个漏洞**，7 条警告均为传递依赖的 unmaintained / unsound（`glib` 仅 Linux 目标编译），不引入豁免；安装包在 `acdb74e` 上重建（2,978,500 字节，SHA-256 `5B72B49F…7837`）。CI：`96546fc`、`cb04137` 全绿；`b8a8c91` 的 Rust job 一次 `cargo test --workspace` 失败但同代码在下一提交通过，本地连跑 10 轮全绿，判为 runner 偶发（再次出现需取日志定位）。**已发布 `v0.1.0-alpha.1`（prerelease）**：<https://github.com/A7m0spHere/dsh-phl/releases/tag/v0.1.0-alpha.1>，资产 `PHL_0.1.0-alpha.1_x64-setup.exe`（2,973,765 字节，SHA-256 `3D6FD01D…9AEB`，附 `.sha256`），由标签触发 `.github/workflows/release.yml` 在干净 runner 上重跑门禁后构建。详见 [发布就绪记录](docs/preview-release-readiness-2026-09-09.md)。

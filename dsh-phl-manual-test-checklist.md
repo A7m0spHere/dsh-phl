@@ -277,8 +277,10 @@
       快照、Bundle/Pack、API 同步与模型补全、诊断、系统文件对话框，确认参数与权限在真实壳内工作。
 - [ ] **M1/M4 + R6 真机性能**：用 React Profiler 检查 Settings/Plugins 不因无关 toast/confirm/进度而整树
       重渲染；大包导出/解包时窗口可拖动、可取消；记录桌面冷启动与峰值内存。
-- [ ] **R2 GitHub Windows CI / Release**：先收口本地与远端分支，再触发 Windows runner，确认三 crate
+- [x] **R2 GitHub Windows CI / Release**：先收口本地与远端分支，再触发 Windows runner，确认三 crate
       测试与短路径环境通过；之后做受控 tag 演练。未获明确授权前不提交、不推送、不创建 PR/tag。
+      **已关闭（2026-09-11）**：公开提交 `6ba04c7` CI 两 job 全绿（run `34550242283`）；受控 tag `v0.1.0-alpha.4` 的 Release
+      run `34550553053` 成功，安装哈希、minisign 验签与更新清单核验见 [docs/alpha-release-acceptance-2026-09-11.md](docs/alpha-release-acceptance-2026-09-11.md)。
 
 ## 16. 统一启动焦点与内嵌 WebUI 窗口（2026-09-08）
 
