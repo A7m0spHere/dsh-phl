@@ -288,12 +288,13 @@ export function InstanceDetailPage({ id }: { id: string }) {
               {state.lastExit && (
                 <Tooltip
                   content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
+                  allowOverflow
                 >
                   <Badge tone="danger">上次退出 {state.lastExit.code ?? '?'}</Badge>
                 </Tooltip>
               )}
               {instance?.managementMode === 'external' && (
-                <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。">
+                  <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。" allowOverflow>
                   <Badge tone="warn">原地接入</Badge>
                 </Tooltip>
               )}
@@ -310,7 +311,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
       actions={
         <div className="flex items-center gap-2">
           {running && (
-            <Tooltip content={`localhost:${instance.port}`}>
+              <Tooltip content={`localhost:${instance.port}`} allowOverflow>
               <Button variant="secondary" onClick={actions.openWebUI}>
                 <ExternalLink size={13} />
                 打开 WebUI
@@ -430,7 +431,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   </Button>
                 </>
               ) : (
-                <Tooltip content={running || busy ? '停止实例后才能修改绑定' : '修改版本、Runtime 与端口'}>
+                <Tooltip content={running || busy ? '停止实例后才能修改绑定' : '修改版本、Runtime 与端口'} allowOverflow>
                   <Button size="xs" variant="ghost" onClick={beginEdit} disabled={running || busy}>
                     <Pencil size={11} />
                     编辑
@@ -835,7 +836,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
             collapsible
             defaultOpen={instance.snapshots.length > 0}
             extra={
-              <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
+              <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''} allowOverflow>
                 <Button
                   size="xs"
                   variant="ghost"
@@ -874,7 +875,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                 title="还没有快照"
                 description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），不会改变实例引用的 DSH 与 Runtime。"
                 action={
-                  <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
+                  <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''} allowOverflow>
                     <Button
                       size="sm"
                       variant="secondary"
@@ -902,7 +903,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       </div>
                     </div>
                     <div className="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover/snap:opacity-100">
-                      <Tooltip content={running || busy ? '请先停止实例，再回滚' : ''}>
+                      <Tooltip content={running || busy ? '请先停止实例，再回滚' : ''} allowOverflow>
                         <Button
                           size="xs"
                           variant="secondary"

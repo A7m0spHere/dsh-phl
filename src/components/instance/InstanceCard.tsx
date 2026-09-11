@@ -199,6 +199,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           {state.lastExit && (
             <Tooltip
               content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
+              allowOverflow
             >
               <span className="num shrink-0 rounded-xs border border-danger/40 px-1.5 py-0.5 text-2xs text-danger">
                 上次退出 {state.lastExit.code ?? '?'}
@@ -223,7 +224,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             {primaryLabel}
           </Button>
 
-          <Tooltip content="查看详情" side="top">
+          <Tooltip content="查看详情" side="top" allowOverflow>
             <IconButton
               label="查看详情"
               size="sm"
@@ -241,7 +242,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           <Menu
             items={menuItems}
             trigger={({ open: isOpen, toggle: t2, menuProps }) => (
-              <Tooltip content="更多操作" side="top">
+              <Tooltip content="更多操作" side="top" allowOverflow>
                 <IconButton
                   label="更多操作"
                   size="sm"
