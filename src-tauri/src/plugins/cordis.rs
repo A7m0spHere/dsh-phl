@@ -41,7 +41,20 @@ fn drop_empty_list_placeholder(lines: Vec<String>) -> Vec<String> {
 }
 
 async fn write_patch_lines(instance_root: &Path, lines: &[String]) -> Result<(), String> {
-    let mut text = drop_empty_list_placeholder(lines.to_vec()).join("\n");
+    let mut lines = drop_empty_list_placeholder(lines.to_vec());
+    // The file must stay a top-level YAML array even with no entries: a
+    // comments-only patch parses as `null`, and DSH's loader throws on
+    // exactly that at boot ("must be a top-level YAML array") — the shape
+    // left behind when the last plugin was uninstalled from a scaffolded
+    // profile (2026-09-11). Restore the scaffold's `[]` so an entry-less
+    // patch always launches.
+    if !lines
+        .iter()
+        .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+    {
+        lines.push("[]".to_string());
+    }
+    let mut text = lines.join("\n");
     if !text.is_empty() {
         text.push('\n');
     }
@@ -515,6 +528,51 @@ mod tests {
     /// "parses as one sequence" is the exact launch-time acceptance test.
     fn assert_single_sequence_document(text: &str) -> Vec<serde_yaml::Value> {
         serde_yaml::from_str(text).expect("patch file must be a single YAML document")
+    }
+
+    #[tokio::test]
+    async fn uninstalling_the_last_plugin_keeps_the_patch_launchable() {
+        // The 2026-09-11 boot failure: scaffold → install → uninstall left a
+        // comments-only file, which DSH's loader parses as `null` and rejects
+        // with "must be a top-level YAML array" — the instance died before
+        // ready (code 1). Every write must keep the array shape.
+        let dir = temp_profile("last-uninstall");
+        std::fs::write(
+            patch_path(&dir),
+            "# Your patch layer for this dsh profile\n# a top-level YAML array\n[]\n",
+        )
+        .unwrap();
+        register_cordis_patch(&dir, "dshmarket", None)
+            .await
+            .unwrap();
+        remove_plugin_block(&dir, "dshmarket").await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert!(doc.is_empty(), "no entries left: {text}");
+        assert!(text.contains("[]"), "placeholder restored: {text}");
+        assert!(text.contains("# Your patch layer"), "header kept: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_comments_only_patch_heals_on_the_next_write() {
+        // Instances already poisoned by the bug: any later plugin write must
+        // restore the placeholder, not re-emit the unloadable comment shell.
+        let dir = temp_profile("comments-only");
+        std::fs::write(
+            patch_path(&dir),
+            "# Your patch layer for this dsh profile\n# overrides, disables\n",
+        )
+        .unwrap();
+        set_plugin_disabled(&dir, "dshmarket", true).await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        let doc = assert_single_sequence_document(&text);
+        assert_eq!(doc[0]["insert"][0]["name"], "dshmarket");
+        remove_plugin_block(&dir, "dshmarket").await.unwrap();
+        let text = std::fs::read_to_string(patch_path(&dir)).unwrap();
+        assert_single_sequence_document(&text);
+        assert!(text.contains("[]"), "healed empty state: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
