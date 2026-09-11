@@ -744,7 +744,7 @@ pub async fn enrich_model_metadata(
                     m,
                     &cache.entries,
                     &hints,
-                    Some(or_slice).filter(|_| openrouter_consulted),
+                    openrouter_consulted.then_some(or_slice),
                 )
             })
             .collect(),
