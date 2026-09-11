@@ -96,6 +96,31 @@ describe('instance lifecycle', () => {
     expect(mocks.toast).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
   })
 
+  it('does not hand the launching instance own port to the preflight as occupied', async () => {
+    // 2026-09-11 desktop acceptance: a fixed-port launch died on
+    // 「端口 1 正在被实例 itself 使用」 because the launch context was built
+    // AFTER the flip to `starting`, so the repository's portsInUse
+    // preflight saw the launching instance as the occupier of its own port
+    // and Rust's allocator (with its reserved-port guard) never ran.
+    useInstanceStore.setState({
+      instances: [
+        { ...instance, autoPort: false, port: 3180 },
+        { ...instance, id: 'mate', name: 'Mate', port: 3190 },
+      ],
+      states: { mate: { ...running, pid: 7, webUrl: 'http://localhost:3190/' } },
+    })
+    let sawSelfPort = true
+    let sawMatePort = false
+    mocks.launch.mockImplementation(async (_i, ctx: { portsInUse: Map<number, string> }) => {
+      sawSelfPort = ctx.portsInUse.has(3180)
+      sawMatePort = ctx.portsInUse.has(3190)
+      return { pid: 555, port: 3180 }
+    })
+    await useInstanceStore.getState().launch('test')
+    expect(sawSelfPort).toBe(false)
+    expect(sawMatePort).toBe(true)
+  })
+
   it('shows a surviving process as running and stoppable after an aborted launch', async () => {
     // R3: the backend could not confirm termination after a cancel, so it
     // kept the registration. The UI must present a *running, stoppable*

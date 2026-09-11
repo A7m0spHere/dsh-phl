@@ -42,4 +42,18 @@ describe('tooltip clipping inside overflow-hidden surfaces', () => {
   it('keeps Tooltip allowOverflow opt-in (global default would change every bubble)', () => {
     expect(source('../ui/Tooltip.tsx')).toContain('allowOverflow = false')
   })
+
+  it('positions tooltip bubbles via the CSS translate property, not transform', () => {
+    // motion.span animates x/y and writes its own inline transform (none
+    // once settled), which clobbers any transform-based centering — both
+    // the Tailwind -translate-* classes and the portal flip offset. That
+    // left bubbles left-anchored at the trigger, spilling past the
+    // viewport right edge (2026-09-11 desktop acceptance: the detail-page
+    // 编辑 tooltip). The CSS translate property is not transform; motion
+    // cannot touch it.
+    const tip = source('../ui/Tooltip.tsx')
+    expect(tip).toContain('translate: inlineTranslate')
+    expect(tip).toContain("translate: (tip.flip ? '-100%' : '-50%') +")
+    expect(tip).not.toMatch(/style=\{[\s\S]*?transform: `translate\(/)
+  })
 })

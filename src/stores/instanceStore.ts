@@ -288,24 +288,27 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
 
     const patch = (s: InstanceRuntimeState) => set({ states: { ...get().states, [id]: s } })
     set({ focusId: id })
+    // The stored port can predate the reserved-port floor (the adoption
+    // draft used `port: 0`, and the old scan advanced 0 → 1 — a port
+    // Chromium refuses to open). With auto-port on, re-suggest here; the
+    // successful `outcome.port` write-back below heals the record for good.
+    const launchTarget =
+      instance.autoPort && instance.port < MIN_WEB_PORT
+        ? { ...instance, port: get().suggestPort() }
+        : instance
+    // Build ctx BEFORE the `starting` flip: portsInUse counts starting as
+    // held, so self would read as the occupier of its own fixed port.
+    const ctx = {
+      version: catalog.versionById(instance.versionId),
+      runtime: catalog.runtimeById(instance.runtimeId),
+      portsInUse: get().portsInUse(),
+    }
     patch({ status: 'starting', progress: 0, phase: 'resolve-version' })
 
     try {
-      // The stored port can predate the reserved-port floor (the adoption
-      // draft used `port: 0`, and the old scan advanced 0 → 1 — a port
-      // Chromium refuses to open). With auto-port on, re-suggest here; the
-      // successful `outcome.port` write-back below heals the record for good.
-      const launchTarget =
-        instance.autoPort && instance.port < MIN_WEB_PORT
-          ? { ...instance, port: get().suggestPort() }
-          : instance
       const outcome = await repository.launch(
         launchTarget,
-        {
-          version: catalog.versionById(instance.versionId),
-          runtime: catalog.runtimeById(instance.runtimeId),
-          portsInUse: get().portsInUse(),
-        },
+        ctx,
         (p) => patch({ status: 'starting', phase: p.phase, progress: p.progress }),
         controller.signal,
       )
