@@ -4,6 +4,18 @@
 
 ## 1. 结论与产品方向
 
+2026-09-11 alpha.4 后真机缺陷轮（同日）：真机使用中暴露并修复两处 PHL 侧缺陷。① **接管/整合包实例打不开 WebUI（`ERR_UNSAFE_PORT`）**——adoption 与 pack 清单写死 `port: 0`，自动端口扫描 0 → 1，而 Windows 合法 bind 1、DSH 真跑在 `127.0.0.1:1`，Chromium 保留端口黑名单拒绝导航（内嵌 WebUI 必为错误页）。修复分三层：Rust `allocate_port` 引入 `MIN_WEB_PORT = 1024`（auto 扫描起点钳升，存量坏记录下次启动自愈；固定端口配保留值以 `[port-conflict]` 拒绝启动）；前端两条建实例路径改写 `suggestPort()`；`instanceStore` 启动钳制 + `openWebUi` 对保留端口给出可操作提示而非开死窗口（常量收口 `src/lib/ports.ts`，与 Rust 侧互为镜像）。② **卸载最后一个插件后实例启动即退（code 1：must be a top-level YAML array）**——DSH 的 scaffold 是「注释头 + `[]`」，PHL 为防双文档在写入时无条件删顶层 `[]`，卸掉最后插件后文件只剩注释，纯注释 YAML 解析为 `null` 被加载器拒绝；`write_patch_lines` 改为无有效条目时补回 `[]` 占位，任何后续插件写入同时治愈存量损坏文件。真机数据已当场修复（受影响实例端口经「停止→启动」自愈、`cordis.patch.yml` 补回 `[]` 后可启动），回归保护与验收记录见 [手测清单 §18](dsh-phl-manual-test-checklist.md)。教训入规：**「能 bind」≠「能打开」**——凡分配给用户可见服务的端口，必须按客户端（浏览器）的接受域校验，而非仅按 OS 语义。
+
+2026-09-11 E2E 门禁 review 收口：独立对抗评审 + 自查发现并修复 4 项合并前必修。① **I-6 版本比较反向**——pre-publish 门禁里 `updates/latest.json` 合法地仍是旧版（清单在门禁之后才推），旧断言「远端不得比安装包旧」会拦死此后每一次发布；改为「远端不得比在建版本更新」，并对 PowerShell 路径注入做转义。② **install-smoke 生命周期损坏**——多轮补丁后 `finish`/`killApp` 双双未定义（installer 模式进 I-7 必 crash、报告丢失）、I-9 的 existed/still 在同一时刻读（时间序 bug）、locate 仍查废弃 registry 键；整体重写：step 按 id 去重（FAIL 不再被后续 PASS 覆盖成假证据）、I-1 失败不级联假绿、locate 改 DisplayName 双 hive + WOW6432Node 扫描、同步 finish + `reallyExit`。③ **panic 泄漏**——各 journey 的 `unwrap` 会跳过末行 `cleanup`，泄漏的 node 子进程毒化顺序跑的后续测试；新增 `with_cleanup`（`catch_unwind` 后必清理、panic 再原样上抛），J1 注入 panic 演练验证：测试 FAILED、泄漏子进程 0、scratch 清除；`remove_dir_all` 加有界重试（Windows 句柄释放竞态）。④ **e2e-gate spawn cargo 无 shell**——Windows 上 `.exe` 解析失败，`npm run test:e2e:smoke` 入口失效；已修。P2 一并处理：F2b 取消从固定 500ms 计时改为「checkpoint 字节出现」事件触发（慢 runner 不再 flaky）、F4 硬编码端口 46190 改为动态找空闲、**F5 磁盘满占位删除**（早退 return 计入 PASS 数却零断言——假绿即虚报；VM 档人工 + `[disk-full]` 分类单测 + F3 同族场景覆盖），核心门禁口径变为 10/10（全真断言）。修复后终验：核心 10/10、alpha-gate 9 步全绿、冒烟 exe 模式过、clippy `-D warnings`/fmt 干净。教训入规：多轮字符串补丁后的文件必须整体重读验证（本次两处「已应用的修复」实际从未落地即是此因）。
+
+2026-09-11 趋势防护（ratchet 预算表）落地：`scripts/check-file-size.mjs` + `scripts/file-size-budget.json`（25 个 ≥25 KB 源文件登记，预算=现值+5%），接入 alpha-gate 与 CI frontend job；A 超预算 / B 未登记 ≥40 KB / C 幽灵条目三类 FAIL 均有故障演练验证，收缩用 `--update` 锁天花板（拆分腾出的空间不允许被回填）。下一轮结构 Review 的工作单（实测行数解剖、建议拆分边界、迁移安全规则）见 [结构审查 brief](docs/structure-review-2026-09.md)。**一次无法复现的偶发记录**：接线后首跑 alpha-gate 的 `rust tests (workspace)` 步骤 FAIL（无失败测试名输出），事后 10+ 次 `cargo test --workspace` 全绿且无法复现，同 b8a8c91 先例（runner/本机偶发，再现取完整日志定位）。
+
+2026-09-11 E2E 本机二轮验证与一处 pnpm 行为边界：`test:e2e:core` 全绿（F5 假绿占位删除后为 10/10）（node v24.14 重跑仍过）；`cdp-spike` + `install-smoke --exe=release` exe 模式通过；alpha-gate 8 步全绿。J5/I-6 的更新清单检查改为「传输失败 SKIP、契约失败 FAIL」，避免网络抖动让门禁变红。
+
+**发现（不阻塞 alpha.5，记为跟踪项）**：既有被忽略测试 `dependencies_stay_inside_the_plugin_and_scripts_do_not_run`（plugins/install.rs:1280）在 pnpm 12.3.4 + 本机无符号链接权限（WinError 1314）下失败——`install_plugin_dependencies` 走 `pnpm install --ignore-workspace --prod --ignore-scripts --no-lockfile` 写入 `.pnpm/phl-fixture-dep@file+..+local-dep/node_modules/phl-fixture-dep` 的硬链 store，但顶层 `node_modules/phl-fixture-dep` 链接未生成，后续 `node -e require('phl-fixture-dep')` 报 Cannot find module。对照实验：`ws@8.18.0` 走同一命令时 `.pnpm/` + 顶层链接都正确生成，失败只在 `file:` 跨 workspace 根（`--ignore-workspace` + 目录在 profile 外）的 pnpm 版本行为，非本会话引入。生产插件依赖来自 registry（`dependency_specs` 生成 `name@range`），对照实验证明同套 flags 下 registry 依赖的顶层链接正常，故产品功能不受此行为影响；真实插件加载体验属手测 §15 R3 真机项。同日已修复：测试改为布局无关的封闭性断言（见 plugins/install.rs 测试注释），pnpm 12 + 无符号链接权限环境同样可跑。**v1 发布门禁不受影响。**
+
+2026-09-11 Windows E2E Release Gate 立项：**「安装后一定能跑」自本日起是机器判定的门禁，不再是手测愿望清单。** 三条车道：①无头核心门禁 `src-tauri/src/release_e2e/`——生产同一条 `*_inner`/`run_launch` 管线在一次性数据根上跑完整用户旅程（J1 冷装 Runtime+DSH+建实例+启停 · J2 重启接管 · J3 快照回滚+Pack 新机重建 · J4 迁移提交/续传/撤销 · J5 真实更新清单契约含 minisign keyid 比对）与系统级故障注入（F1 强杀 · F2 断流重试 · F2b 取消续传且**异体内容绝不混拼** · F3 目标锁死旧安装不丢 · F4 晚退出 kept-alive 语义 · F5 磁盘满待 VM）；②安装器冒烟 `e2e/install-smoke.mjs`——真 NSIS 静默安装→CDP 首启（WebView2 远程调试端口 + raw CDP，零新依赖；`cdp-spike.mjs` 本机验证通过）→真实 IPC 往返→console 零异常→覆盖升级→卸载且用户数据保留；③UI 观感、一键更新点击、SmartScreen、磁盘满显式留干净 VM 档。接线：CI 新增 `windows-e2e` job（每次 PR，11 项全绿才算），`release.yml` 在 Create Release 与推 `updates` 之前跑双门禁，任一失败不发布。本机验证：核心 11/11 通过（约 5.5 分钟），冒烟 exe 模式通过；为门禁新增的 `run_launch` 接缝（`retain_child` 回调）与 storage/pack 的 `pub(crate)` 提升不改变生产行为，常规套 354+37+4 项、clippy `-D warnings`、fmt、bridge、typecheck 全绿。场景↔手测清单 1:1 映射与诚实边界见 [Windows E2E Release Gate](docs/windows-e2e-release-gate.md)。
+
 2026-09-11 Alpha 发布轮：**`v0.1.0-alpha.4` 已发布，远端资产与更新清单全部核验通过。** 发布准备提交的 Rust job 被 runner 上的 Rust 1.98 新增 `some_filter` lint 拦下（`-D warnings` 致错，run `34549713203`），按 Clippy 建议单行改 `then_some`（`6ba04c7`）后 main CI 全绿（run `34550242283`）；annotated tag 触发的 Release 在干净 runner 上 16 分钟成功（run `34550553053`），GitHub Release 为 prerelease，签名清单已推 `updates` 分支。远端核验：本机下载安装包 3,130,382 字节，SHA-256 `2CFF1981…DD79D1` 与 `.sha256` sidecar、GitHub digest 三方一致；`.sig` 与清单 `signature` 逐字节一致，keyid 匹配 `tauri.conf.json` 公钥（与 alpha.3 相同，旧版应用内更新器会接受此版），对下载文件 BLAKE2b-512 + Ed25519 验签通过；updater 端点在线返回 0.1.0-alpha.4。真机冷安装/卸载与一键更新点击仍开放。详见 [本轮发布验收](docs/alpha-release-acceptance-2026-09-11.md)。
 
 2026-09-10 应用内自动更新：**接入 Tauri updater。** 启动后 8 秒静默读取 GitHub 上的签名清单（`updates` 分支的 `latest.json`，minisign 校验，公钥在 `tauri.conf.json`），有更新时提示；下载与安装是「设置 → 关于」里的一次点击，Windows 上安装器装完自动重启。发布流水线在打标签时用 `TAURI_SIGNING_PRIVATE_KEY` 签出 `.sig` 并生成清单（`createUpdaterArtifacts` 走 CI 专用合并配置，本地无密钥也能构建），随后推到 `updates` 分支并附到 Release。已在真实桌面端验证：本地清单服务 → 应用识别到新版本并显示更新说明；公钥与签名的 keyid 一致。详见 [自动更新说明](docs/auto-update.md)。
@@ -135,6 +147,13 @@ PHL 已经具备一个可运行的 DSH 桌面环境管理器的主体：版本�
 - [x] **O-11 改善下载恢复与取消。** —— e60a798：等待与响应头均可被取消打断（1 s 轮询窗口）；错误分类（网络类退避重试 ≤3、4xx/磁盘即时失败）；断点续传绑定 URL+ETag/Last-Modified，206 确认同一实体才追加，任何不匹配从零重启，收尾对整文件重算摘要。本地模拟服务器测试覆盖续传/异体拒绝/停滞取消/致命 404。 `versions/download.rs` 当前从头创建缓存文件；等待网络响应或下一个流分块时，取消依赖后续检查。加入可中断等待、分类重试；断点续传须绑定来源和 ETag/Last-Modified 并重新校验。验收：本地模拟慢响应、中断和内容变化，取消能结束等待，续传不会拼接不同内容。
 - [x] **O-12 控制日志与磁盘扫描缓存。** —— 95d2c80：日志尾读 256 KiB 有界（截断行丢弃）、web URL 头部有界读取、每实例仅保留最近 10 个启动日志；instance_disk_usage 15 s memo + 变更点失效（创建/删除/克隆/插件装卸/快照恢复）。扫描可取消项未做（单命令粒度已足够小），记为残留限制。 `launch/process.rs:11` 与第 191 行附近读取完整日志；改为有界读取，设置滚动和保留期限；目录占用缓存并允许显式刷新。验收：大日志尾部读取内存受上限约束；扫描可取消，缓存有更新时间和失效规则。
 - [ ] **O-13 按职责拆分大页面与桌面桥接。** —— 持续完成中：`desktop.ts` 已降至兼容导出壳（282 行、17 个领域 bridge 文件）；插件页已拆出 registry/installed/detail/update-state；2026-09-07 又将 `catalogStore.ts` 从 700+ 行拆为 91 行组合壳 + version/runtime/plugin actions + 通知策略，并将 `api_config/mod.rs` 从 1200+ 行拆为 147 行编排壳 + types/validation/launch_keys/tests。SettingsPage（约 931 行）和 InstanceDetailPage（约 878 行）仍需按完整交互继续拆分，因此不勾完成。验收：每次只迁移一个完整交互，已有行为与错误路径保持；不以文件行数作为质量指标。
+  2026-09-11 趋势复核（维护者点名）：后端重新长出复杂度中心——`instances/mod.rs` 108 KB、
+  `storage.rs` 84 KB、`launch/mod.rs` 69 KB、`plugins/install.rs` 57 KB；前端
+  SettingsPage/InstanceDetailPage 仍居首。实测其体量一半以上是内联测试（63% / 52%），
+  下一轮结构 Review 以 instances/mod.rs 与 storage.rs 为重点，工作单（数据、建议边界、
+  迁移安全规则）见 [结构审查 brief](docs/structure-review-2026-09.md)。执行纪律：测试拆出先行
+  单独提交，生产按职责拆分逐文件逐提交，全程行为零改动、既有测试全绿。
+  体积防回退已同日落地：`scripts/check-file-size.mjs` + 预算表接入 alpha-gate 与 CI（A 超预算 / B 未登记 ≥40 KB / C 幽灵条目 三类 FAIL，收缩用 `--update` 锁天花板），本地 `npm run check:size`。
 - [ ] **O-14 建立性能和可访问性基线。** —— 部分完成：PERF_BASELINE.md 已更新构建/体积/测试，并加入 `.phlpack` 64 MiB + 1000 文件的前后基准（build/validate/unpack 峰值工作集下降 95%+）及浏览器 Mock 交互预检。桌面冷启动、50/200 实例、500 插件、Tauri Profiler、125%/150% 缩放与常驻内存仍待真机采集。
 - [x] **O-15 收敛项目文档。** —— AGENTS.md 成为约定权威（CLAUDE.md 改为兼容指针）；README 的「环境修复为未来能力」与「LICENSE 占位（文件不存在）」两处失真已修正，许可证维持「发布前由维护者决定」的如实表述；SECURITY 修正 commit 固定已实现的描述、补充应用状态文件边界；各历史文档的分工写入 AGENTS 文档节。 README 已将局部修复列为未来能力，SECURITY 仍称 commit 固定未实现且凭据只有 env 引用；这些均落后于代码。保留旧计划作历史，建立当前状态入口；将适用项目约定维护到 canonical AGENTS.md，CLAUDE.md 作为兼容入口。核实 README 提到但本次文件清单未见的 LICENSE 占位，发布前由维护者决定授权方式。验收：实现状态、代码位置、已知限制和验证记录可相互追溯。
 
@@ -192,7 +211,7 @@ O-04 至 O-08 属于不同故障域，不宜混进一个“大重构”提交。
 
 | 指标 | 测量方式 | 建议验收方向 |
 |---|---|---|
-| 干净安装成功 | 固定 Windows 测试环境，从安装包创建并启动实例 | 发布候选的全部关键用例通过，记录失败原因 |
+| 干净安装成功 | **Windows E2E Release Gate**（CI `windows-e2e` + Release 门禁：无头旅程/故障注入 + 真包安装器冒烟，见 docs/windows-e2e-release-gate.md）；残余 UI 体验在干净 VM 手测 | 发布候选的全部关键用例通过，记录失败原因 |
 | 环境可恢复 | 关键写入点、磁盘满、文件锁、取消、重启注入 | 旧环境可用或进入明确恢复状态，不静默丢数据 |
 | 精确重建 | 两台干净环境对比锁定清单与启动结果 | 必需资源身份与摘要一致；差异可说明 |
 | 长任务反馈 | 从用户点击到状态反馈；从取消到任务结束 | 即时显示已接收；普通本地操作反馈建议不超过 200 ms；网络取消建议 2 秒内结束等待，提交阶段说明不可立即取消的原因 |

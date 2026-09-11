@@ -99,6 +99,14 @@
 前置：至少一个可运行的实例、一个已装插件、可写第二数据目录（如同机另一分区或 `D:\PHL-mig`）。
 每个场景完成后在下表登记结果；失败必须附错误码（消息前缀 `[code]`）与 `logs/` 片段。
 
+> **2026-09-11 自动化归属**：本节的数据面已由 Windows E2E 门禁自动执行
+> （`src-tauri/src/release_e2e/`，随每次 PR 与每次 Release 运行；映射见
+> [docs/windows-e2e-release-gate.md](docs/windows-e2e-release-gate.md)）：
+> 迁移重启续传/撤销=J4、进程接管与 kept-alive 语义=J2/F4、外部强杀=F1、
+> 下载中断与取消续传=F2/F2b、文件锁（磁盘满同族）=F3、磁盘满本体=VM 档人工执行。
+> 真机执行下列条目的目的由此从「验证机制存在」变为「验证真实 UI 对故障的
+> 表达与恢复入口」——机制层面的失败会先被门禁拦下。
+
 - [ ] ⭐ **冲突互斥**：实例 A 正在安装插件时，同时对实例 A 发起快照 → 后发起者立即收到
       `[busy] 实例 <实例id> 正被另一个操作占用，请等待其完成后重试`（id 是实例的内部标识，
       不是显示名）；等安装结束后重试快照成功。
@@ -262,6 +270,15 @@
       clippy/fmt/bridge check 全绿；NSIS 安装包成功生成。
 
 以下项目必须在真实 Tauri + 真实 DSH 或 GitHub runner 上完成，不能用浏览器 Mock/单测代替：
+
+> **2026-09-11 自动化归属**（详见 [docs/windows-e2e-release-gate.md](docs/windows-e2e-release-gate.md)）：
+> 安装包冷启动 → 安装器冒烟 I-1…I-6（Release gate 在真包上跑：静默安装、CDP
+> 首启、真实 IPC 往返、console 零异常、升级 I-7、卸载与用户数据保留 I-8/I-9）；
+> 自绘标题栏观感、关闭确认、文件对话框仍属真机。R1/R7 导出取消与 R3 插件加载
+> 的**数据面**由 J3 + 既有单测覆盖，真实 DSH 进程内的插件装载体验仍需真机。
+> M2 IPC 冒烟被安装器冒烟的 `invoke` 往返部分覆盖（逐域操作仍需人工）。
+> 磁盘满与「应用内一键更新点击安装」明确留 VM 档（F5 的 `PHL_E2E_FULL_DISK_DIR`
+> 就绪即启用）。
 
 - [ ] ⭐ **安装包冷启动**：在干净 Windows 用户环境安装本轮 `PHL_0.1.0_x64-setup.exe`，确认首帧、
       自绘标题栏、关闭确认、文件对话框和卸载流程正常。
@@ -437,6 +454,23 @@ SKIP：pack 导出 GUI 未驱动（层一 e2e 已全链覆盖，本轮聚焦 #4�
 校验→事务提交全链正常、停止时 WebUI 菜单项正确禁用、AX 元素路径可后台驱动 Tauri 窗口。
 工具链注意：computer-use 对 React 受控输入框走 AX set_value 会假成功（fail-open receipt），
 需 event 策略键入——记录于 report TOOLING，属验收工具问题非产品问题。
+
+## 18. 真机缺陷修复与记录（2026-09-11）
+
+### 进程接管与端口分配
+
+- [x] 接管/整合包实例的 manifest 不再写 `port: 0`；Rust `allocate_port` 在 auto 模式下
+      把低于 1024 的保留端口钳到 `MIN_WEB_PORT`，固定端口配置保留端口时启动失败并给出
+      `[port-conflict]` 编码错误；前端 `openWebUi` 对已存损坏端口不打开死窗口。
+- [x] 真机验证：`npm run typecheck`、`cargo test launch::` 通过；现有实例可通过「停止→启动」
+      自愈端口（如端口 1 会被换成 3080 段）。
+
+### 插件注册文件 cordis.patch.yml
+
+- [x] 卸载最后一个插件后不再把 `cordis.patch.yml` 写成纯注释文件；`write_patch_lines`
+      会在没有有效条目时补回 `[]`，保证 DSH loader 能把它解析成顶层数组并启动。
+- [x] 真机验证：已直接修复 `E:\PHL-DSH\instances\2-2s9o\dsh-home\profiles\web\cordis.patch.yml`；
+      `cargo test plugins::cordis` 15/15 通过。
 
 ## 已知的刻意外
 

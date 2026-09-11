@@ -1,0 +1,30 @@
+{
+  "note": "Ratchet size budget for docs/structure-review-2026-09.md. Each entry is the maximum bytes the file may occupy; growth beyond it fails the gate. When a file legitimately shrinks, run `node scripts/check-file-size.mjs --update` to lower the ceiling (ratchet: rooms freed by a split must not be re-filled silently). Files NOT listed may grow to UNBUDGETED_MAX (40 KB) before the gate asks for an explicit, justified registration. New entries are added by hand, never by --update: splitting adds files, growth needs a decision.",
+  "budgets": {
+    "src-tauri/src/instances/mod.rs": 113532,
+    "src-tauri/src/storage.rs": 88054,
+    "src-tauri/src/launch/mod.rs": 72785,
+    "src-tauri/src/plugins/install.rs": 59744,
+    "src-tauri/src/instances/adoption.rs": 55343,
+    "src-tauri/src/instances/copy.rs": 51000,
+    "src/pages/SettingsPage.tsx": 48606,
+    "src/pages/InstanceDetailPage.tsx": 42007,
+    "src-tauri/src/versions/mod.rs": 38995,
+    "src/features/create/sections.tsx": 38381,
+    "src-tauri/src/api_config/tests.rs": 35111,
+    "src-tauri/src/launch/registry.rs": 34028,
+    "src/stores/instanceStore.ts": 33902,
+    "src-tauri/src/pack/export.rs": 32767,
+    "src-tauri/src/resources.rs": 32058,
+    "src-tauri/src/release_e2e/journeys.rs": 34631,
+    "src-tauri/src/api_config/catalog.rs": 30516,
+    "src-tauri/src/versions/download.rs": 29722,
+    "src-tauri/src/plugins/cordis.rs": 31528,
+    "src/pages/AdoptDshPage.tsx": 29295,
+    "src-tauri/src/pack/install.rs": 27910,
+    "src-tauri/src/instances/manifest.rs": 27816,
+    "src-tauri/src/paths.rs": 27709,
+    "src-tauri/src/discovery/mod.rs": 27666,
+    "src-tauri/src/repair.rs": 27309
+  }
+}

@@ -29,6 +29,11 @@ jobs:
       # release, and this is the same script the release workflow runs.
       - run: node scripts/check-versions.mjs
 
+      # Ratchet size budget (docs/structure-review-2026-09.md): big files may
+      # not grow past their registered ceilings; shrinks ratchet down via
+      # `node scripts/check-file-size.mjs --update`.
+      - run: node scripts/check-file-size.mjs
+
       - run: npm run typecheck
 
       - run: npm run bridge:check

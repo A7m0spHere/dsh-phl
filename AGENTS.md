@@ -75,7 +75,13 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
 npm run dev        # 开发
 npm run build      # tsc -b && vite build
 npm run typecheck
+npm run check:size # 大文件 ratchet 预算（见 docs/structure-review-2026-09.md）
 ```
+
+大文件治理：受监测文件按 ratchet 预算封顶（`scripts/file-size-budget.json`，
+上限=登记时值+5%，超限 CI 直接红；未登记源文件长到 ≥40 KB 同样拦）。按 brief 完成一次拆分后运行 `npm run check:size -- --update`
+退休/下调对应条目——拆分腾出的空间不允许被后续提交回填。新增 ≥40 KB 源文件
+需人工登记并写明理由。
 
 TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确保 `npm run typecheck` 通过。
 

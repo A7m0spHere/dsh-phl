@@ -15,10 +15,13 @@
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
     "test:alpha": "node scripts/alpha-gate.mjs",
+    "test:e2e:core": "node scripts/e2e-gate.mjs core",
+    "test:e2e:smoke": "node scripts/e2e-gate.mjs smoke",
     "test:desktop": "node scripts/alpha-desktop.mjs",
     "bridge:check": "node scripts/check-tauri-bridge.mjs",
     "icon": "node scripts/make-icon.mjs",
-    "icon:all": "node scripts/make-icon.mjs --all --out=src-tauri/icons/candidates/ds-tail/build"
+    "icon:all": "node scripts/make-icon.mjs --all --out=src-tauri/icons/candidates/ds-tail/build",
+    "check:size": "node scripts/check-file-size.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
