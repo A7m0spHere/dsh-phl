@@ -205,32 +205,60 @@ async function startInstalled(exe) {
 // NSIS key spelling (`…_is1`) and the per-user vs per-machine hive both
 // depend on template internals and elevation, so neither is guessed here.
 async function locateInstalledExe() {
+  // Ground truth from the alpha.5 gate (2026-09-11): the template wraps
+  // registry values in literal quotes and installs the CARGO binary
+  // (dsh-phl.exe) — the product name only shapes the folder. Strip quotes,
+  // try either spelling, fall back to the DisplayIcon's own directory.
+  const unq = (s) => (s ?? '').replace(/^\"|\"$/g, '').trim()
+  const exeIn = (dir) => {
+    if (!dir) return null
+    for (const n of ['PHL.exe', 'dsh-phl.exe']) {
+      const p = path.join(dir, n)
+      if (fs.existsSync(p)) return p
+    }
+    try {
+      // Last resort: the one non-uninstaller exe an app dir holds.
+      const any = fs
+        .readdirSync(dir)
+        .find((x) => x.toLowerCase().endsWith('.exe') && !/^uninstall/i.test(x))
+      return any ? path.join(dir, any) : null
+    } catch {
+      /* unreadable directory — not the install */
+      return null
+    }
+  }
+  const dirs = []
   const ps =
     `Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall, ` +
     `HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall, ` +
     `HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall ` +
     `-ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | ` +
-    `Where-Object { $_.DisplayName -eq 'PHL' -and $_.InstallLocation } | ` +
-    `Select-Object -First 1 -ExpandProperty InstallLocation`
+    `Where-Object { $_.DisplayName -eq 'PHL' } | Select-Object -First 1 | ` +
+    `ForEach-Object { 'IL:' + $_.InstallLocation + ' DI:' + $_.DisplayIcon }`
   try {
     const out = (await run('powershell', ['-NoProfile', '-Command', ps], { timeout: 30000 })).trim()
-    for (const line of out.split(/\r?\n/)) {
-      const loc = line.trim()
-      if (!loc) continue
-      const candidate = path.join(loc, 'PHL.exe')
-      if (fs.existsSync(candidate)) return candidate
-    }
+    const row = out.split(/\r?\n/).find((l) => l.trim()) ?? ''
+    const iD = row.indexOf(' DI:')
+    const il = row.startsWith('IL:') ? row.slice(3, iD >= 0 ? iD : undefined) : ''
+    const di = iD >= 0 ? row.slice(iD + 4).split(',')[0] : ''
+    dirs.push(unq(il))
+    const iconDir = di ? path.dirname(unq(di)) : ''
+    if (iconDir && iconDir !== '.') dirs.push(iconDir)
   } catch {
     /* registry scan failed — fall through to known per-user paths */
   }
   // Per-user NSIS defaults to `$LOCALAPPDATA\{productName}`; per-machine to
   // Program Files. The identifier fallbacks cover template variants.
-  const guesses = [
-    path.join(process.env.LOCALAPPDATA ?? '', 'PHL', 'PHL.exe'),
-    path.join(process.env.LOCALAPPDATA ?? '', 'dev.dshphl.desktop', 'PHL.exe'),
-    path.join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'PHL', 'PHL.exe'),
-  ]
-  return guesses.find((g) => g && fs.existsSync(g)) ?? null
+  dirs.push(
+    path.join(process.env.LOCALAPPDATA ?? '', 'PHL'),
+    path.join(process.env.LOCALAPPDATA ?? '', 'dev.dshphl.desktop'),
+    path.join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'PHL'),
+  )
+  for (const dir of dirs) {
+    const hit = exeIn(dir)
+    if (hit) return hit
+  }
+  return null
 }
 
 // ------------------------------ the lane ------------------------------
@@ -429,9 +457,11 @@ if (installer && installedExe && !failedIds.has('I-1')) {
 
   if (!failedIds.has('I-7')) {
     try {
-      const guess = path.join(path.dirname(installedExe), 'Uninstall PHL.exe')
-      let uninstaller = guess
-      if (!fs.existsSync(guess)) {
+      const tried = ['uninstall.exe', 'Uninstall.exe', 'Uninstall PHL.exe'].map((n) =>
+        path.join(path.dirname(installedExe), n),
+      )
+      let uninstaller = tried.find((p) => fs.existsSync(p)) ?? null
+      if (!uninstaller) {
         // Fall back to exactly what "Apps & features" invokes.
         const ps =
           `Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall, ` +
@@ -443,7 +473,8 @@ if (installer && installedExe && !failedIds.has('I-1')) {
         const raw = (await run('powershell', ['-NoProfile', '-Command', ps], { timeout: 30000 })).trim()
         uninstaller = raw.replace(/^"|"$/g, '')
       }
-      if (!uninstaller || !fs.existsSync(uninstaller)) throw new Error(`uninstaller not found (tried ${guess})`)
+      if (!uninstaller || !fs.existsSync(uninstaller))
+        throw new Error(`uninstaller not found (tried ${tried.join(', ')} and the registry)`)
       // The app must not be running: NSIS refuses otherwise.
       killApp()
       await sleep(1500)
