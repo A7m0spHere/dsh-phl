@@ -7,7 +7,7 @@ P0/P1 收尾轮闭环（`SessionStrategy::Selected` 实装 + 向导选择列表�
 真机手测矩阵已登记进手测清单 §11——实现与登记位置见 `docs/p2-pack-core-skill.md`。
 
 本文只记录「实现位置 + 与规格的偏差 + 已知边界」；规格本身以 `*.md` 为准，
-进度状态入口仍是 `PHL_OPTIMIZATION_ROADMAP.md`。
+进度状态入口由维护者在本地工作区维护（`PHL_OPTIMIZATION_ROADMAP.md`，不随本仓库发布）。
 
 ## P0-3 Session Spike（先行）
 
@@ -122,4 +122,4 @@ P0/P1 收尾轮闭环（`SessionStrategy::Selected` 实装 + 向导选择列表�
    的空间检查可复用。（仍未接，登记在收尾轮已知限制）
 3. ~~「按对话选择迁移」留待 P1~~ → 已实现：Selected 复制排除会话库后按选定目录原样迁入
    （原 id，迁移非分发语义），见 `docs/p2-pack-core-skill.md` §1。
-4. ~~真机手测尚未登记~~ → 已登记进 `dsh-phl-manual-test-checklist.md` §11（执行仍待 Windows 真机）。
+4. ~~真机手测尚未登记~~ → 已登记进维护者本地的手测清单 §11（不随本仓库发布；执行仍待 Windows 真机）。

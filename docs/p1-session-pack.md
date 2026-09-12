@@ -4,7 +4,7 @@
 （2026-09-06 后续轮更新）P2 已完成（`phl-pack-core` crate + `phl-pack` CLI + `phl-export` Skill，
 见 `docs/p2-pack-core-skill.md`）；本文的已知限制 1（手测登记）与 2（计数刷新）亦已在收尾轮解决。
 
-本文只记录实现位置、与规格的偏差、验证与边界。进度状态入口仍是 `PHL_OPTIMIZATION_ROADMAP.md`。
+本文只记录实现位置、与规格的偏差、验证与边界。进度状态入口由维护者在本地工作区维护（不随本仓库发布）。
 
 ## P1-1 Session 迁移引擎 — `src-tauri/src/sessions/`
 
@@ -90,7 +90,7 @@ P0 Spike 给了两条路线：①走 DSH 的 JS 运行时；②Rust 直接读写
 
 ## 已知限制 / 下一步
 
-1. ~~真机手测未登记~~ → 已登记进 `dsh-phl-manual-test-checklist.md` §12/§13（Windows 真机执行待做，含真实 DSH 启动后能否看到迁移/安装的会话）。
+1. ~~真机手测未登记~~ → 已登记进维护者本地的手测清单 §12/§13（不随本仓库发布；Windows 真机执行待做，含真实 DSH 启动后能否看到迁移/安装的会话）。
 2. ~~复制会话后计数需重开刷新~~ → 收尾轮已做即时失效（`SessionCopyPanel.onCopied` → 详情重测）。
 3. `install_pack` 的解包阶段未接可中断取消（pack 体量小，原子回滚已保证无半成品）。
 4. 远程插件自动装、`.phlpack` 文件关联/MIME、MCP/签名 PKI 等均按规格 §31 不在本阶段。

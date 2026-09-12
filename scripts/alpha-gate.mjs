@@ -24,6 +24,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const steps = [
   { name: 'version check', cmd: 'node', args: ['scripts/check-versions.mjs'] },
   { name: 'size budget', cmd: 'node', args: ['scripts/check-file-size.mjs'] },
+  { name: 'public boundary', cmd: 'node', args: ['scripts/check-public-boundary.mjs'] },
   { name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
   { name: 'bridge check', cmd: 'npm', args: ['run', 'bridge:check'] },
   { name: 'frontend tests', cmd: 'npm', args: ['test'] },

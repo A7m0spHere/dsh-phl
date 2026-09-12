@@ -34,6 +34,10 @@ jobs:
       # `node scripts/check-file-size.mjs --update`.
       - run: node scripts/check-file-size.mjs
 
+      # Publication boundary: the published tree carries code only. Planning,
+      # review and acceptance notes live in the maintainer's local workspace.
+      - run: node scripts/check-public-boundary.mjs
+
       - run: npm run typecheck
 
       - run: npm run bridge:check

@@ -48,6 +48,12 @@ jobs:
           PHL_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: node scripts/check-versions.mjs
 
+      # Publication boundary - a stray internal document must stop the build
+      # here, not after the installer is signed and the manifest is written.
+      - name: Publication boundary (code-only tree)
+        shell: bash
+        run: node scripts/check-public-boundary.mjs
+
       - run: npm test
         shell: bash
 

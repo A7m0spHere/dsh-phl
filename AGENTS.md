@@ -75,7 +75,7 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
 npm run dev        # 开发
 npm run build      # tsc -b && vite build
 npm run typecheck
-npm run check:size # 大文件 ratchet 预算（见 docs/structure-review-2026-09.md）
+npm run check:size # 大文件 ratchet 预算（预算表 scripts/file-size-budget.json）
 ```
 
 大文件治理：受监测文件按 ratchet 预算封顶（`scripts/file-size-budget.json`，
@@ -88,6 +88,7 @@ TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确�
 ## 文档分工（O-15）
 
 - `AGENTS.md`（本文件）是开发约定的唯一权威来源；`CLAUDE.md` 只是指向这里的兼容入口。
-- 当前状态与优先级的单一入口是 `PHL_OPTIMIZATION_ROADMAP.md`；
-  `dsh-phl-project-master-plan.md`、`dsh-phl-development-roadmap.md` 保留历史愿景，
-  `PROJECT_REVIEW.md` 是带日期的审查快照，`dsh-phl-manual-test-checklist.md` 承载真机验收记录。
+- 规划、评审与真机验收记录（`PHL_OPTIMIZATION_ROADMAP.md`、`dsh-phl-*.md`、`PROJECT_REVIEW.md` 等）
+  **由维护者在本地工作区维护，不随本仓库发布**；本仓库只保留与代码同生的文档：
+  `README.md`、`docs/release-notes.md`、`docs/install-note.md`、`docs/auto-update.md` 与本文件。
+  `scripts/check-public-boundary.mjs` 会在发布副本与 CI 上拦住误入库的内部文档。

@@ -2,7 +2,7 @@
 
 > 日期：2026-09-07 · 分支：main（未提交工作树）· 对应《PHL 下一阶段开发规格》§28–§30、§32–§33
 > 本清单分「✅ 已完成（附验收方法）」与「⏳ 未完成（需真机/决策）」。
-> 实现细节见 `docs/p2-pack-core-skill.md`；进度状态入口仍是 `PHL_OPTIMIZATION_ROADMAP.md`。
+> 实现细节见 `docs/p2-pack-core-skill.md`；进度状态入口由维护者在本地工作区维护（不随本仓库发布）。
 
 ## ✅ 已完成 — 可验收
 
@@ -14,7 +14,7 @@
 | 4 | **Discovery macOS/Linux 平台路径** | 新增 `discovery/{windows,macos,linux}.rs`；`inspect::executable_roots()` 补 GUI 启动看不到的 Homebrew/npm-global/nvm/Volta/Bun 根。`cd src-tauri && cargo test --lib discovery`（非宿主平台文件经 `#[cfg(test)] #[path]` 也在本机编译+测）。⚠️ 仅代码+单测，真机验证未完成（见下）。 |
 | 5 | **P2-1：抽 `phl-pack-core` crate + `phl-pack` CLI** | 格式层在 `src-tauri/crates/phl-pack-core/`；CLI `src-tauri/crates/phl-pack-cli/`（bin `phl-pack`，命令 inspect/validate/unpack/build）。验收：`cd src-tauri && cargo test --workspace` + `cargo build -p phl-pack-cli` 后 `./target/debug/phl-pack help`。桌面端 `pack/{export,install}.rs` 已变薄壳复用同一 core。 |
 | 6 | **P2-2：`phl-export` DSH Skill 文档** | `docs/skills/phl-export/SKILL.md`（侦察→分类→敏感逐项确认→组布局→CLI；铁律不发明格式）。 |
-| 7 | **§32/§33 手测矩阵登记** | `dsh-phl-manual-test-checklist.md` 新增 §11–§14（Discovery/Adoption、Session、Pack、CLI/Skill）。⚠️ 仅登记，执行未完成（见下）。 |
+| 7 | **§32/§33 手测矩阵登记** | 维护者本地手测清单新增 §11–§14（不随本仓库发布）。⚠️ 仅登记，执行未完成（见下）。 |
 | 8 | **【Review 抓到并修复】凭据文件层泄漏** | 见下方专门条目。 |
 | 9 | **全量门禁** | Rust workspace 268 通过 / 5 忽略；clippy `-D warnings`、fmt 干净；前端 typecheck 0 错、13 文件 / 73 测试通过、build 成功。 |
 | 10 | **M3 catalog store composition** | `catalogStore.ts` 只保留加载、组合和 lookup（91 行）；version/runtime/plugin actions、通知策略和共享 transfer queue 分文件。原 `useCatalogStore` API 不变，catalog/update 相关 11 项测试通过。 |
@@ -81,6 +81,5 @@ npm run bridge:check
   `stores/adoptionStore.ts`、`stores/adoptionStore.test.ts`、`pages/AdoptDshPage.tsx`、
   `pages/InstanceDetailPage.tsx`、`pages/InstancesPage.tsx`、`pages/PackExportPage.tsx`、
   `components/instance/SessionCopyPanel.tsx`。
-- **文档**：`PHL_OPTIMIZATION_ROADMAP.md`、`docs/p0-local-dsh-adoption.md`、`docs/p1-session-pack.md`、
-  `docs/p2-pack-core-skill.md`（新）、`docs/skills/phl-export/SKILL.md`（新）、
-  `dsh-phl-manual-test-checklist.md`（§11–§14）。
+- **文档**：`docs/p0-local-dsh-adoption.md`、`docs/p1-session-pack.md`、`docs/p2-pack-core-skill.md`（新）、
+  `docs/skills/phl-export/SKILL.md`（新）；进度清单与手测矩阵（§11–§14）由维护者在本地工作区维护，不随本仓库发布。
