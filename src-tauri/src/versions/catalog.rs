@@ -123,6 +123,9 @@ pub(crate) fn parse_semver(v: &str) -> Option<semver::Version> {
 #[derive(Deserialize)]
 struct Packument {
     #[serde(rename = "dist-tags")]
+    // Shape of the packument; the badge intentionally does NOT follow
+    // dist-tags.latest (see mark_latest), so nothing consumes it now.
+    #[allow(dead_code)]
     dist_tags: HashMap<String, String>,
     #[serde(default)]
     time: HashMap<String, String>,
@@ -200,9 +203,6 @@ pub(crate) async fn npm_catalog(
         .await
         .map_err(|e| format!("npm registry 响应解析失败: {e}"))?;
 
-    let latest = packument.dist_tags.get("latest").cloned();
-    let latest_semver = latest.as_deref().and_then(parse_semver);
-
     let mut out = Vec::new();
     for (ver, pv) in packument.versions {
         let sem = parse_semver(&ver);
@@ -229,7 +229,6 @@ pub(crate) async fn npm_catalog(
             .as_deref()
             .map(majors_from_engines)
             .unwrap_or_default();
-        let is_latest = latest.as_deref() == Some(ver.as_str());
         out.push((
             ver,
             NpmEntry {
@@ -237,7 +236,7 @@ pub(crate) async fn npm_catalog(
                 published_at,
                 size,
                 requires_node,
-                latest: is_latest,
+                latest: false, // decided by mark_latest below
                 tarball: pv.dist.tarball,
                 integrity: pv.dist.integrity,
                 semver: sem,
@@ -249,7 +248,99 @@ pub(crate) async fn npm_catalog(
             "npm registry 上没有找到 {DSH_PACKAGE_RAW} 的任何版本"
         ));
     }
-    Ok((out, latest_semver))
+    Ok(mark_latest(out))
+}
+
+/// The「最新」badge marks the highest available version — the same rule the
+/// create wizard preselects with — not the upstream `latest` dist-tag: npm
+/// keeps `latest` at the previous release while new prereleases ship under
+/// `next`, so the badge used to freeze on 0.1.5-rc.1 after rc.2 shipped
+/// (2026-09-11 report). Also hands the newest semver back for the
+/// legacy-line check, so both consumers share one catalog truth. Entries
+/// without a parseable version never take the badge.
+pub(crate) fn mark_latest(
+    mut out: Vec<(String, NpmEntry)>,
+) -> (Vec<(String, NpmEntry)>, Option<semver::Version>) {
+    let mut newest: Option<(usize, semver::Version)> = None;
+    for (i, (_, e)) in out.iter().enumerate() {
+        let Some(sem) = e.semver.clone() else {
+            continue;
+        };
+        if newest.as_ref().map(|(_, cur)| sem > *cur).unwrap_or(true) {
+            newest = Some((i, sem));
+        }
+    }
+    let (idx, sem) = match newest {
+        Some(v) => v,
+        None => return (out, None),
+    };
+    for (i, (_, e)) in out.iter_mut().enumerate() {
+        e.latest = i == idx;
+    }
+    (out, Some(sem))
+}
+
+#[cfg(test)]
+mod latest_badge_tests {
+    use super::*;
+
+    fn entry(v: &str) -> (String, NpmEntry) {
+        (
+            v.to_string(),
+            NpmEntry {
+                channel: "rc".into(),
+                published_at: "2026-09-10T00:00:00.000Z".into(),
+                size: 1,
+                requires_node: vec![],
+                latest: false,
+                tarball: format!("https://registry/{v}.tgz"),
+                integrity: None,
+                semver: parse_semver(v),
+            },
+        )
+    }
+
+    #[test]
+    fn badge_follows_highest_version_not_the_dist_tag() {
+        // The 2026-09-11 report: upstream dist-tags.latest stayed on rc.1
+        // while rc.2 published under `next`. The badge must move to rc.2 —
+        // what the sorted list shows first and what the wizard preselects.
+        let out = vec![
+            entry("0.1.5-rc.1"),
+            entry("0.1.5-rc.2"),
+            entry("0.1.3-alpha.2"),
+        ];
+        let (out, newest) = mark_latest(out);
+        assert_eq!(
+            newest.as_ref().map(|s| s.to_string()).as_deref(),
+            Some("0.1.5-rc.2")
+        );
+        let flagged: Vec<&str> = out
+            .iter()
+            .filter(|(_, e)| e.latest)
+            .map(|(v, _)| v.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["0.1.5-rc.2"]);
+    }
+
+    #[test]
+    fn stable_outranks_its_own_prereleases() {
+        let out = vec![entry("0.1.5-rc.2"), entry("0.1.4"), entry("0.1.5")];
+        let (out, newest) = mark_latest(out);
+        assert!(newest.unwrap().to_string() == "0.1.5");
+        assert!(out.iter().any(|(v, e)| v == "0.1.5" && e.latest));
+        assert!(out.iter().all(|(v, e)| v == "0.1.5" || !e.latest));
+    }
+
+    #[test]
+    fn unparsable_and_empty_catalogs_yield_no_badge() {
+        let out = vec![entry("not-a-version"), entry("0.1.0-rc.3")];
+        let (out, _) = mark_latest(out);
+        assert!(out.iter().any(|(v, e)| v == "0.1.0-rc.3" && e.latest));
+        assert!(out.iter().all(|(v, e)| v == "0.1.0-rc.3" || !e.latest));
+        let (out2, newest2) = mark_latest(vec![]);
+        assert!(out2.is_empty() && newest2.is_none());
+    }
 }
 
 #[derive(Deserialize)]
