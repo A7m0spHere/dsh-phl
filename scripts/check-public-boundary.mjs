@@ -10,9 +10,9 @@
  *   node scripts/check-public-boundary.mjs --list     # print the patterns
  *
  * Auto mode tells the two copies apart by their push URL: the local workspace
- * carries the disabled-…invalid placeholder from GITHUB_MIRROR_GUIDE.md and is
- * SUPPOSED to track these files, so it only reports them; anywhere else
- * (publishing copy, CI, a fresh clone) a tracked boundary file fails the run.
+ * carries a disabled-…invalid placeholder push URL and is SUPPOSED to track
+ * these files, so it only reports them; anywhere else (publishing copy, CI, a
+ * fresh clone) a tracked boundary file fails the run.
  *
  * Why this exists: the 2026-09-12 reconciliation fast-forwarded the publishing
  * copy to the workspace line and silently published 20 internal documents; the
@@ -41,8 +41,16 @@ if (args.includes('--list')) {
   process.exit(0)
 }
 
-/** Every pattern carries exactly one `*`, which never crosses a path separator. */
+/**
+ * Two glob forms only:
+ *   `dir/**`      — everything under `dir`, at ANY depth (crosses separators);
+ *   `dir/pre-*.md` — a single `*`, which never crosses a path separator.
+ * The 2026-09-12 tidy-up made the whole boundary one `internal/**` rule; the
+ * single-`*` matcher below used to swallow it silently, so the self-test at
+ * the bottom pins both forms.
+ */
 function matches(pattern, file) {
+  if (pattern.endsWith('/**')) return file.startsWith(pattern.slice(0, -2))
   const star = pattern.indexOf('*')
   if (star === -1) return file === pattern
   const head = pattern.slice(0, star)
@@ -50,6 +58,27 @@ function matches(pattern, file) {
   if (!file.startsWith(head) || !file.endsWith(tail)) return false
   return !file.slice(head.length, file.length - tail.length).includes('/')
 }
+
+/** Guards the matcher itself: `**` crosses separators, `*` does not. */
+function selfTest() {
+  const cases = [
+    ['internal/**', 'internal/README.md', true],
+    ['internal/**', 'internal/reviews/deep/nested.md', true],
+    ['internal/**', 'internal', false],
+    ['internal/**', 'src/internal/README.md', false],
+    ['docs/pre-*.md', 'docs/pre-1.md', true],
+    ['docs/pre-*.md', 'docs/pre/1.md', false],
+  ]
+  const bad = cases.filter(([pattern, file, want]) => matches(pattern, file) !== want)
+  if (bad.length === 0) return
+  console.error('BOUNDARY MATCHER BROKEN:')
+  for (const [pattern, file, want] of bad) {
+    console.error(`  ${pattern} vs ${file}: want ${want}, got ${!want}`)
+  }
+  process.exit(1)
+}
+
+selfTest()
 
 function git(gitArgs) {
   try {
@@ -87,6 +116,6 @@ if (isLocalWorkspace && !args.includes('--enforce')) {
 
 console.error('PUBLICATION BOUNDARY FAILED - ' + hits.length + ' internal document(s) tracked in a publishing tree:')
 for (const file of hits) console.error('  ' + file)
-console.error('Drop them (git rm --cached) and keep the boundary block in .gitignore;')
-console.error('the procedure lives in GITHUB_MIRROR_GUIDE.md in the local workspace.')
+console.error('Drop them (git rm --cached) and keep the boundary rule in .gitignore;')
+console.error('the procedure lives in the maintainer-local ops notes (internal/ops).')
 process.exit(1)
