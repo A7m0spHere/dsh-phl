@@ -271,9 +271,15 @@
 
 以下项目必须在真实 Tauri + 真实 DSH 或 GitHub runner 上完成，不能用浏览器 Mock/单测代替：
 
-> **2026-09-11 自动化归属**（详见 [docs/windows-e2e-release-gate.md](docs/windows-e2e-release-gate.md)）：
-> 安装包冷启动 → 安装器冒烟 I-1…I-6（Release gate 在真包上跑：静默安装、CDP
-> 首启、真实 IPC 往返、console 零异常、升级 I-7、卸载与用户数据保留 I-8/I-9）；
+> **2026-09-12 车道拆分（alpha.5 发布轮定案）**（详见 [docs/windows-e2e-release-gate.md](docs/windows-e2e-release-gate.md)）：
+> 安装器冒烟分两条车道执行同一份脚本——**宿主车道**（release/CI runner，`--no-gui`）
+> 阻塞 I-0…I-2 与 I-6…I-9（静默安装、产物定位与版本、更新清单契约、覆盖升级、
+> 卸载、用户数据保留）；**真机车道**（提权桌面控制台，不加 `--no-gui`）跑满 11 步，
+> 额外覆盖 I-3b 页目标 / I-4 真实 IPC 往返 / I-5 console 零异常。托管 runner 上
+> WebView2 DevTools 端口不绑定（取证 `app=True wv=5 bind=0`），故渲染三步在宿主
+> 车道是**显式 SKIP**，永不静默变绿；alpha.5 真机报告入库
+> `docs/alpha5-installer-smoke-manual-2026-09-12.json`（11/11，exitCode 0）。
+> 2026-09-11 的归属说明（保留）：安装包冷启动 → 安装器冒烟 I-1…I-6（Release gate 在真包上跑）；
 > 自绘标题栏观感、关闭确认、文件对话框仍属真机。R1/R7 导出取消与 R3 插件加载
 > 的**数据面**由 J3 + 既有单测覆盖，真实 DSH 进程内的插件装载体验仍需真机。
 > M2 IPC 冒烟被安装器冒烟的 `invoke` 往返部分覆盖（逐域操作仍需人工）。
@@ -298,6 +304,9 @@
       测试与短路径环境通过；之后做受控 tag 演练。未获明确授权前不提交、不推送、不创建 PR/tag。
       **已关闭（2026-09-11）**：公开提交 `6ba04c7` CI 两 job 全绿（run `34550242283`）；受控 tag `v0.1.0-alpha.4` 的 Release
       run `34550553053` 成功，安装哈希、minisign 验签与更新清单核验见 [docs/alpha-release-acceptance-2026-09-11.md](docs/alpha-release-acceptance-2026-09-11.md)。
+      **alpha.5 续记（2026-09-12）**：CI run `34677702589` 三 job 全绿；受控 tag `v0.1.0-alpha.5` = `c15fa82` 的 Release
+      run `34678169041` 成功，安装包 SHA-256 三方一致、minisign（ED 预哈希）对下载件验签通过、`updates` 与在线端点均为 0.1.0-alpha.5，
+      详见 [本轮发布验收](docs/alpha-release-acceptance-2026-09-12.md)。
 
 ## 16. 统一启动焦点与内嵌 WebUI 窗口（2026-09-08）
 
