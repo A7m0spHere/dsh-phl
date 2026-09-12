@@ -35,3 +35,22 @@ tmp-refs/
 # Icon exploration output (contact sheets, per-concept renders). Regenerate any
 # of it with scripts/icon-lab.mjs; only the master and the snapshots are kept.
 src-tauri/icons/candidates/
+
+# ── Publication boundary (2026-09-12) ─────────────────────────────────────
+# This copy is the PUBLIC tree: code, build config and tests only. Internal
+# planning, review and acceptance notes live in the local workspace
+# (D:\AI项目\dsh-phl) and must never be tracked here — the 2026-09-12
+# reconciliation fast-forwarded this copy to the workspace line and published
+# them silently; this list is the guard that was lost then. See the
+# workspace's local GITHUB_MIRROR_GUIDE.md.
+CLAUDE.md
+PHL_OPTIMIZATION_ROADMAP.md
+PROJECT_REVIEW*.md
+PROJECT_STABILIZATION_*.md
+PROJECT_UX_REVIEW_*.md
+dsh-phl-*.md
+docs/alpha-release-acceptance-*.md
+docs/alpha5-installer-smoke-manual-*.json
+docs/preview-release-*.md
+docs/structure-review-*.md
+docs/windows-e2e-release-gate.md
