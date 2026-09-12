@@ -144,7 +144,13 @@ jobs:
         run: |
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report
+          # --no-gui: this hosted runner starts the installed app but never
+          # opens WebView2's DevTools port (alpha.5 forensics on two runner
+          # sessions: app=True wv=5 bind=0), so the renderer trio (page
+          # target · IPC · console) is the manual desktop lane's job and
+          # reports SKIP here. Install, version, upgrade, uninstall and the
+          # user-data promise stay blocking.
+          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report --no-gui
 
       - name: Upload the gate evidence
         if: always()

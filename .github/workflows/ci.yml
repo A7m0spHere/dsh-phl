@@ -162,15 +162,17 @@ jobs:
       - run: npm run app:build
         shell: bash
 
-      # The dispatch build is also the installer-lane rehearsal: run the full
-      # OS smoke (silent install → CDP first-launch → upgrade → uninstall)
-      # against the exact bundle the job produced, before it is uploaded.
-      - name: Installer smoke (CDP lane)
+      # The dispatch build is also the installer-lane rehearsal: run the OS
+      # smoke (silent install → upgrade → uninstall) against the exact bundle
+      # the job produced, before it is uploaded. --no-gui: a hosted runner
+      # cannot open WebView2's DevTools port, so the renderer trio lives in
+      # the manual desktop lane (docs/windows-e2e-release-gate.md).
+      - name: Installer smoke (hosted lane)
         shell: pwsh
         run: |
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report
+          node e2e/install-smoke.mjs --installer=$($setup.FullName) --expect-version=$version --out=e2e-report --no-gui
         env:
           PHL_SMOKE_KEEP: "0"
 

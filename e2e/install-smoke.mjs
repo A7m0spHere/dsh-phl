@@ -10,8 +10,14 @@
  *
  * Usage:
  *   node e2e/install-smoke.mjs --installer=<setup.exe> [--expect-version=X.Y.Z]
- *                             [--out=<report-dir>] [--keep]
+ *                             [--out=<report-dir>] [--keep] [--no-gui]
  *   node e2e/install-smoke.mjs --exe=<phl.exe>        # run-only smoke
+ *
+ * `--no-gui` is for hosts that launch the app but cannot open WebView2's
+ * DevTools port (the GitHub-hosted Windows runner: alpha.5 forensics read
+ * `app=True wv=5 bind=0`). It turns the renderer-facing trio (I-3b/I-4/I-5)
+ * into explicit SKIPs that name the manual desktop lane as their home —
+ * never a silent pass.
  *
  * Steps for the installer mode:
  *   I-1  silent install (`/S`)                     → files on disk
@@ -47,6 +53,11 @@ const directExe = argOf('exe')
 const expectVersion = argOf('expect-version')
 const outDir = argOf('out') ?? path.join(os.tmpdir(), 'phl-install-smoke-report')
 const keep = args.includes('--keep')
+const noGui = args.includes('--no-gui')
+// Kept in one place so the report text is identical wherever the split
+// shows up (I-3b, I-4, I-5).
+const GUI_DEFERRED =
+  'renderer lane: deferred to the manual desktop lane (this host starts the app but cannot open WebView2 DevTools)'
 
 if (!installer && !directExe) {
   console.error('usage: install-smoke.mjs --installer=<setup.exe> | --exe=<phl.exe> [--expect-version=V]')
@@ -460,12 +471,22 @@ if (!installedExe) {
 } else {
   try {
     await startInstalled(installedExe)
-    step('I-3', 'installed app starts and holds a window', 'PASS')
-    const page = await connectCdp()
-    cdp = cdpClient(page.webSocketDebuggerUrl)
-    await cdp.ready
-    await cdp.send('Runtime.enable')
-    step('I-3b', 'CDP page target reachable', 'PASS', page.url)
+    if (noGui) {
+      step(
+        'I-3',
+        'installed app starts and holds a window',
+        'PASS',
+        'launch only (--no-gui: renderer steps deferred to the desktop lane)'
+      )
+      step('I-3b', 'CDP page target reachable', 'SKIP', GUI_DEFERRED)
+    } else {
+      step('I-3', 'installed app starts and holds a window', 'PASS')
+      const page = await connectCdp()
+      cdp = cdpClient(page.webSocketDebuggerUrl)
+      await cdp.ready
+      await cdp.send('Runtime.enable')
+      step('I-3b', 'CDP page target reachable', 'PASS', page.url)
+    }
   } catch (e) {
     step('I-3', 'installed app starts and holds a window', 'FAIL', e.message)
   }
@@ -511,8 +532,9 @@ if (cdp) {
     step('I-5', 'no console errors on first window', 'FAIL', e.message)
   }
 } else {
-  step('I-4', 'bridge + real IPC round-trip', 'SKIP', 'no CDP session')
-  step('I-5', 'no console errors on first window', 'SKIP', 'no CDP session')
+  const why = noGui ? GUI_DEFERRED : 'no CDP session'
+  step('I-4', 'bridge + real IPC round-trip', 'SKIP', why)
+  step('I-5', 'no console errors on first window', 'SKIP', why)
 }
 
 // I-6 updater manifest contract (host side). This gate runs BEFORE the new
