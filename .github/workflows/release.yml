@@ -139,7 +139,7 @@ jobs:
       # Everything above produced bytes; everything below proves those bytes
       # behave on a clean Windows machine BEFORE a Release exists and before
       # the updater manifest points any installed app at them. A failing gate
-      # publishes nothing. (docs/windows-e2e-release-gate.md)
+      # publishes nothing. (gate boundaries live in maintainer-local docs)
       - name: E2E gate — headless journeys & fault injection
         shell: bash
         working-directory: src-tauri

@@ -29,7 +29,7 @@ jobs:
       # release, and this is the same script the release workflow runs.
       - run: node scripts/check-versions.mjs
 
-      # Ratchet size budget (docs/structure-review-2026-09.md): big files may
+      # Ratchet size budget (rule recorded in scripts/file-size-budget.json): big files may
       # not grow past their registered ceilings; shrinks ratchet down via
       # `node scripts/check-file-size.mjs --update`.
       - run: node scripts/check-file-size.mjs
@@ -105,8 +105,8 @@ jobs:
   # download abort/resume, locked destination, late exit), all against mock
   # registries on a throwaway data root. `--test-threads=1` is load-bearing:
   # the cases bind real sockets and spawn real children.
-  # ~6 min including the compile; see docs/windows-e2e-release-gate.md for
-  # what the installer lane adds on top (it lives in release.yml / dispatch).
+  # ~6 min including the compile; the installer lane runs on top of it in
+  # release.yml / dispatch (gate boundaries live in maintainer-local docs).
   windows-e2e:
     name: Windows E2E (journeys · fault injection)
     runs-on: windows-latest
@@ -170,7 +170,7 @@ jobs:
       # smoke (silent install → upgrade → uninstall) against the exact bundle
       # the job produced, before it is uploaded. --no-gui: a hosted runner
       # cannot open WebView2's DevTools port, so the renderer trio lives in
-      # the manual desktop lane (docs/windows-e2e-release-gate.md).
+      # the manual desktop lane (gate boundaries live in maintainer-local docs).
       - name: Installer smoke (hosted lane)
         shell: pwsh
         run: |

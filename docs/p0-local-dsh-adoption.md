@@ -7,7 +7,7 @@ P0/P1 收尾轮闭环（`SessionStrategy::Selected` 实装 + 向导选择列表�
 真机手测矩阵已登记进手测清单 §11——实现与登记位置见 `docs/p2-pack-core-skill.md`。
 
 本文只记录「实现位置 + 与规格的偏差 + 已知边界」；规格本身以 `*.md` 为准，
-进度状态入口由维护者在本地工作区维护（`PHL_OPTIMIZATION_ROADMAP.md`，不随本仓库发布）。
+进度状态入口由维护者在本地工作区维护（不随本仓库发布）。
 
 ## P0-3 Session Spike（先行）
 

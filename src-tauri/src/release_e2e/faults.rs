@@ -439,7 +439,7 @@ async fn guarded_install(
 
 /// Re-install over an EXISTING version whose payload is held open by
 /// another handle — the CI-runnable sibling of disk-full (a real full disk
-/// needs admin quota/VHD, see docs/windows-e2e-release-gate.md).
+/// needs admin quota/VHD — recorded in the maintainer-local gate docs).
 ///
 /// Honest scope: Windows locks files, not parent renames — with a held file
 /// INSIDE the destination the transaction may legitimately complete or
@@ -640,6 +640,6 @@ fn probe_exited(pid: u32) -> bool {
 /* F5 (disk-full) intentionally has no automated placeholder: an early
 `return` reads green in the tally while asserting nothing. A real ENOSPC
 needs an admin quota or a VHD — the self-hosted VM lane runs it manually
-(docs/windows-e2e-release-gate.md §VM). The CI-runnable sibling (locked
+(§VM of the maintainer-local gate docs). The CI-runnable sibling (locked
 payload) is F3; the coded `[disk-full]` classification is unit-tested in
 `storage.rs`/`versions/install.rs`. */

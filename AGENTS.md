@@ -87,8 +87,12 @@ TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确�
 
 ## 文档分工（O-15）
 
-- `AGENTS.md`（本文件）是开发约定的唯一权威来源；`CLAUDE.md` 只是指向这里的兼容入口。
-- 规划、评审与真机验收记录（`PHL_OPTIMIZATION_ROADMAP.md`、`dsh-phl-*.md`、`PROJECT_REVIEW.md` 等）
-  **由维护者在本地工作区维护，不随本仓库发布**；本仓库只保留与代码同生的文档：
-  `README.md`、`docs/release-notes.md`、`docs/install-note.md`、`docs/auto-update.md` 与本文件。
-  `scripts/check-public-boundary.mjs` 会在发布副本与 CI 上拦住误入库的内部文档。
+- `AGENTS.md`（本文件）是开发约定的唯一权威来源；仓库根目录的 `CLAUDE.md` 只是指向它的兼容入口，
+  仅存在于本地工作区（发布副本 `.gitignore` 排除，公开树不含此文件）。
+- 规划、评审与真机验收记录统一放在 **`internal/`**（本地专用，不随本仓库发布）：
+  `internal/planning/`（路线图与计划）、`internal/reviews/`（评审快照，含 `2026-09-09-preview-release/`）、
+  `internal/acceptance/`（各版本发布验收）、`internal/gates/`（E2E 门禁说明与真机报告）、
+  `internal/checklists/`（手测清单）、`internal/ops/`（发布副本规程）；`internal/README.md` 是索引。
+- 本仓库只保留与代码同生的文档：`README.md`、`docs/release-notes.md`、`docs/install-note.md`、
+  `docs/auto-update.md` 与本文件。`scripts/check-public-boundary.mjs` 以单条 `internal/**` 规则
+  在发布副本与 CI 上拦住误入库的内部文档。

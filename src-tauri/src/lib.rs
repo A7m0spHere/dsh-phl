@@ -29,7 +29,7 @@ mod ipc_contract;
 /// headlessly against throwaway roots, with system-level fault injection
 /// (force-kill, mid-stream download abort, late-exiting processes). It runs
 /// on the `windows-e2e` CI job via `cargo test --workspace -- --ignored
-/// release_e2e`; see `docs/windows-e2e-release-gate.md` for the scenario map.
+/// release_e2e`; the scenario map lives in maintainer-local gate docs.
 #[cfg(all(test, windows))]
 mod release_e2e;
 

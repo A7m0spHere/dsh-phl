@@ -26,20 +26,12 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-/** Mirrors the publication-boundary block in the publishing copy's .gitignore. */
-const BOUNDARY = [
-  'CLAUDE.md',
-  'PHL_OPTIMIZATION_ROADMAP.md',
-  'PROJECT_REVIEW*.md',
-  'PROJECT_STABILIZATION_*.md',
-  'PROJECT_UX_REVIEW_*.md',
-  'dsh-phl-*.md',
-  'docs/alpha-release-acceptance-*.md',
-  'docs/alpha5-installer-smoke-manual-*.json',
-  'docs/preview-release-*.md',
-  'docs/structure-review-*.md',
-  'docs/windows-e2e-release-gate.md',
-]
+/**
+ * Every internal document lives under this one directory (2026-09-12 tidy-up),
+ * so the boundary is a single rule instead of a name list that drifts. The
+ * publishing copy's .gitignore carries the same line.
+ */
+const BOUNDARY = ['internal/**']
 
 const args = process.argv.slice(2)
 

@@ -1,5 +1,5 @@
 {
-  "note": "Ratchet size budget for docs/structure-review-2026-09.md. Each entry is the maximum bytes the file may occupy; growth beyond it fails the gate. When a file legitimately shrinks, run `node scripts/check-file-size.mjs --update` to lower the ceiling (ratchet: rooms freed by a split must not be re-filled silently). Files NOT listed may grow to UNBUDGETED_MAX (40 KB) before the gate asks for an explicit, justified registration. New entries are added by hand, never by --update: splitting adds files, growth needs a decision.",
+  "note": "Ratchet size budget (rule from the maintainer-local structural review). Each entry is the maximum bytes the file may occupy; growth beyond it fails the gate. When a file legitimately shrinks, run `node scripts/check-file-size.mjs --update` to lower the ceiling (ratchet: rooms freed by a split must not be re-filled silently). Files NOT listed may grow to UNBUDGETED_MAX (40 KB) before the gate asks for an explicit, justified registration. New entries are added by hand, never by --update: splitting adds files, growth needs a decision.",
   "budgets": {
     "src-tauri/src/instances/mod.rs": 113532,
     "src-tauri/src/storage.rs": 88054,

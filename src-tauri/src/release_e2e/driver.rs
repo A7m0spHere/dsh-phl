@@ -13,7 +13,7 @@
 //! deliberately does NOT cover is the GUI-side watcher itself — window events
 //! and exit notifications that need a live `AppHandle`; those belong to the
 //! installer/CDP smoke lane, and this boundary is recorded in
-//! `docs/windows-e2e-release-gate.md`.
+//! the maintainer-local gate documentation.
 
 use std::collections::HashMap;
 

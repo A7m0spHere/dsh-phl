@@ -1,7 +1,7 @@
 //! Real Instance Manager backing: an instance is a directory on disk, not a
 //! record in memory.
 //!
-//! Layout follows `dsh-phl-development-roadmap.md` §7:
+//! Layout follows the instance-layout plan §7 (maintainer-local planning docs):
 //!
 //! ```text
 //! <root>/instances/<id>/

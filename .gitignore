@@ -37,20 +37,12 @@ tmp-refs/
 src-tauri/icons/candidates/
 
 # ── Publication boundary (2026-09-12) ─────────────────────────────────────
-# This copy is the PUBLIC tree: code, build config and tests only. Internal
-# planning, review and acceptance notes live in the local workspace
-# (D:\AI项目\dsh-phl) and must never be tracked here — the 2026-09-12
-# reconciliation fast-forwarded this copy to the workspace line and published
-# them silently; this list is the guard that was lost then. See the
-# workspace's local GITHUB_MIRROR_GUIDE.md.
+# This copy is the PUBLIC tree: code, build config and tests only. All local
+# planning, review, acceptance and ops notes live in the workspace's
+# internal/ directory (D:\AI项目\dsh-phl\internal) and must never be tracked
+# here — the 2026-09-12 reconciliation fast-forwarded this copy to the
+# workspace line and published them silently. The single rule below mirrors
+# BOUNDARY in scripts/check-public-boundary.mjs; change both together.
+internal/
+# Root compat pointer to AGENTS.md — local workspace only.
 CLAUDE.md
-PHL_OPTIMIZATION_ROADMAP.md
-PROJECT_REVIEW*.md
-PROJECT_STABILIZATION_*.md
-PROJECT_UX_REVIEW_*.md
-dsh-phl-*.md
-docs/alpha-release-acceptance-*.md
-docs/alpha5-installer-smoke-manual-*.json
-docs/preview-release-*.md
-docs/structure-review-*.md
-docs/windows-e2e-release-gate.md

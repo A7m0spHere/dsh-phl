@@ -20,7 +20,7 @@
 //! is required: journeys bind real sockets, spawn real children and probe
 //! real pids, so they must not interleave on a shared machine.
 //!
-//! Scenario map (full 1:1 table in `docs/windows-e2e-release-gate.md`):
+//! Scenario map (full 1:1 table in the maintainer-local gate docs):
 //! J1 cold install → runtime → version → create → launch → stop ·
 //! J2 restart adoption · J3 snapshot → rollback → pack export/install ·
 //! J4 journaled storage migration (commit/resume/undo) · J5 updater manifest

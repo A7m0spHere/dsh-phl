@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Ratchet size budget — keeps the big files from silently growing back.
- * Companion to docs/structure-review-2026-09.md; the qualitative rule there:
- * size is not a quality metric, but UNBOUNDED growth is how last year's
- * review found `instances/mod.rs` at 108 KB again.
+ * Companion to scripts/file-size-budget.json; the qualitative rule behind it:
+ * size is not a quality metric, but UNBOUNDED growth is how a past review
+ * found `instances/mod.rs` at 108 KB again.
  *
  *   node scripts/check-file-size.mjs            # verify
  *   node scripts/check-file-size.mjs --update   # re-ratchet to current sizes
@@ -121,7 +121,7 @@ if (violations.length === 0 && missing.length === 0 && unregistered.length === 0
 } else {
   for (const v of violations) {
     console.log(
-      `FAIL  ${v.rel}: ${v.size} bytes > budget ${v.cap} (+${((v.size / v.cap - 1) * 100).toFixed(1)}%). Split per docs/structure-review-2026-09.md, or raise the budget consciously in review.`,
+      `FAIL  ${v.rel}: ${v.size} bytes > budget ${v.cap} (+${((v.size / v.cap - 1) * 100).toFixed(1)}%). Split the file, or raise its budget consciously in review.`,
     )
   }
   for (const m of missing) {
