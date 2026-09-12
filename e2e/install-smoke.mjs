@@ -30,7 +30,7 @@
  * A step that already FAILed is never overwritten by a later PASS for the
  * same id — the evidence trail must not contain both verdicts.
  */
-import { execFile, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -91,6 +91,9 @@ const finish = (code) => {
   report.finishedAt = new Date().toISOString()
   report.exitCode = code
   killApp()
+  // medium-IL launch task (elevated hosts only): one-shot, but leave
+  // nothing registered behind.
+  removeSmokeTask()
   const file = path.join(outDir, `install-smoke-${Date.now()}.json`)
   fs.writeFileSync(file, JSON.stringify(report, null, 2))
   console.log(`\nreport: ${file}`)
@@ -136,7 +139,23 @@ async function connectCdp(timeoutMs = 20000) {
     }
     await sleep(500)
   }
-  throw new Error(`no page target on DevTools port ${PORT} within ${timeoutMs} ms`)
+  // The blind timeout wasted three release iterations (alpha.5). Collect
+  // the scene: app alive? PHL's own webview processes up (filtering out
+  // other WebView2 apps on the machine)? anything bound on the port?
+  let scene = ''
+  try {
+    const forensics = pwsh(
+      "'app=' + [bool](Get-Process dsh-phl -EA SilentlyContinue) +" +
+      "' wv=' + @(Get-CimInstance Win32_Process -Filter \"name='msedgewebview2.exe'\" |" +
+      " Where-Object { $_.CommandLine -match 'dsh-phl' }).Count +" +
+      "' bind=' + @(netstat -ano | Select-String ':${PORT}').Count",
+      15000
+    )
+    scene = ' [scene: ' + forensics.replace(/\s+/g, ' ').trim() + ']'
+  } catch {
+    /* forensics must never mask the real error */
+  }
+  throw new Error(`no page target on DevTools port ${PORT} within ${timeoutMs} ms${scene}`)
 }
 
 function cdpClient(wsUrl) {
@@ -178,25 +197,142 @@ function cdpClient(wsUrl) {
 }
 
 // ------------------------------ app start ------------------------------
-async function startInstalled(exe) {
-  app = spawn(exe, [], {
-    windowsHide: true,
-    detached: true,
-    env: {
-      ...process.env,
-      // The one setting that opens the WebView2 DevTools port.
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
-    },
-  })
-  app.on('error', () => {
-    /* the early-exit check below reports it */
-  })
-  app.unref()
-  const started = app
-  await sleep(4000)
-  if (started.exitCode !== null) {
-    throw new Error(`app exited early with code ${started.exitCode}`)
+// WebView2 refuses the remote-debugging port when the app runs on an
+// elevated token — proven end to end on the alpha.5 lane (2026-09-11): a
+// medium-IL launch opened the port in ~2s, every elevated launch (the admin
+// manual console AND the CI runner) never bound it at all, not even with
+// --no-sandbox. The lane may legitimately run elevated (the NSIS silent
+// install wants an admin), so when it does, the app launch goes through a
+// medium-IL scheduled task (-RunLevel Limited); the task action sets the
+// webview's debug-port env var inline (cmd), so nothing persists in the
+// user environment. A medium host keeps the plain spawn — fewer moving
+// parts, same result.
+let elevatedCache = null
+function hostIsElevated() {
+  if (elevatedCache === null) {
+    try {
+      execFileSync('net', ['session'], { stdio: 'ignore', windowsHide: true })
+      elevatedCache = true
+    } catch {
+      elevatedCache = false
+    }
   }
+  return elevatedCache
+}
+
+// Sync PowerShell helper (stdout string); `run` above is the async
+// execFile variant the rest of the lane uses.
+function pwsh(script, ms = 30000) {
+  return execFileSync(
+    'powershell',
+    ['-NoProfile', '-Command', script],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: ms }
+  )
+    .toString()
+    .trim()
+}
+
+let smokeTaskName = null
+let smokeBroker = null
+function removeSmokeTask() {
+  if (smokeBroker) {
+    try {
+      fs.rmSync(smokeBroker, { force: true })
+    } catch {
+      /* temp litter at worst */
+    }
+    smokeBroker = null
+  }
+  if (!smokeTaskName) return
+  try {
+    pwsh(`Unregister-ScheduledTask -TaskName '${smokeTaskName}' -Confirm:$false`)
+  } catch {
+    /* best effort: a leftover one-shot task is inert */
+  }
+  smokeTaskName = null
+}
+
+async function startInstalled(exe) {
+  if (!hostIsElevated()) {
+    app = spawn(exe, [], {
+      windowsHide: true,
+      detached: true,
+      env: {
+        ...process.env,
+        // The one setting that opens the WebView2 DevTools port.
+        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+      },
+    })
+    app.on('error', () => {
+      /* the early-exit check below reports it */
+    })
+    app.unref()
+    const startedDirect = app
+    await sleep(4000)
+    if (startedDirect.exitCode !== null) {
+      throw new Error(`app exited early with code ${startedDirect.exitCode}`)
+    }
+    return startedDirect
+  }
+  removeSmokeTask()
+  // The task action is a tiny .bat (write below): set the debug-port var,
+  // then `start "" "exe"`. Everything through Task Scheduler's arguments is
+  // quote-fragile (nested set/start lines reach cmd already mangled); the
+  // bat file has no second quoting layer to survive. The principal must be
+  // explicit: the default logon type parks the launch where no desktop (or
+  // no env) exists — a lab run of the same task with Interactive+Limited
+  // opened the port in seconds; without it the app never appeared at all.
+  const task = `phl-smoke-${Date.now()}`
+  const broker = path.join(os.tmpdir(), `phl-smoke-broker-${process.pid}.bat`)
+  const brokerLines = [
+    '@echo off',
+    `set "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=${PORT}"`,
+  ]
+  // The task inherits the Task Scheduler's (stale) environment, not this
+  // process's — so the lane's PHL_ROOT has to ride along explicitly. Without
+  // this the app under test boots against the real data root: the alpha.5
+  // acceptance run reported "2 instances visible" from a supposed-empty
+  // scratch root (harmless there, but it voids the isolation promise).
+  if (process.env.PHL_ROOT) {
+    brokerLines.push(`set "PHL_ROOT=${process.env.PHL_ROOT}"`)
+  }
+  brokerLines.push(`start "" "${exe}"`, '')
+  fs.writeFileSync(broker, brokerLines.join('\r\n'))
+  const user = execFileSync(
+    'powershell',
+    ['-NoProfile', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().Name'],
+    { windowsHide: true }
+  )
+    .toString()
+    .trim()
+  pwsh(
+    `$p = New-ScheduledTaskPrincipal -UserId '${user}' -LogonType Interactive -RunLevel Limited;` +
+    ` $a = New-ScheduledTaskAction -Execute '${broker.replace(/'/g, "''")}';` +
+    ` Register-ScheduledTask -TaskName '${task}' -Action $a -Principal $p -Force | Out-Null;` +
+    ` Start-ScheduledTask -TaskName '${task}'`
+  )
+  smokeTaskName = task
+  smokeBroker = broker // deleted with the task: the runner starts the bat
+  // asynchronously, an immediate rmSync races it
+  await sleep(5000)
+  const pidLine = pwsh(`(Get-Process dsh-phl -ErrorAction SilentlyContinue | Select-Object -First 1).Id`)
+  const launched = Number(String(pidLine).trim())
+  if (!launched) {
+    removeSmokeTask()
+    throw new Error('elevated host: the medium-IL task launched no dsh-phl process')
+  }
+  const started = {
+    pid: launched,
+    exitCode: null,
+    kill() {
+      try {
+        execFileSync('taskkill', ['/PID', String(launched), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      } catch {
+        /* already gone */
+      }
+    },
+  }
+  app = started
   return started
 }
 
