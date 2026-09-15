@@ -1,10 +1,10 @@
 import { motion } from 'motion/react'
 import { cn } from '@/lib/cn'
-import { formatClock } from '@/lib/format'
+import { formatClock, formatDateTime } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
 import type { InstanceStatus } from '@/types'
-import { Spinner } from '@/components/ui'
+import { Spinner, Tooltip } from '@/components/ui'
 
 const LABEL: Record<InstanceStatus, string> = {
   stopped: '已停止',
@@ -61,24 +61,28 @@ export function StatusPill({
   const { t } = useMotion()
 
   return (
-    <motion.span
-      layout="position"
-      transition={t(0.2)}
-      className={cn(
-        'inline-flex h-[19px] items-center gap-1 rounded-full bg-surface-sunken px-1.5 text-2xs font-medium ring-1 ring-inset ring-line',
-        TONE[status],
-        className,
-      )}
+    <Tooltip
+      content={status === 'running' && startedAt ? `自 ${formatDateTime(startedAt)} 起运行` : ''}
     >
-      {status === 'starting' || status === 'stopping' ? (
-        <Spinner size={10} weight={2.6} />
-      ) : (
-        <StatusDot status={status} size={5} />
-      )}
-      {LABEL[status]}
-      {showClock && status === 'running' && startedAt && (
-        <span className="num text-2xs tabular-nums text-ink-faint">{formatClock(uptime)}</span>
-      )}
-    </motion.span>
+      <motion.span
+        layout="position"
+        transition={t(0.2)}
+        className={cn(
+          'inline-flex h-[19px] items-center gap-1 rounded-full bg-surface-sunken px-1.5 text-2xs font-medium ring-1 ring-inset ring-line',
+          TONE[status],
+          className,
+        )}
+      >
+        {status === 'starting' || status === 'stopping' ? (
+          <Spinner size={10} weight={2.6} />
+        ) : (
+          <StatusDot status={status} size={5} />
+        )}
+        {LABEL[status]}
+        {showClock && status === 'running' && startedAt && (
+          <span className="num text-2xs tabular-nums text-ink-faint">{formatClock(uptime)}</span>
+        )}
+      </motion.span>
+    </Tooltip>
   )
 }

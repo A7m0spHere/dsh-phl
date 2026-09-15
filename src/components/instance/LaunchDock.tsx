@@ -27,7 +27,7 @@ export function LaunchDock() {
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
   const push = useUIStore((s) => s.push)
-  const { t, scale } = useMotion()
+  const { t, scale, swap } = useMotion()
 
   // Prefer whatever is running; otherwise the most recently used instance.
   const target = useMemo(() => {
@@ -107,10 +107,10 @@ export function LaunchDock() {
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
                   key={busy ? `phase-${state.phase}` : failed ? 'error' : 'meta'}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={t(0.15)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="absolute inset-0 flex items-center gap-1.5 text-sm"
                 >
                   {busy ? (
@@ -197,16 +197,18 @@ export function LaunchDock() {
               onSelect: () => setFocus(i.id),
             }))}
             trigger={({ toggle: openMenu, menuProps }) => (
-              <IconButton
-                label="切换启动目标"
-                size="hero"
-                variant={running ? 'secondary' : 'primary'}
-                onClick={openMenu}
-                {...menuProps}
-                className="h-9 w-7 rounded-l-none border-l border-black/10 dark:border-white/10"
-              >
-                <ChevronUp size={13} />
-              </IconButton>
+              <Tooltip content="切换启动目标" side="top">
+                <IconButton
+                  label="切换启动目标"
+                  size="hero"
+                  variant={running ? 'secondary' : 'primary'}
+                  onClick={openMenu}
+                  {...menuProps}
+                  className="h-9 w-7 rounded-l-none border-l border-black/10 dark:border-white/10"
+                >
+                  <ChevronUp size={13} />
+                </IconButton>
+              </Tooltip>
             )}
           />
         </div>

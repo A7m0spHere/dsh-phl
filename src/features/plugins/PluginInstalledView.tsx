@@ -183,12 +183,12 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                         </Tooltip>
                       )}
                       {row.compat === 'bad' && (
-                        <Tooltip content={compatHint('bad')} allowOverflow>
+                        <Tooltip content={compatHint('bad')}>
                           <Badge tone="danger">不兼容当前版本</Badge>
                         </Tooltip>
                       )}
                       {row.compat === 'unknown' && !row.linked && (
-                        <Tooltip content={compatHint('unknown')} allowOverflow>
+                        <Tooltip content={compatHint('unknown')}>
                           <Badge tone="warn">兼容性未知</Badge>
                         </Tooltip>
                       )}

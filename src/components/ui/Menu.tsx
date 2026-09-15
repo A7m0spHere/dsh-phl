@@ -2,8 +2,9 @@ import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { MENU_Z, useMotion } from '@/lib/motion'
 import { computePlacement, estimateMenuHeight } from './menuPlacement'
+import { suppressTooltipOnFocus } from './Tooltip'
 
 export interface MenuItem {
   id: string
@@ -60,15 +61,58 @@ export function Menu({
    * Keyboard contract: opening moves focus to the first item, arrows cycle,
    * Escape (handled below) and outside clicks close, and closing hands focus
    * back to the trigger. Without this the menu was mouse-only.
+   *
+   * Restoring focus must only happen on a genuine open→closed transition:
+   * running it on mount (open starts false) would steal focus to the trigger
+   * on every page that renders a Menu — which also pinned a Tooltip open on
+   * the freshly-focused trigger, a bubble that never dismissed.
+   */
+  const wasOpen = useRef(false)
+  /**
+   * Focus the first item once the panel can actually take focus.
+   *
+   * The panel mounts `visibility: hidden` until the placement pass resolves its
+   * spot, and `focus()` silently no-ops on a hidden element. Gating on the
+   * placement *state* is not enough: the panel is a `motion.div`, and Motion
+   * applies the style it was handed in a later frame, so the state can already
+   * say "visible" while the item still computes `hidden` — measured on a
+   * 1000×660 window at 100% DPI, where a single `requestAnimationFrame` (and a
+   * placement-state gate) both ran too early and left focus on the trigger, so
+   * Enter opened a menu the keyboard could not enter. Verifying that the focus
+   * actually took, with a bounded retry, is timing-independent.
    */
   useLayoutEffect(() => {
+    if (!open) return
+    let raf = 0
+    let tries = 0
+    const attempt = () => {
+      const item = panelRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+      if (!item) return
+      item.focus()
+      if (document.activeElement !== item && ++tries < 10) raf = requestAnimationFrame(attempt)
+    }
+    attempt()
+    return () => cancelAnimationFrame(raf)
+  }, [open])
+  useLayoutEffect(() => {
     if (open) {
-      panelRef.current
-        ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
-        ?.focus()
+      wasOpen.current = true
       return
     }
-    anchorRef.current?.querySelector<HTMLElement>('button, [role="button"]')?.focus()
+    if (wasOpen.current) {
+      wasOpen.current = false
+      // Handing focus back is a restoration, not a new hint request: mark the
+      // trigger so the wrapping Tooltip skips the arm this focus would
+      // otherwise start (it used to re-open the bubble 420ms after close,
+      // with the pointer far away and nothing left to dismiss it). When the
+      // trigger already holds focus (closed by clicking the trigger again)
+      // refocusing is a no-op that fires no events — no marker needed.
+      const trigger = anchorRef.current?.querySelector<HTMLElement>('button, [role="button"]')
+      if (trigger && document.activeElement !== trigger) {
+        suppressTooltipOnFocus(trigger)
+        trigger.focus()
+      }
+    }
   }, [open])
 
   const onPanelKeyDown = (event: React.KeyboardEvent) => {
@@ -163,7 +207,7 @@ export function Menu({
                 ...pos,
                 transformOrigin: `${dropUp ? 'bottom' : 'top'} ${align === 'end' ? 'right' : 'left'}`,
               }}
-              className="z-[60] overflow-hidden rounded-lg bg-surface-raised p-1 shadow-pop ring-1 ring-inset ring-line"
+              className={cn(MENU_Z, 'overflow-hidden rounded-lg bg-surface-raised p-1 shadow-pop ring-1 ring-inset ring-line')}
             >
               {items.map((item) => (
                 <div key={item.id}>

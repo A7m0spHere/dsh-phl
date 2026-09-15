@@ -22,6 +22,7 @@ import {
   type MoveProgress,
 } from '@/lib/desktop'
 import { formatBytes } from '@/lib/format'
+import { useTruncated } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
 import { repository } from '@/services'
 import {
@@ -45,6 +46,7 @@ import {
   SettingRow,
   Switch,
   Select,
+  Tooltip,
 } from '@/components/ui'
 import { PageShell, PageSection } from '@/components/layout/Page'
 import { PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
@@ -56,6 +58,18 @@ import { MigrationOverlay } from '@/features/settings/MigrationOverlay'
 import { DiagnosticsSection } from '@/features/settings/DiagnosticsSection'
 import { UpdateSection } from '@/features/settings/UpdateSection'
 import { ROOT_PRESETS, SECTIONS } from '@/features/settings/consts'
+
+/** 残留目录名：窄列下截断，悬停才揭示全名（真截断才提示）。 */
+function OrphanName({ name }: { name: string }) {
+  const [ref, truncated] = useTruncated<HTMLSpanElement>()
+  return (
+    <Tooltip content={truncated ? name : ''} className="min-w-0 flex-1">
+      <span ref={ref} className="truncate font-mono text-sm text-ink">
+        {name}
+      </span>
+    </Tooltip>
+  )
+}
 
 export function SettingsPanel() {
   const section = useViewStore((s) => s.settingsSection)
@@ -134,7 +148,7 @@ export function SettingsPage() {
   const measureDiskUsage = useInstanceStore((s) => s.measureDiskUsage)
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
-  const { t } = useMotion()
+  const { t, pop } = useMotion()
 
   /**
    * Real sizes are only measured when this section is open. Walking every
@@ -472,12 +486,7 @@ export function SettingsPage() {
   return (
     <div className="relative h-full">
       <PageShell maxWidth={720} title={title}>
-      <motion.div
-        key={section}
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={t(0.24)}
-      >
+      <motion.div key={section} variants={pop} initial="hidden" animate="show">
         {section === 'general' && (
           <PageSection>
             <div className="rounded-lg bg-surface px-4 ring-1 ring-inset ring-line">
@@ -949,9 +958,7 @@ export function SettingsPage() {
                       key={o.name}
                       className="group/row flex items-center gap-3 rounded-lg bg-surface px-3.5 py-2.5 ring-1 ring-inset ring-warn/25"
                     >
-                      <span className="min-w-0 flex-1 truncate font-mono text-sm text-ink">
-                        {o.name}
-                      </span>
+                      <OrphanName name={o.name} />
                       <span className="num shrink-0 text-sm text-ink-muted">
                         {formatBytes(o.size)}
                       </span>

@@ -23,12 +23,12 @@ export function EmptyState({
   className?: string
   compact?: boolean
 }) {
-  const { t } = useMotion()
+  const { pop } = useMotion()
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={t(0.3)}
+      variants={pop}
+      initial="hidden"
+      animate="show"
       className={cn(
         'flex flex-col items-center justify-center text-center',
         compact ? 'py-8' : 'py-16',

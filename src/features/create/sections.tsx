@@ -10,7 +10,7 @@ import { HUES, hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
 import { draftIssues, useCatalogStore, useInstanceStore, useIsDark, useSettingsStore, useUIStore, useViewStore, useWizardStore } from '@/stores'
 import { isVersionBusy, isRuntimeBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
-import { Badge, Button, EmptyState, Field, Input, ProgressBar, SectionCard, Segmented, Spinner, Switch, TextArea } from '@/components/ui'
+import { Badge, Button, EmptyState, Field, Input, ProgressBar, SectionCard, Segmented, Spinner, Switch, TextArea, Tooltip } from '@/components/ui'
 import { PanelGroup, PanelShell } from '@/components/layout/Panel'
 import { InstanceTile } from '@/components/instance'
 
@@ -536,19 +536,20 @@ export function SettingsSection({
               {KINDS.map((k) => {
                 const active = draft.kind === k.id
                 return (
-                  <button
-                    key={k.id}
-                    title={k.description}
-                    onClick={() => patch({ kind: k.id })}
-                    className={cn(
-                      'rounded-md py-1.5 text-center text-sm ring-1 ring-inset transition-all duration-150',
-                      active
-                        ? 'bg-accent-soft font-medium text-accent-ink ring-accent'
-                        : 'bg-surface text-ink-muted ring-line hover:ring-line-strong',
-                    )}
-                  >
-                    {k.label}
-                  </button>
+                  <Tooltip key={k.id} content={k.description}>
+                    <button
+                      aria-label={k.label}
+                      onClick={() => patch({ kind: k.id })}
+                      className={cn(
+                        'w-full rounded-md py-1.5 text-center text-sm ring-1 ring-inset transition-all duration-150',
+                        active
+                          ? 'bg-accent-soft font-medium text-accent-ink ring-accent'
+                          : 'bg-surface text-ink-muted ring-line hover:ring-line-strong',
+                      )}
+                    >
+                      {k.label}
+                    </button>
+                  </Tooltip>
                 )
               })}
             </div>
@@ -560,9 +561,9 @@ export function SettingsSection({
                 const tone = hueTone(h.id, dark)
                 const active = draft.hue === h.id
                 return (
+                  <Tooltip key={h.id} content={h.label}>
                   <button
-                    key={h.id}
-                    title={h.label}
+                    aria-label={h.label}
                     onClick={() => patch({ hue: h.id })}
                     className={cn(
                       'h-6 w-6 rounded-md transition-transform duration-150',
@@ -577,6 +578,7 @@ export function SettingsSection({
                   >
                     <span className="sr-only">{h.label}</span>
                   </button>
+                  </Tooltip>
                 )
               })}
             </div>
@@ -639,12 +641,15 @@ export function MoreSettings({ portIssue, attempted }: { portIssue?: string; att
                       const Icon = TEMPLATE_ICONS[tpl.icon] ?? Square
                       const active = draft.templateId === tpl.id
                       return (
+                        <Tooltip key={tpl.id} content={tpl.description}>
                         <button
-                          key={tpl.id}
-                          title={tpl.description}
+                          aria-label={tpl.name}
                           onClick={() => patch({ templateId: tpl.id })}
                           className={cn(
-                            'flex items-center gap-1.5 rounded-md px-2 py-1.5 text-left ring-1 ring-inset transition-all duration-150',
+                            // The Tooltip anchor is the grid item, so the button
+                            // fills it instead of shrinking to its label — same
+                            // fix the hinted Segmented options carry.
+                            'flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left ring-1 ring-inset transition-all duration-150',
                             active
                               ? 'bg-accent-soft ring-accent'
                               : 'bg-surface ring-line hover:ring-line-strong',
@@ -668,6 +673,7 @@ export function MoreSettings({ portIssue, attempted }: { portIssue?: string; att
                             </span>
                           )}
                         </button>
+                        </Tooltip>
                       )
                     })}
                   </div>

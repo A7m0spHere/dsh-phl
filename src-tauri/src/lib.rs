@@ -167,8 +167,15 @@ fn reveal_path(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // explorer.exe parses `/`-led segments as switches: handed the
+        // frontend's forward-slash path (joined with `/` so macOS and Linux
+        // need no branch here) it silently opens the Documents view instead,
+        // while `spawn` still succeeds — nothing reports the miss (2026-09-12
+        // acceptance:「打开实例目录」落在「文档」). Normalize first.
+        // `canonicalize` is no good either: it prepends the `\\?\` prefix
+        // explorer refuses just the same.
         std::process::Command::new("explorer.exe")
-            .arg(p)
+            .arg(native_separators(&path))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -187,6 +194,33 @@ fn reveal_path(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The path with every separator in Windows-native form. The frontend joins
+/// path segments with `/`; `Path::is_dir` and friends accept either slash,
+/// but explorer.exe does not — so the spawn argument, not the validation,
+/// is what gets normalized.
+#[cfg(target_os = "windows")]
+fn native_separators(path: &str) -> String {
+    path.replace('/', "\\")
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod native_separators_tests {
+    use super::native_separators;
+
+    #[test]
+    fn forward_and_mixed_separators_become_native() {
+        assert_eq!(
+            native_separators("E:/PHL-DSH/instances/abc"),
+            "E:\\PHL-DSH\\instances\\abc"
+        );
+        assert_eq!(
+            native_separators("E:\\PHL-DSH/instances/abc"),
+            "E:\\PHL-DSH\\instances\\abc"
+        );
+        assert_eq!(native_separators("E:\\PHL-DSH"), "E:\\PHL-DSH");
+    }
 }
 
 /// Every command that does not need the concrete Wry runtime, listed once.

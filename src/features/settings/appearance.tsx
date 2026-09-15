@@ -3,6 +3,7 @@ import { motion } from 'motion/react'
 import { cn } from '@/lib/cn'
 import { hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
+import { Tooltip } from '@/components/ui'
 import { ACCENTS, useInstanceStore, useIsDark, useUIStore, type Accent } from '@/stores'
 
 export function AccentPicker() {
@@ -14,9 +15,9 @@ export function AccentPicker() {
   return (
     <div className="flex gap-1.5">
       {ACCENTS.map((a) => (
+        <Tooltip key={a.id} content={a.label}>
         <button
-          key={a.id}
-          title={a.label}
+          aria-label={a.label}
           onClick={() => setAccent(a.id as Accent)}
           className="relative flex h-7 w-7 items-center justify-center rounded-lg transition-transform duration-150 hover:scale-105"
         >
@@ -35,6 +36,7 @@ export function AccentPicker() {
             />
           )}
         </button>
+        </Tooltip>
       ))}
     </div>
   )

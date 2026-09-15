@@ -336,8 +336,8 @@ export function InstancesPage() {
                   value={layout}
                   onChange={(v) => setLayout(v as 'grid' | 'list')}
                   options={[
-                    { value: 'grid', label: '', icon: <LayoutGrid size={12} />, title: '卡片视图' },
-                    { value: 'list', label: '', icon: <Rows3 size={12} />, title: '列表视图' },
+                    { value: 'grid', label: '', icon: <LayoutGrid size={12} />, hint: '卡片视图' },
+                    { value: 'list', label: '', icon: <Rows3 size={12} />, hint: '列表视图' },
                   ]}
                 />
               </div>

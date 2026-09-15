@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { AlertCircle, CheckCircle2, Info, TriangleAlert, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { TOAST_Z, useMotion } from '@/lib/motion'
 import { useUIStore, type Toast as ToastModel } from '@/stores/uiStore'
 import { Spinner } from './Spinner'
 
@@ -24,7 +24,7 @@ const TONES = {
 
 const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function ToastRow({ toast }, ref) {
   const dismiss = useUIStore((s) => s.dismissToast)
-  const { t } = useMotion()
+  const { t, scale } = useMotion()
   const [paused, setPaused] = useState(false)
   const remaining = useRef(toast.duration)
   const startedAt = useRef(Date.now())
@@ -54,9 +54,12 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
       <div className="flex gap-2 px-2.5 py-2">
         <span className={cn('mt-[1px] shrink-0', TONES[toast.kind])}>{ICONS[toast.kind]}</span>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium leading-[17px] text-ink">{toast.title}</div>
+          {/* break-words: toast messages carry paths and tokenized URLs —
+              unbroken runs otherwise spill past the 312px card and get cut
+              by its overflow-hidden (2026-09-12 review). */}
+          <div className="break-words text-sm font-medium leading-[17px] text-ink">{toast.title}</div>
           {toast.message && (
-            <div className="mt-0.5 text-xs leading-[15px] text-ink-muted">{toast.message}</div>
+            <div className="mt-0.5 break-words text-xs leading-[15px] text-ink-muted">{toast.message}</div>
           )}
         </div>
         <div className="flex shrink-0 items-start gap-1">
@@ -80,7 +83,10 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
           </button>
         </div>
       </div>
-      {toast.duration > 0 && (
+      {/* The bar is the dismiss countdown — its only content is the shrink
+          animation, so with 动效关闭 (scale === 0, which this JS animation
+          would otherwise ignore) a frozen full bar means nothing: drop it. */}
+      {toast.duration > 0 && scale !== 0 && (
         <motion.div
           className={cn('absolute inset-x-0 bottom-0 h-[2px] origin-left', {
             'bg-info': toast.kind === 'info',
@@ -105,7 +111,7 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
 export function Toaster() {
   const toasts = useUIStore((s) => s.toasts)
   return (
-    <div className="pointer-events-none fixed left-1/2 top-[calc(var(--titlebar-h)+10px)] z-[70] flex -translate-x-1/2 flex-col items-center gap-2">
+    <div className={cn('pointer-events-none fixed left-1/2 top-[calc(var(--titlebar-h)+10px)] flex -translate-x-1/2 flex-col items-center gap-2', TOAST_Z)}>
       <AnimatePresence initial={false} mode="popLayout">
         {toasts.map((toast) => (
           <ToastRow key={toast.id} toast={toast} />

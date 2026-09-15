@@ -221,7 +221,7 @@ export function ModelEditor({
   return (
     <fieldset disabled={enriching} className="min-w-0">
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1">
-        <Tooltip allowOverflow content="补全只填写缺失字段；保存后可同步到实例。来源记录仅保存在 PHL。">
+        <Tooltip content="补全只填写缺失字段；保存后可同步到实例。来源记录仅保存在 PHL。">
           <span className="text-sm font-medium text-ink-muted">模型</span>
         </Tooltip>
         <div className="flex flex-wrap items-center gap-1">
@@ -247,7 +247,7 @@ export function ModelEditor({
               return canFetch ? (
                 btn
               ) : (
-                <Tooltip allowOverflow content="填写 Base URL 后可从端点获取模型列表">{btn}</Tooltip>
+                <Tooltip content="填写 Base URL 后可从端点获取模型列表">{btn}</Tooltip>
               )
             })()}
           <Button size="sm" variant="ghost" onClick={() => onChange([...models, { id: '' }])}>

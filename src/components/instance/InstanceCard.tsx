@@ -46,7 +46,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
   const runtime = useCatalogStore((s) => s.runtimes.find((r) => r.id === instance.runtimeId))
   const push = useUIStore((s) => s.push)
   const dark = useIsDark()
-  const { t, riseItem, scale } = useMotion()
+  const { t, riseItem, swap, scale } = useMotion()
   const { menuItems } = useInstanceActions(instance)
 
   const tone = hueTone(instance.hue, dark)
@@ -114,10 +114,10 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               {deleting || cloning ? (
                 <motion.div
                   key="deleting"
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  transition={t(0.16)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="absolute inset-0 flex items-center gap-1.5 text-sm text-warn"
                 >
                   <Loader2 size={11} className="shrink-0 animate-spin" />
@@ -126,10 +126,10 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               ) : busy ? (
                 <motion.div
                   key="phase"
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  transition={t(0.16)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="absolute inset-0 flex items-center gap-1.5 text-sm text-accent-ink"
                 >
                   <span className="truncate">
@@ -144,10 +144,10 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               ) : failed ? (
                 <motion.div
                   key="error"
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  transition={t(0.16)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="absolute inset-0 truncate text-sm text-danger"
                 >
                   {state.error?.title}
@@ -155,10 +155,10 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               ) : (
                 <motion.div
                   key="meta"
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  transition={t(0.16)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="absolute inset-0 flex items-center gap-1.5 truncate text-sm text-ink-muted"
                 >
                   <span className="truncate">DSH {version?.name ?? instance.versionId}</span>
@@ -199,7 +199,6 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           {state.lastExit && (
             <Tooltip
               content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
-              allowOverflow
             >
               <span className="num shrink-0 rounded-xs border border-danger/40 px-1.5 py-0.5 text-2xs text-danger">
                 上次退出 {state.lastExit.code ?? '?'}
@@ -224,7 +223,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             {primaryLabel}
           </Button>
 
-          <Tooltip content="查看详情" side="top" allowOverflow>
+          <Tooltip content="查看详情" side="top">
             <IconButton
               label="查看详情"
               size="sm"
@@ -242,7 +241,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           <Menu
             items={menuItems}
             trigger={({ open: isOpen, toggle: t2, menuProps }) => (
-              <Tooltip content="更多操作" side="top" allowOverflow>
+              <Tooltip content="更多操作" side="top">
                 <IconButton
                   label="更多操作"
                   size="sm"

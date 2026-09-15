@@ -38,8 +38,8 @@ pub(crate) use registry::{
 };
 
 pub(crate) use process::{
-    allocate_port, build_command, kill_tree, log_tail, node_binary, read_web_url, resolve_node,
-    CREATE_NO_WINDOW,
+    allocate_port, build_command, kill_tree, log_tail, node_binary, read_web_url_once,
+    resolve_node, CREATE_NO_WINDOW,
 };
 #[cfg(test)]
 pub(crate) use process::{
@@ -832,11 +832,7 @@ pub(crate) async fn run_launch(
     // swept so a long-lived instance's `logs/` cannot grow without bound.
     process::prune_launch_logs(&logs_dir, 10).await;
     let log_path = logs_dir.join(format!("launch-{}.log", now_iso().replace(':', "-")));
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("无法打开日志文件: {e}"))?;
+    let log = process::open_launch_log(&log_path).map_err(|e| format!("无法打开日志文件: {e}"))?;
 
     let mut command = tokio::process::Command::new(&program);
     command.args(&cmd_args);
@@ -905,9 +901,30 @@ pub(crate) async fn run_launch(
         exe_path,
     });
 
-    let started = Instant::now();
-    loop {
-        if Launches::is_cancelled(cancel) {
+    // Readiness is the port answering *and* this boot's own `dsh web:` line —
+    // see `process::await_readiness` for why the URL is part of it. The loop
+    // lives in `process.rs` so the wait itself is unit-testable; the exit
+    // reasons come back here, where the termination and log-tail policy is.
+    let readiness = process::await_readiness(
+        &mut child,
+        port,
+        &log_path,
+        READY_TIMEOUT,
+        process::WEB_URL_GRACE,
+        cancel,
+        &mut |elapsed| {
+            let _ = on_progress.send(LaunchEvent {
+                stage: "await-ready".into(),
+                progress: (0.36 + 0.61 * (elapsed.as_secs_f64() / READY_TIMEOUT.as_secs_f64()))
+                    .min(0.97),
+                detail: None,
+            });
+        },
+    )
+    .await;
+    let web_url = match readiness {
+        process::Readiness::Ready { web_url } => web_url,
+        process::Readiness::Cancelled => {
             // The cancellation outcome must not lie: "cancelled" is fine when
             // the process is verifiably gone, but an abort whose termination
             // could not be confirmed keeps the registration (R3) — the coded
@@ -930,25 +947,16 @@ pub(crate) async fn run_launch(
                 }
             };
         }
-        if let Ok(Some(status)) = child.try_wait() {
+        process::Readiness::Exited { code } => {
             processes.remove_if_pid(&instance_id, pid);
             registry.forget_pid(&instance_id, pid);
             let tail = log_tail(&log_path, 30).await;
             return Err(format!(
                 "DSH 进程在就绪前退出（code {}）。\n--- 日志末尾 ---\n{tail}",
-                status.code().unwrap_or(-1)
+                code.unwrap_or(-1)
             ));
         }
-        // A listening socket is the readiness signal; HTTP shape is DSH's
-        // business, not ours.
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        let elapsed = started.elapsed();
-        if elapsed >= READY_TIMEOUT {
+        process::Readiness::Timeout => {
             // The old wording claimed the process had been terminated before
             // anyone had observed it. Now the claim depends on proof: the
             // kept-alive case surfaces as a coded, still-stoppable instance.
@@ -973,14 +981,7 @@ pub(crate) async fn run_launch(
                 }
             };
         }
-        let _ = on_progress.send(LaunchEvent {
-            stage: "await-ready".into(),
-            progress: (0.36 + 0.61 * (elapsed.as_secs_f64() / READY_TIMEOUT.as_secs_f64()))
-                .min(0.97),
-            detail: None,
-        });
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    };
 
     // The connect may have won a race against a process that exited right
     // after opening the socket (or the socket may have been DSH's shutdown
@@ -1004,9 +1005,6 @@ pub(crate) async fn run_launch(
 
     retain_child(&instance_id, pid, child);
 
-    // `dsh web` prints its authenticated URL before binding; a short poll
-    // allows for delayed log flushing.
-    let web_url = read_web_url(&log_path).await;
     Ok(LaunchOutcome { pid, port, web_url })
 }
 
@@ -1412,14 +1410,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_web_url_finds_line_after_port_binds() {
+    async fn read_web_url_once_reads_the_head_of_a_settled_log() {
         let dir = std::env::temp_dir().join(format!("phl-weburl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("launch.log");
+        // Nothing yet: the wait, not the reader, owns the timing.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_web_url_once(&path).await, None);
         std::fs::write(&path, "dsh web: http://127.0.0.1:4000/?token=abc123\n").unwrap();
         assert_eq!(
-            read_web_url(&path).await.as_deref(),
+            read_web_url_once(&path).await.as_deref(),
             Some("http://127.0.0.1:4000/?token=abc123")
         );
         let _ = std::fs::remove_dir_all(&dir);

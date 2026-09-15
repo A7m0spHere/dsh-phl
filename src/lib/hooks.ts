@@ -1,5 +1,39 @@
 import { useEffect, useRef, useState } from 'react'
 
+// +1: sub-pixel rounding between scrollWidth and clientWidth.
+const isOverflowing = (el: HTMLElement) =>
+  el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1
+
+/**
+ * True when the referenced element is actually cutting content off —
+ * `truncate`'s horizontal ellipsis or `line-clamp`'s vertical one. Drives
+ * "reveal on hover" affordances, which must stay quiet while the text is
+ * fully visible: a bubble repeating readable text is noise (2026-09-12
+ * review: the old native-`title` reveals fired unconditionally).
+ *
+ * Re-checks after every commit: a content swap that keeps the same box does
+ * not re-fire the ResizeObserver, and the reveal must follow the text
+ * (short→long, long→short, including under an open bubble) without callers
+ * remembering to remount via a `key`. Resizes land outside React's commit
+ * cycle, so the observer stays for those.
+ */
+export function useTruncated<T extends HTMLElement>() {
+  const ref = useRef<T>(null)
+  const [truncated, setTruncated] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (el) setTruncated(isOverflowing(el))
+  })
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setTruncated(isOverflowing(el)))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, truncated] as const
+}
+
 /** Ticks once per second while `startedAt` is set; returns elapsed seconds. */
 export function useUptime(startedAt?: number): number {
   const [now, setNow] = useState(() => Date.now())

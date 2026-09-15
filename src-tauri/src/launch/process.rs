@@ -4,7 +4,8 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use super::Processes;
 
@@ -40,23 +41,12 @@ pub(crate) async fn read_tail(path: &Path, window: u64) -> (Vec<u8>, bool) {
     (buf, start > 0)
 }
 
-/// One read of an already-settled log — used by restart adoption, where the
-/// token line is long past any buffering.
+/// One read of a log's head: `None` until `dsh web` has printed its line.
+/// Used both by the launch (which waits for this boot's line) and by restart
+/// adoption, where the line is long past any buffering.
 pub(crate) async fn read_web_url_once(log_path: &Path) -> Option<String> {
     let raw = read_head(log_path).await?;
     parse_web_url(&raw)
-}
-
-pub(crate) async fn read_web_url(log_path: &Path) -> Option<String> {
-    for _ in 0..8 {
-        if let Some(raw) = read_head(log_path).await {
-            if let Some(url) = parse_web_url(&raw) {
-                return Some(url);
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    None
 }
 
 /// The token line sits at the top of the log; a bounded head read gets it
@@ -70,6 +60,116 @@ async fn read_head(log_path: &Path) -> Option<String> {
         .await
         .ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Open this launch's log file, truncated.
+///
+/// The name carries second precision, so a relaunch inside the same second
+/// lands on the same path. Appending to it left the PREVIOUS boot's `dsh web:`
+/// line at the head of the file — exactly the line the URL reader lifts out —
+/// so the window opened with a token the new process never minted and DSH
+/// answered 401. Truncating makes the head of the file this boot's own line by
+/// construction. `write` + `truncate` rather than `append`: the child inherits
+/// the handle and writes at its offset, so appending buys nothing here.
+pub(crate) fn open_launch_log(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+}
+
+/* --------------------------- launch readiness --------------------------- */
+
+/// How long a launch keeps waiting for this boot's `dsh web:` line after the
+/// port starts answering.
+///
+/// DSH prints the authenticated URL only *after* its listener is bound —
+/// measured at 1.3 s on an idle machine and 2.1 s on a loaded one
+/// (2026-09-15) — so "the socket accepts" does not mean "the URL is in the
+/// log". The old fixed 2 s read lost that race by 70 ms on a real launch: the
+/// frontend received a URL-less outcome, fell back to the bare `host:port`,
+/// and DSH answered with its 401 "dsh web authentication required" page in a
+/// window PHL reported as running. The grace is generous on purpose, because
+/// the gap is the tail of DSH's profile boot and stretches on a cold first
+/// run; it costs nothing when the line arrives on time, and only a DSH that
+/// prints no line at all ever pays it.
+pub(crate) const WEB_URL_GRACE: Duration = Duration::from_secs(15);
+
+/// What the readiness wait observed — the loop's old exit reasons, kept one for
+/// one so the caller's error wording is unchanged.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// The port answers, and this boot's authenticated URL is in the log when
+    /// DSH printed one.
+    Ready {
+        web_url: Option<String>,
+    },
+    Cancelled,
+    Exited {
+        code: Option<i32>,
+    },
+    Timeout,
+}
+
+/// Wait for one launch to become ready: the port accepting connections *and*
+/// this boot's own `dsh web:` line, when DSH prints one.
+///
+/// Both halves matter. A socket alone can belong to a stranger — a port
+/// collision hands the probe another instance's DSH, which is why the
+/// check-then-use allocation came up in review — while the token line is the
+/// one thing only *our* child can have written into this launch's freshly
+/// truncated file. And the URL has to be in hand before the caller reports
+/// success: the frontend opens the embedded window straight from the outcome,
+/// and the bare address it falls back to is a 401 page.
+pub(crate) async fn await_readiness(
+    child: &mut tokio::process::Child,
+    port: u16,
+    log_path: &Path,
+    timeout: Duration,
+    url_grace: Duration,
+    cancelled: &AtomicBool,
+    on_wait: &mut impl FnMut(Duration),
+) -> Readiness {
+    let started = Instant::now();
+    // When the socket first answered — the clock the URL grace runs on.
+    let mut port_ready_at: Option<Instant> = None;
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return Readiness::Cancelled;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Readiness::Exited {
+                code: status.code(),
+            };
+        }
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            let since = *port_ready_at.get_or_insert_with(Instant::now);
+            if let Some(web_url) = read_web_url_once(log_path).await {
+                return Readiness::Ready {
+                    web_url: Some(web_url),
+                };
+            }
+            if since.elapsed() >= url_grace {
+                // A DSH that serves without printing a URL is not broken, it
+                // is just not this DSH: succeed, with nothing to hand over.
+                return Readiness::Ready { web_url: None };
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Readiness::Timeout;
+        }
+        on_wait(elapsed);
+        // Once the socket is up the clock that matters is the URL grace, which
+        // is finer than the boot wait — a shorter tick keeps the wait off the
+        // launch timeline.
+        let tick = if port_ready_at.is_some() { 200 } else { 500 };
+        tokio::time::sleep(Duration::from_millis(tick)).await;
+    }
 }
 
 /// Replace the per-boot WebUI token in a log excerpt.
@@ -380,4 +480,194 @@ pub(crate) fn check_kill_output(pid: u32, output: std::process::Output) -> Resul
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that stays alive for the whole test; the caller kills it.
+    fn long_lived_child() -> tokio::process::Child {
+        if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", "ping -n 60 127.0.0.1 > nul"])
+                .spawn()
+                .unwrap()
+        } else {
+            tokio::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    fn temp_log(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("phl-ready-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("launch.log");
+        (dir, path)
+    }
+
+    /// Reserve a port and keep the listener: a connect to it succeeds, exactly
+    /// like DSH's listener the moment it binds.
+    fn answering_port() -> (TcpListener, u16) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn a_port_that_answers_before_the_url_is_printed_still_yields_the_url() {
+        // The regression (2026-09-15): DSH binds its listener first and prints
+        // the authenticated URL 1.3–2.1 s later. Readiness that stops at the
+        // socket, or a fixed short poll, loses the URL — and the window then
+        // opens the bare host:port, which DSH answers with its 401 page.
+        let (_listener, port) = answering_port();
+        let (dir, log) = temp_log("url-late");
+        std::fs::write(&log, "").unwrap();
+        let late_log = log.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            std::fs::write(
+                &late_log,
+                "dsh web: http://127.0.0.1:4099/?token=later-on\n",
+            )
+            .unwrap();
+        });
+
+        let mut child = long_lived_child();
+        let readiness = await_readiness(
+            &mut child,
+            port,
+            &log,
+            Duration::from_secs(30),
+            WEB_URL_GRACE,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await;
+        let _ = child.kill().await;
+        assert_eq!(
+            readiness,
+            Readiness::Ready {
+                web_url: Some("http://127.0.0.1:4099/?token=later-on".into())
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_dsh_that_never_prints_a_url_is_ready_without_one() {
+        // Not every server mints a token; the grace expiring is a success with
+        // nothing to hand over, never a failed launch.
+        let (_listener, port) = answering_port();
+        let (dir, log) = temp_log("url-never");
+        std::fs::write(&log, "booting: no url line here\n").unwrap();
+
+        let mut child = long_lived_child();
+        let readiness = await_readiness(
+            &mut child,
+            port,
+            &log,
+            Duration::from_secs(30),
+            Duration::from_millis(200),
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await;
+        let _ = child.kill().await;
+        assert_eq!(readiness, Readiness::Ready { web_url: None });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn waiting_for_the_url_keeps_watching_cancel_and_exit() {
+        // The grace window must not become a blind spot: a cancel and a child
+        // that dies are still the two things that end the wait immediately.
+        let (_listener, port) = answering_port();
+        let (dir, log) = temp_log("url-watch");
+        std::fs::write(&log, "").unwrap();
+
+        let mut child = long_lived_child();
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let flipper = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            flipper.store(true, Ordering::SeqCst);
+        });
+        let mut noop = |_| {};
+        let readiness = await_readiness(
+            &mut child,
+            port,
+            &log,
+            Duration::from_secs(30),
+            WEB_URL_GRACE,
+            &cancelled,
+            &mut noop,
+        )
+        .await;
+        let _ = child.kill().await;
+        assert_eq!(readiness, Readiness::Cancelled);
+
+        let mut exited = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", "exit 7"])
+                .spawn()
+                .unwrap()
+        } else {
+            tokio::process::Command::new("sh")
+                .args(["-c", "exit 7"])
+                .spawn()
+                .unwrap()
+        };
+        let readiness = await_readiness(
+            &mut exited,
+            port,
+            &log,
+            Duration::from_secs(30),
+            WEB_URL_GRACE,
+            &AtomicBool::new(false),
+            &mut noop,
+        )
+        .await;
+        assert_eq!(readiness, Readiness::Exited { code: Some(7) });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_port_that_never_answers_times_out() {
+        // The whole-launch budget still applies: a socket that never opens is
+        // a wedged boot, reported with the same exit reason as before.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (dir, log) = temp_log("url-timeout");
+        std::fs::write(&log, "").unwrap();
+
+        let mut child = long_lived_child();
+        let readiness = await_readiness(
+            &mut child,
+            port,
+            &log,
+            Duration::from_millis(400),
+            WEB_URL_GRACE,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await;
+        let _ = child.kill().await;
+        assert_eq!(readiness, Readiness::Timeout);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_launch_log_is_truncated_on_open() {
+        // Same-second relaunches share the path; the head must be this boot's.
+        let (dir, log) = temp_log("truncate");
+        std::fs::write(&log, "dsh web: http://127.0.0.1:3081/?token=stale\n").unwrap();
+        drop(open_launch_log(&log).unwrap());
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

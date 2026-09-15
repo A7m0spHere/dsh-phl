@@ -86,7 +86,6 @@ export function ProviderCard({
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
               <Tooltip
-                allowOverflow
                 content={
                   provider.apiKey
                     ? `密钥已存于 PHL 本地配置，启动实例时注入为环境变量 ${provider.apiKeyEnv}；系统/实例环境已有同名值时以其为准`

@@ -53,6 +53,8 @@ export interface MotionKit {
   riseItem: Variants
   /** Modal / popover surface. */
   pop: Variants
+  /** In-place content swap inside an AnimatePresence — meta lines, inline forms. */
+  swap: Variants
   overlay: Variants
 }
 
@@ -101,13 +103,19 @@ export function useMotion(): MotionKit {
       out: { opacity: 0, y: scale === 0 ? 0 : 6, scale: scale === 0 ? 1 : 0.98, transition: t(D.fast) },
     }
 
+    const swap: Variants = {
+      hidden: { opacity: 0, y: scale === 0 ? 0 : 5 },
+      show: { opacity: 1, y: 0, transition: t(D.fast) },
+      out: { opacity: 0, y: scale === 0 ? 0 : -4, transition: t(D.micro) },
+    }
+
     const overlay: Variants = {
       hidden: { opacity: 0 },
       show: { opacity: 1, transition: t(D.fast) },
       out: { opacity: 0, transition: t(D.fast) },
     }
 
-    return { scale, t, spring, springSoft, page, stagger, riseItem, pop, overlay }
+    return { scale, t, spring, springSoft, page, stagger, riseItem, pop, swap, overlay }
   }, [scale])
 }
 
@@ -119,5 +127,20 @@ export function useMotion(): MotionKit {
  * fixed modal wrapper.
  */
 export const MODAL_SCRIM = 'absolute inset-0 bg-canvas/60 backdrop-blur-[2px]'
-/** Stacking level for every top-level modal wrapper (they are mutually exclusive). */
+
+/* ------------------------------ overlay layers ----------------------------- *
+ * The global stacking ladder, lowest → highest. Every overlay references a
+ * token from here instead of a raw z-[..], so the relative order lives in
+ * exactly one place: menus under toasts under modals, and tooltips — which
+ * can be opened from inside any of the others — above everything. (Tooltips
+ * once shared the modal level and only out-stacked it by DOM append order —
+ * an accident, not a rule; 2026-09-12 review.)
+ */
+/** Anchored dropdown panels (the Menu). */
+export const MENU_Z = 'z-[60]'
+/** The toast stack under the title bar. */
+export const TOAST_Z = 'z-[70]'
+/** Full-screen modal wrappers (dialog, palette, guide) — mutually exclusive. */
 export const MODAL_Z = 'z-[80]'
+/** Floating hint bubbles; may surface from inside any layer above. */
+export const TOOLTIP_Z = 'z-[90]'

@@ -355,6 +355,18 @@ async fn j1_cold_install_launch_and_stop() {
         .await
         .expect("J1: launch must succeed");
         let port = launched.outcome.port;
+        // "Ready" includes the URL, it is not a bonus: the window PHL opens
+        // after a launch is built from it, and the fake prints it only after
+        // binding (as the real `dsh web` does), so a launcher that stops at the
+        // socket reports nothing here — which is exactly the bug this gate now
+        // pins (2026-09-15: the window fell back to the bare host:port and DSH
+        // answered 401 in a window PHL called "running").
+        let expected_url = format!("http://127.0.0.1:{port}/?token=e2e");
+        assert_eq!(
+            launched.outcome.web_url.as_deref(),
+            Some(expected_url.as_str()),
+            "J1: the launch must hand over this boot's authenticated URL"
+        );
         assert!(
             super::port_listening(port).await,
             "J1: launched child must be accepting on {port}"

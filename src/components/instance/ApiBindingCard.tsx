@@ -55,7 +55,7 @@ function ProviderPill({ view }: { view: ProviderLiveView }) {
   // cards, so the wide hints go through the viewport portal.
   if (!hint) return badge
   return (
-    <Tooltip content={hint} allowOverflow>
+    <Tooltip content={hint}>
       {badge}
     </Tooltip>
   )
@@ -264,12 +264,12 @@ export function ApiBindingCard({ instance }: { instance: Instance }) {
                 </Button>
               )}
               {snapshot && snapshot.missingKeys.length > 0 && (
-                <Tooltip allowOverflow content={`环境变量未设置：${snapshot.missingKeys.join('、')}`}>
+                <Tooltip content={`环境变量未设置：${snapshot.missingKeys.join('、')}`}>
                   <Badge tone="warn">密钥待配置</Badge>
                 </Tooltip>
               )}
               {localChanges && (
-                <Tooltip allowOverflow content="实例内改动会被保留，直到你点同步——PHL 不再自动重写。">
+                <Tooltip content="实例内改动会被保留，直到你点同步——PHL 不再自动重写。">
                   <Badge tone="warn">
                     <Unplug size={10} />
                     本地改动

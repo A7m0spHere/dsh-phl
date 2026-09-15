@@ -130,7 +130,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const plugins = useCatalogStore((s) => s.plugins)
   const navigate = useUIStore((s) => s.navigate)
   const toast = useUIStore((s) => s.toast)
-  const { t, stagger, riseItem } = useMotion()
+  const { t, stagger, riseItem, swap } = useMotion()
   const actions = useInstanceActions(instance)
   const uptime = useUptime(state.status === 'running' ? state.startedAt : undefined)
 
@@ -288,13 +288,12 @@ export function InstanceDetailPage({ id }: { id: string }) {
               {state.lastExit && (
                 <Tooltip
                   content={`进程异常退出（退出码 ${state.lastExit.code ?? '未知'}，运行 ${state.lastExit.ranFor}s）；日志在实例目录 logs/ 下，下次启动后消失`}
-                  allowOverflow
                 >
                   <Badge tone="danger">上次退出 {state.lastExit.code ?? '?'}</Badge>
                 </Tooltip>
               )}
               {instance?.managementMode === 'external' && (
-                  <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。" allowOverflow>
+                  <Tooltip content="DSH_HOME 在你的目录下，PHL 负责启动与查看；写操作被禁用。">
                   <Badge tone="warn">原地接入</Badge>
                 </Tooltip>
               )}
@@ -311,7 +310,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
       actions={
         <div className="flex items-center gap-2">
           {running && (
-              <Tooltip content={`localhost:${instance.port}`} allowOverflow>
+              <Tooltip content={`localhost:${instance.port}`}>
               <Button variant="secondary" onClick={actions.openWebUI}>
                 <ExternalLink size={13} />
                 打开 WebUI
@@ -351,15 +350,17 @@ export function InstanceDetailPage({ id }: { id: string }) {
           <Menu
             items={actions.menuItems}
             trigger={({ toggle: openMenu, menuProps }) => (
-              <IconButton
-                label="更多操作"
-                size="lg"
-                variant="secondary"
-                onClick={openMenu}
-                {...menuProps}
-              >
-                <MoreHorizontal size={15} />
-              </IconButton>
+              <Tooltip content="更多操作" side="bottom">
+                <IconButton
+                  label="更多操作"
+                  size="lg"
+                  variant="secondary"
+                  onClick={openMenu}
+                  {...menuProps}
+                >
+                  <MoreHorizontal size={15} />
+                </IconButton>
+              </Tooltip>
             )}
           />
         </div>
@@ -431,7 +432,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   </Button>
                 </>
               ) : (
-                <Tooltip content={running || busy ? '停止实例后才能修改绑定' : '修改版本、Runtime 与端口'} allowOverflow>
+                <Tooltip content={running || busy ? '停止实例后才能修改绑定' : '修改版本、Runtime 与端口'}>
                   <Button size="xs" variant="ghost" onClick={beginEdit} disabled={running || busy}>
                     <Pencil size={11} />
                     编辑
@@ -444,10 +445,10 @@ export function InstanceDetailPage({ id }: { id: string }) {
               {editing ? (
                 <motion.div
                   key="edit"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={t(0.18)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="grid gap-4 md:grid-cols-2"
                 >
                   <Field
@@ -536,10 +537,10 @@ export function InstanceDetailPage({ id }: { id: string }) {
               ) : (
                 <motion.div
                   key="view"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={t(0.18)}
+                  variants={swap}
+                  initial="hidden"
+                  animate="show"
+                  exit="out"
                   className="grid gap-x-8 md:grid-cols-2"
                 >
               <div>
@@ -596,14 +597,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
                     </span>
                   }
                   action={
-                    <IconButton
-                      label="复制地址"
-                      size="xs"
-                      variant="ghost"
-                      onClick={actions.copyPort}
-                    >
-                      <Copy size={11} />
-                    </IconButton>
+                    <Tooltip content="复制地址">
+                      <IconButton
+                        label="复制地址"
+                        size="xs"
+                        variant="ghost"
+                        onClick={actions.copyPort}
+                      >
+                        <Copy size={11} />
+                      </IconButton>
+                    </Tooltip>
                   }
                 />
                 <DataRow
@@ -651,14 +654,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
               value={instance.dshHome}
               mono
               action={
-                <IconButton
-                  label="复制"
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => copy(instance.dshHome, 'DSH_HOME')}
-                >
-                  <Copy size={11} />
-                </IconButton>
+                <Tooltip content="复制">
+                  <IconButton
+                    label="复制"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => copy(instance.dshHome, 'DSH_HOME')}
+                  >
+                    <Copy size={11} />
+                  </IconButton>
+                </Tooltip>
               }
             />
             <DataRow
@@ -666,14 +671,16 @@ export function InstanceDetailPage({ id }: { id: string }) {
               value={instance.workspace}
               mono
               action={
-                <IconButton
-                  label="复制"
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => copy(instance.workspace, 'Workspace 路径')}
-                >
-                  <Copy size={11} />
-                </IconButton>
+                <Tooltip content="复制">
+                  <IconButton
+                    label="复制"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => copy(instance.workspace, 'Workspace 路径')}
+                  >
+                    <Copy size={11} />
+                  </IconButton>
+                </Tooltip>
               }
             />
             <DataRow
@@ -836,7 +843,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
             collapsible
             defaultOpen={instance.snapshots.length > 0}
             extra={
-              <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''} allowOverflow>
+              <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
                 <Button
                   size="xs"
                   variant="ghost"
@@ -875,7 +882,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                 title="还没有快照"
                 description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），不会改变实例引用的 DSH 与 Runtime。"
                 action={
-                  <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''} allowOverflow>
+                  <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
                     <Button
                       size="sm"
                       variant="secondary"
@@ -903,7 +910,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                       </div>
                     </div>
                     <div className="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover/snap:opacity-100">
-                      <Tooltip content={running || busy ? '请先停止实例，再回滚' : ''} allowOverflow>
+                      <Tooltip content={running || busy ? '请先停止实例，再回滚' : ''}>
                         <Button
                           size="xs"
                           variant="secondary"
@@ -924,23 +931,25 @@ export function InstanceDetailPage({ id }: { id: string }) {
                           回滚
                         </Button>
                       </Tooltip>
-                      <IconButton
-                        label="删除快照"
-                        size="xs"
-                        variant="ghost"
-                        disabled={!!deletingSnapshots[`${instance.id}:${snap.id}`] || !!snapshotOp}
-                        onClick={async () => {
-                          const ok = await confirm({
-                            title: '删除快照',
-                            message: `删除「${snap.label}」？快照目录会从磁盘移除，不可恢复。`,
-                            tone: 'danger',
-                            confirmLabel: '删除',
-                          })
-                          if (ok) await deleteSnapshot(instance.id, snap.id)
-                        }}
-                      >
-                        <Trash2 size={11} />
-                      </IconButton>
+                      <Tooltip content="删除快照">
+                        <IconButton
+                          label="删除快照"
+                          size="xs"
+                          variant="ghost"
+                          disabled={!!deletingSnapshots[`${instance.id}:${snap.id}`] || !!snapshotOp}
+                          onClick={async () => {
+                            const ok = await confirm({
+                              title: '删除快照',
+                              message: `删除「${snap.label}」？快照目录会从磁盘移除，不可恢复。`,
+                              tone: 'danger',
+                              confirmLabel: '删除',
+                            })
+                            if (ok) await deleteSnapshot(instance.id, snap.id)
+                          }}
+                        >
+                          <Trash2 size={11} />
+                        </IconButton>
+                      </Tooltip>
                     </div>
                   </li>
                 ))}

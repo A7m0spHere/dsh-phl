@@ -244,7 +244,6 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               {version.legacy && <Badge tone="neutral">Legacy</Badge>}
               {installed && state.installHealth === 'degraded' && (
                 <Tooltip
-                  allowOverflow
                   content={`部分依赖在安装时被跳过：${(state.skippedDependencies ?? []).join('、')}`}
                 >
                   <Badge tone="warn">依赖降级</Badge>
@@ -253,7 +252,6 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
               {installed && <Badge tone="ok">已安装</Badge>}
               {version.pendingPublish && (
                 <Tooltip
-                  allowOverflow
                   content="GitHub 已发布此版本，但 npm 尚未上架安装包；上架后会自动提醒并可安装，也可让 agent 从源码构建"
                 >
                   <Badge tone="warn">npm 未收录</Badge>

@@ -126,7 +126,8 @@ export function useInstanceActions(instance: Instance | undefined) {
   const revealFolder = useCallback(() => {
     if (!instance) return
     const root = useSettingsStore.getState().root
-    // 正斜杠在 explorer / open / xdg-open 下都有效，不用按平台拼接。
+    // 分隔符统一用 / 拼接（macOS/Linux 原生就是 /）；Windows 下 reveal_path
+    // 会在拉起 explorer 前归一成 \ —— explorer 自己解析不了正斜杠路径。
     void revealPath([root, 'instances', instance.id].join('/')).catch((err) => {
       ui.toast({
         kind: 'error',

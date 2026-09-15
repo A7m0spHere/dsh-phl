@@ -102,6 +102,7 @@ export function ProgressRing({
   width?: number
   className?: string
 }) {
+  const { t } = useMotion()
   const r = (size - width) / 2
   const c = 2 * Math.PI * r
   return (
@@ -126,7 +127,7 @@ export function ProgressRing({
         strokeDasharray={c}
         initial={false}
         animate={{ strokeDashoffset: c * (1 - Math.max(0, Math.min(1, value))) }}
-        transition={{ duration: 0.3, ease: [0.22, 0.61, 0.36, 1] }}
+        transition={t(0.3)}
         style={{ transformOrigin: 'center', transform: 'rotate(-90deg)' }}
       />
     </svg>

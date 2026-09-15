@@ -331,8 +331,17 @@ fn append_bytes<B: std::io::Write>(tar: &mut tar::Builder<B>, name: &str, bytes:
 }
 
 /// The DSH entrypoint the fake tarball ships: parses `--port` from argv,
-/// binds 127.0.0.1, prints the token line (`dsh web:` marker,
-/// `process.rs:102`) then serves so the TCP readiness connect succeeds.
+/// binds 127.0.0.1, serves so the TCP readiness connect succeeds — and only
+/// *then* prints the token line (`dsh web:` marker, `process.rs`), in that
+/// order because that is the order the real thing uses.
+///
+/// The delay is deliberate. Real `dsh web` binds first and prints its
+/// authenticated URL 1.3 s later on an idle machine, 2.1 s under load
+/// (measured 2026-09-15). A launcher that reads the log on a short fixed poll
+/// loses that race, reports a URL-less launch, and the window falls back to the
+/// bare host:port — which DSH answers with its 401 page. Waiting past the old
+/// 2 s window makes this fixture fail any launcher that goes back to racing
+/// the print.
 fn fake_dsh_bin_js() -> &'static str {
     r#"// Fake DSH web entrypoint shipped by the release E2E gate.
 const http = require('http');
@@ -341,9 +350,12 @@ const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === '--port' && argv[i + 1]) { port = Number(argv[i + 1]); break; }
 }
-process.stdout.write('dsh web: http://127.0.0.1:' + port + '/?token=e2e\n');
 const server = http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); });
-server.listen(port, '127.0.0.1');
+server.listen(port, '127.0.0.1', () => {
+  setTimeout(() => {
+    process.stdout.write('dsh web: http://127.0.0.1:' + port + '/?token=e2e\n');
+  }, 2500);
+});
 "#
 }
 

@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react'
 import { motion } from 'motion/react'
 import { cn } from '@/lib/cn'
+import { useTruncated } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
+import { Tooltip } from '@/components/ui'
 
 /**
  * Standard page frame: a header that does not scroll, a body that does.
@@ -46,14 +48,7 @@ export function PageShell({
           <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
             <div className="min-w-0 grow basis-[30rem]">
               <h1 className="text-lg font-semibold tracking-tight text-ink">{title}</h1>
-              {subtitle && (
-                <p
-                  className="mt-0.5 line-clamp-2 text-sm leading-relaxed text-ink-muted"
-                  title={typeof subtitle === 'string' ? subtitle : undefined}
-                >
-                  {subtitle}
-                </p>
-              )}
+              {subtitle && <PageSubtitle subtitle={subtitle} />}
             </div>
             {actions && (
               <div className="ml-auto flex shrink-0 items-center gap-1.5">{actions}</div>
@@ -69,6 +64,23 @@ export function PageShell({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * The page subtitle is clamped to two lines; when the column is too narrow
+ * to show it all, the full text surfaces in a Tooltip. A native `title` used
+ * to fire unconditionally — a bubble repeating text that was already fully
+ * readable.
+ */
+function PageSubtitle({ subtitle }: { subtitle: ReactNode }) {
+  const [ref, truncated] = useTruncated<HTMLParagraphElement>()
+  return (
+    <Tooltip content={truncated ? subtitle : ''}>
+      <p ref={ref} className="mt-0.5 line-clamp-2 text-sm leading-relaxed text-ink-muted">
+        {subtitle}
+      </p>
+    </Tooltip>
   )
 }
 

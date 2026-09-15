@@ -1,11 +1,12 @@
 import { Blocks, RotateCcw, Search } from 'lucide-react'
 import { motion } from 'motion/react'
 import { formatCount } from '@/lib/format'
+import { useTruncated } from '@/lib/hooks'
 import { useMotion } from '@/lib/motion'
 import { useCatalogStore } from '@/stores'
 import type { PluginCatalogOrigin } from '@/services'
 import { PLUGIN_CATEGORY_LABELS, type Plugin, type PluginCategory } from '@/types'
-import { Button, Dropdown, EmptyState, Input, Notice, Skeleton } from '@/components/ui'
+import { Button, Dropdown, EmptyState, Input, Notice, Skeleton, Tooltip } from '@/components/ui'
 import { RegistryCard } from './RegistryCard'
 
 /** 把回退链里的 base URL 翻成人话；未知源退化为 hostname。 */
@@ -20,6 +21,21 @@ function catalogSourceLabel(servedFrom: string): string {
   } catch {
     return servedFrom
   }
+}
+
+/** 目录来源行：窄窗口下截断，悬停才揭示完整来源（真截断才提示）。 */
+function CatalogOriginHint({ origin }: { origin: PluginCatalogOrigin }) {
+  const [ref, truncated] = useTruncated<HTMLSpanElement>()
+  const text =
+    `目录来自 ${catalogSourceLabel(origin.servedFrom)}` +
+    (origin.updated ? ` · 更新于 ${origin.updated}` : '')
+  return (
+    <Tooltip content={truncated ? text : ''} className="min-w-0">
+      <span ref={ref} className="truncate">
+        {text}
+      </span>
+    </Tooltip>
+  )
 }
 
 export interface PluginRegistryViewProps {
@@ -181,10 +197,7 @@ export function PluginRegistryView(p: PluginRegistryViewProps) {
                   {p.registryCount > p.shown.length && `，当前显示 ${p.shown.length} 个`}
                 </span>
                 {p.pluginsOrigin && !p.pluginsOffline && (
-                  <span className="truncate" title={p.pluginsOrigin.servedFrom}>
-                    目录来自 {catalogSourceLabel(p.pluginsOrigin.servedFrom)}
-                    {p.pluginsOrigin.updated && ` · 更新于 ${p.pluginsOrigin.updated}`}
-                  </span>
+                  <CatalogOriginHint origin={p.pluginsOrigin} />
                 )}
               </div>
               <Button size="sm" variant="ghost" onClick={p.onResetFilters}>

@@ -5,6 +5,7 @@ import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { useUIStore } from '@/stores/uiStore'
 import { Button } from './Button'
 import { Field, Input } from './Field'
+import { suppressTooltipOnFocus, SUPPRESS_FOCUS_ATTR } from './Tooltip'
 
 export function DialogHost() {
   const dialog = useUIStore((s) => s.dialog)
@@ -38,7 +39,20 @@ export function DialogHost() {
       window.clearTimeout(id)
       // Returning focus is part of the contract: without it the keyboard user
       // lands back at the top of the document after every dialog.
-      restoreRef.current?.focus?.()
+      //
+      // It is a restoration, not a new hint request: mark the target so a
+      // wrapping Tooltip skips the arm this focus would otherwise start —
+      // cancelling a dialog opened from a card menu used to pop the menu
+      // trigger's bubble open with the pointer far away, and nothing left to
+      // dismiss it (2026-09-14 desktop review, same class as N02-R1).
+      const target = restoreRef.current
+      if (target && document.activeElement !== target) {
+        suppressTooltipOnFocus(target)
+        target.focus?.()
+        // Focus never moved (target vanished or is unfocusable): drop the
+        // marker so it cannot swallow some later real keyboard focus.
+        if (document.activeElement !== target) target.removeAttribute(SUPPRESS_FOCUS_ATTR)
+      }
     }
   }, [dialog])
 
@@ -138,7 +152,7 @@ export function DialogHost() {
                     </p>
                   )}
                   {dialog.kind === 'confirm' && dialog.spec.detail && (
-                    <p className="mt-2 whitespace-pre-line rounded bg-surface-sunken px-2.5 py-2 font-mono text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
+                    <p className="mt-2 whitespace-pre-line break-words rounded bg-surface-sunken px-2.5 py-2 font-mono text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
                       {dialog.spec.detail}
                     </p>
                   )}

@@ -113,7 +113,7 @@ export function InstanceBindingRow({
         </span>
       </span>
       {snapshot && snapshot.missingKeys.length > 0 && (
-        <Tooltip allowOverflow content={`以下密钥变量既无系统环境值、供应商也未在 PHL 内存密钥：${snapshot.missingKeys.join('、')}。请在对应供应商里填入密钥，或配置同名环境变量。`}>
+        <Tooltip content={`以下密钥变量既无系统环境值、供应商也未在 PHL 内存密钥：${snapshot.missingKeys.join('、')}。请在对应供应商里填入密钥，或配置同名环境变量。`}>
           <Badge tone="warn">密钥待配置</Badge>
         </Tooltip>
       )}

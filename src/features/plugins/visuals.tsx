@@ -82,12 +82,12 @@ export const compatHint = (state: CompatState, versionName?: string): string => 
 }
 
 /**
- * The compat badge for market rows. `allowOverflow` because the cards are
- * `overflow-hidden` and the unknown-state hint is too long for one line.
+ * The compat badge for market rows. The hint can be long — the bubble
+ * portals to the body, so the card's `overflow-hidden` cannot clip it.
  */
 export function CompatBadge({ state, versionName }: { state: CompatState; versionName?: string }) {
   return (
-    <Tooltip content={compatHint(state, versionName)} allowOverflow>
+    <Tooltip content={compatHint(state, versionName)}>
       {state === 'ok' ? (
         <Badge tone="ok" icon={<Check size={9} />}>
           兼容 {versionName}
@@ -206,16 +206,17 @@ export function AuthorBadge({ plugin }: { plugin: Plugin }) {
     return <span className="text-xs font-medium text-ink-muted">{plugin.author}</span>
   }
   return (
-    <button
-      className="group/author inline-flex items-center gap-1 rounded-full bg-surface-sunken px-2 py-0.5 text-xs font-medium text-ink-muted ring-1 ring-inset ring-line transition-colors duration-150 hover:text-accent-ink hover:ring-accent-ink/30"
-      title={`查看 ${plugin.author} 的 GitHub 主页`}
-      onClick={(e) => {
-        e.stopPropagation()
-        void openExternal(`https://github.com/${owner}`)
-      }}
-    >
-      <span className="max-w-40 truncate">{plugin.author}</span>
-    </button>
+    <Tooltip content={`查看 ${plugin.author} 的 GitHub 主页`}>
+      <button
+        className="group/author inline-flex items-center gap-1 rounded-full bg-surface-sunken px-2 py-0.5 text-xs font-medium text-ink-muted ring-1 ring-inset ring-line transition-colors duration-150 hover:text-accent-ink hover:ring-accent-ink/30"
+        onClick={(e) => {
+          e.stopPropagation()
+          void openExternal(`https://github.com/${owner}`)
+        }}
+      >
+        <span className="max-w-40 truncate">{plugin.author}</span>
+      </button>
+    </Tooltip>
   )
 }
 

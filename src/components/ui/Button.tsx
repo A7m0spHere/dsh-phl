@@ -1,7 +1,7 @@
 import { forwardRef, type ReactNode } from 'react'
 import { motion, type HTMLMotionProps } from 'motion/react'
 import { cn } from '@/lib/cn'
-import { useMotionScale } from '@/lib/motion'
+import { useMotion } from '@/lib/motion'
 import { Spinner } from './Spinner'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'quiet'
@@ -51,7 +51,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   },
   ref,
 ) {
-  const scale = useMotionScale()
+  const { scale, t } = useMotion()
   const isDisabled = disabled || loading
 
   return (
@@ -60,7 +60,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type="button"
       disabled={isDisabled}
       whileTap={scale === 0 || isDisabled ? undefined : { scale: size === 'hero' ? 0.98 : 0.97 }}
-      transition={{ duration: 0.09 }}
+      transition={t(0.09)}
       className={cn(
         'relative inline-flex select-none items-center justify-center overflow-hidden whitespace-nowrap font-medium',
         'transition-[background-color,color,box-shadow] duration-150 ease-out',
@@ -88,6 +88,11 @@ export interface IconButtonProps extends ButtonProps {
   label: string
 }
 
+/**
+ * `label` feeds `aria-label` only. No `title`: the native tooltip would pop
+ * a second, OS-styled bubble next to the app's own <Tooltip> on every
+ * icon-only control (2026-09-12 review). Visible hints go through <Tooltip>.
+ */
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
   { label, size = 'md', className, ...rest },
   ref,
@@ -106,7 +111,6 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     <Button
       ref={ref}
       aria-label={label}
-      title={label}
       size={size}
       className={cn('!px-0', box, className)}
       {...rest}
