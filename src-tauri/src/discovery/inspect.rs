@@ -378,6 +378,11 @@ pub(crate) fn nvm_bin_dirs(nvm_home: &Path) -> Vec<PathBuf> {
 /// The version a toolchain directory name spells, e.g. `v22.2.0` → `22.2.0`.
 /// `None` for a name semver cannot read, which sorts it last in both
 /// version-manager listings rather than letting it silently win the scan.
+///
+/// Gated like its only callers: a helper used solely by Unix-only (and
+/// test-only) code is itself dead code on a Windows build, and `-D warnings`
+/// says so.
+#[cfg(any(not(windows), test))]
 pub(crate) fn version_of_dir_name(name: &str) -> Option<semver::Version> {
     semver::Version::parse(name.trim_start_matches('v')).ok()
 }
