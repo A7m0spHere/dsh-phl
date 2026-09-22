@@ -507,6 +507,18 @@ mod tests {
         dir
     }
 
+    /// A port the kernel hands out for a `:0` bind, released again at once.
+    /// The old hard-coded `3080` turned this suite red on any machine with a
+    /// real DSH instance running on the default port, and per-test fixed ports
+    /// only shuffled the collision.
+    fn free_port() -> u32 {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("an ephemeral port to bind")
+            .local_addr()
+            .expect("bound address")
+            .port() as u32
+    }
+
     fn manifest(id: &str, name: &str) -> InstanceManifest {
         InstanceManifest {
             schema_version: 0,
@@ -517,7 +529,7 @@ mod tests {
             hue: 0,
             version_id: "dsh-0.1.0".into(),
             runtime_id: "node-22".into(),
-            port: 3080,
+            port: free_port(),
             auto_port: true,
             profile: "web".into(),
             created_at: crate::versions::now_iso(),
@@ -571,8 +583,9 @@ mod tests {
     async fn a_missing_dsh_version_is_broken_and_marked_repairable() {
         let root = temp_root("missing-dsh");
         let id = "missing-01";
-        let mut m = manifest(id, "Missing");
-        m.port = 34473;
+        // Not `mut`: the port comes from `free_port()` now, so nothing here
+        // rewrites the manifest before it is created.
+        let m = manifest(id, "Missing");
         create_instance_inner(&root, m).await.unwrap();
 
         let result = verify_instance_inner(&root, id).await.unwrap();
@@ -590,7 +603,6 @@ mod tests {
         let root = temp_root("dsh-tree");
         let id = "dsh-tree-01";
         let mut m = manifest(id, "Tree");
-        m.port = 34471; // 独立端口：并行测试同时探测 3080 会互相报占用
         m.runtime_id = "node-system".into();
         create_instance_inner(&root, m).await.unwrap();
 

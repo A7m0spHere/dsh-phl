@@ -1,6 +1,7 @@
 //! Credential storage (T-205/T-206): API keys live behind a `CredentialStore`
 //! abstraction — on Windows, the OS Credential Manager (advapi32's
-//! CredRead/CredWrite, *not* a home-grown crypto scheme) — and the API
+//! CredRead/CredWrite, *not* a home-grown crypto scheme); on macOS, the
+//! system Keychain (generic passwords, T-301) — and the API
 //! library keeps only references. Nothing here ever logs a secret.
 //!
 //! Resolution order everywhere a key is consumed (the launch-time injector
@@ -29,15 +30,20 @@ pub trait CredentialStore: Send + Sync {
 /// entries the user can neither see nor clean. A root migration moves the
 /// configuration files but never re-keys credentials; the ids survive, so
 /// entries stay reachable across relocations by construction.
+///
+/// `allow(dead_code)`: Linux builds never call it (their store is the
+/// unsupported stub); the Windows and macOS backends use this exact id as
+/// their entry namespace, and the unit test below pins it on every platform.
+#[allow(dead_code)]
 pub fn provider_credential_id(provider_id: &str) -> String {
     // `PHL:` namespaces our entries inside the user's credential manager;
     // provider ids are already validated (`valid_provider_name`).
     format!("PHL:provider:{provider_id}")
 }
 
-/// The concrete store managed as Tauri state. Non-Windows builds get a
-/// store that reports unsupported — the platform gates (T-301/T-302) carry
-/// their own backends later.
+/// The concrete store managed as Tauri state. Windows uses the OS Credential
+/// Manager, macOS the system Keychain; Linux builds get a store that reports
+/// unsupported (the platform gate T-302 carries that backend later).
 pub struct Creds {
     inner: Box<dyn CredentialStore>,
 }
@@ -77,16 +83,29 @@ impl CredentialStore for PlatformStore {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+impl CredentialStore for PlatformStore {
+    fn get(&self, id: &str) -> Result<Option<String>, String> {
+        macos::read(&provider_credential_id(id))
+    }
+    fn set(&self, id: &str, secret: &str) -> Result<(), String> {
+        macos::write(&provider_credential_id(id), secret)
+    }
+    fn delete(&self, id: &str) -> Result<(), String> {
+        macos::delete(&provider_credential_id(id))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 impl CredentialStore for PlatformStore {
     fn get(&self, _id: &str) -> Result<Option<String>, String> {
-        Err("此平台暂不支持凭据管理器（见 T-301/T-302）".into())
+        Err("此平台暂不支持凭据管理器（见 T-302）".into())
     }
     fn set(&self, _id: &str, _secret: &str) -> Result<(), String> {
-        Err("此平台暂不支持凭据管理器（见 T-301/T-302）".into())
+        Err("此平台暂不支持凭据管理器（见 T-302）".into())
     }
     fn delete(&self, _id: &str) -> Result<(), String> {
-        Err("此平台暂不支持凭据管理器（见 T-301/T-302）".into())
+        Err("此平台暂不支持凭据管理器（见 T-302）".into())
     }
 }
 
@@ -204,6 +223,111 @@ mod win {
     }
 }
 
+/* ---------------------------- macOS Keychain --------------------------- */
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use core_foundation::data::CFData;
+    use security_framework::base::Error;
+    use security_framework::item::{
+        update_item, ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
+        ItemUpdateValue, SearchResult,
+    };
+
+    /// Every PHL secret is a generic password under this one service name;
+    /// the account is the full namespaced id (`PHL:provider:<id>`), so the
+    /// Windows target name appears verbatim in Keychain Access and one
+    /// namespace function stays correct on both platforms.
+    const SERVICE: &str = "PHL";
+
+    // SecItem status codes (errSecItemNotFound / errSecDuplicateItem).
+    const ITEM_NOT_FOUND: i32 = -25300;
+    const DUPLICATE_ITEM: i32 = -25299;
+
+    fn err(context: &str, e: Error) -> String {
+        let message = e
+            .message()
+            .unwrap_or_else(|| format!("状态码 {}", e.code()));
+        format!("{context}: {message}")
+    }
+
+    /// The match dictionary for one entry. Deliberately **no** `limit` /
+    /// `load_data` here: the same options are handed to `SecItemUpdate`, and
+    /// Apple's docs are explicit that result-setting keys in the update's
+    /// search dictionary fail with `ParamCore (-50)`.
+    fn match_entry(target: &str) -> ItemSearchOptions {
+        let mut s = ItemSearchOptions::new();
+        s.class(ItemClass::generic_password())
+            .service(SERVICE)
+            .account(target);
+        s
+    }
+
+    pub fn read(target: &str) -> Result<Option<String>, String> {
+        let mut s = match_entry(target);
+        s.load_data(true).limit(1);
+        match s.search() {
+            Ok(results) => match results.into_iter().next() {
+                Some(SearchResult::Data(bytes)) => String::from_utf8(bytes)
+                    .map(Some)
+                    .map_err(|_| "凭据内容不是有效的 UTF-8".to_string()),
+                // `load_data(true)` always yields `Data`; anything else is a
+                // broken match, treated like a missing entry, not a crash.
+                Some(_) => Ok(None),
+                None => Ok(None),
+            },
+            // A missing entry is `Ok(None)`, not an error (same contract as
+            // the Windows backend): first-run providers have no stored key.
+            Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
+            Err(e) => Err(err("读取凭据失败", e)),
+        }
+    }
+
+    pub fn write(target: &str, secret: &str) -> Result<(), String> {
+        // Update first (rewrites the value in place); add on not-found.
+        let mut update = ItemUpdateOptions::new();
+        update.set_value(ItemUpdateValue::Data(CFData::from_buffer(
+            secret.as_bytes(),
+        )));
+        match update_item(&match_entry(target), &update) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ITEM_NOT_FOUND => add(target, secret),
+            Err(e) => Err(err("写入凭据失败", e)),
+        }
+    }
+
+    fn add(target: &str, secret: &str) -> Result<(), String> {
+        let mut add = ItemAddOptions::new(ItemAddValue::Data {
+            class: ItemClass::generic_password(),
+            data: CFData::from_buffer(secret.as_bytes()),
+        });
+        add.set_service(SERVICE)
+            .set_account_name(target)
+            .set_label("PHL 供应商 API 密钥");
+        match add.add() {
+            Ok(()) => Ok(()),
+            // Lost an update/add race against ourselves; put the new value in.
+            Err(e) if e.code() == DUPLICATE_ITEM => {
+                let mut update = ItemUpdateOptions::new();
+                update.set_value(ItemUpdateValue::Data(CFData::from_buffer(
+                    secret.as_bytes(),
+                )));
+                update_item(&match_entry(target), &update).map_err(|e| err("写入凭据失败", e))
+            }
+            Err(e) => Err(err("写入凭据失败", e)),
+        }
+    }
+
+    pub fn delete(target: &str) -> Result<(), String> {
+        match match_entry(target).delete() {
+            Ok(()) => Ok(()),
+            // Deleting an absent key is already the goal (Windows parity).
+            Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
+            Err(e) => Err(err("删除凭据失败", e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +355,30 @@ mod tests {
     #[test]
     fn provider_ids_are_namespaced() {
         assert_eq!(provider_credential_id("deepseek"), "PHL:provider:deepseek");
+    }
+
+    /// Round-trips through the real macOS Keychain, mirroring the Windows
+    /// test. `#[ignore]`d on purpose: the first access from a freshly built
+    /// binary pops the Keychain ACL prompt, which an unattended CI run cannot
+    /// answer. Run explicitly during a Mac acceptance pass with
+    /// `cargo test credential_roundtrip_on_the_keychain -- --ignored`.
+    /// The entry is namespaced `test:` + pid and deleted again.
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "touches the real Keychain; may raise a permission prompt"]
+    fn credential_roundtrip_on_the_keychain() {
+        let id = format!("test:{}", std::process::id());
+        let store = Creds::platform_default();
+
+        assert_eq!(store.get(&id).unwrap(), None, "clean slate");
+        store.set(&id, "sk-test-abcdef").unwrap();
+        assert_eq!(store.get(&id).unwrap().as_deref(), Some("sk-test-abcdef"));
+        // Overwrite updates the entry in place, not a duplicate.
+        store.set(&id, "sk-second").unwrap();
+        assert_eq!(store.get(&id).unwrap().as_deref(), Some("sk-second"));
+        store.delete(&id).unwrap();
+        assert_eq!(store.get(&id).unwrap(), None);
+        // Deleting an absent key is idempotent.
+        store.delete(&id).unwrap();
     }
 }

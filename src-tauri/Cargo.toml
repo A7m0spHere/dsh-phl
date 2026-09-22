@@ -67,6 +67,13 @@ zstd = "0.14.0"
 # and the DSH Skill can never drift into two implementations of the format.
 phl-pack-core = { path = "crates/phl-pack-core" }
 
+# macOS credential backend (T-301): the system Keychain via the Security
+# framework. Both crates are already in the dependency graph via the macOS
+# TLS stack, so this adds a direct link edge, not new downloads.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+core-foundation = "0.10"
+
 [profile.release]
 codegen-units = 1
 lto = true

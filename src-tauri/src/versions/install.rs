@@ -330,7 +330,14 @@ pub(crate) async fn run_install(
         let ev = ProgressEvent::InstallingDeps { progress: 0.0 };
         crate::versions::sync_task_progress(task, &ev);
         on_progress.send(ev).map_err(|e| e.to_string())?;
-        let node = pick_npm_capable_node(root).unwrap_or_else(|| PathBuf::from("node"));
+        // A managed runtime first, then the system Node — the documented
+        // fallback, resolved rather than assumed: a bare `node` is not on a
+        // GUI-launched app's PATH, and `find_npm_cli` cannot find npm beside a
+        // name it cannot resolve, so the same version that installed fine from
+        // a terminal failed here.
+        let node = pick_npm_capable_node(root)
+            .or_else(|| crate::discovery::inspect::resolve_system_node().map(|(path, _)| path))
+            .unwrap_or_else(|| PathBuf::from("node"));
         if let Err(e) = install_version_deps(&node, &staging, registry_base, flag, &|p| {
             let ev = ProgressEvent::InstallingDeps { progress: p };
             crate::versions::sync_task_progress(task, &ev);

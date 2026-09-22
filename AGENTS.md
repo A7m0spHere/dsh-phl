@@ -15,6 +15,17 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
 
 - 窗口 `decorations: false` + `visible: false`：标题栏由前端绘制，窗口在前端首帧后由 `app_ready` 显示。
   Rust 侧有 4 秒兜底显示，前端崩溃时不要让窗口永远不出现。
+  **macOS 例外**：`tauri.macos.conf.json`（构建期由 tauri-build 自动合并，Windows/Linux 不读）把主窗口
+  改为 `decorations: true` + `titleBarStyle: "Overlay"` + `hiddenTitle` + `trafficLightPosition`
+  （当前 tao 0.35 的 y=22：该值控制标题栏容器额外高度，并非顶部留白；y=11 会让按钮贴顶。
+  36px header 使用 y=22 为原生按钮留出约 11px 顶边距），红绿灯由系统绘制、浮在 web 内容上，
+  header 条兼作原生标题栏（拖拽/双击缩放）。全屏时原生红绿灯会收起，退出入口在前端：
+  `useFullscreen()` 状态驱动的 header「退出全屏」按钮 + ⌃⌘F（其他平台 Ctrl+Alt+F），
+  不要依赖悬停呼出红绿灯作为唯一退路。
+  前端 `TitleBar.tsx` 按 `isMac`（`desktopCore.ts`，UA 探测、浏览器模式可预览）隐藏自绘三按钮并
+  左移避让。**不要**改回运行时 `set_decorations(true)`：它的绝对式 styleMask 重写会和 Overlay 的
+  FullSizeContentView 位竞态，结果窗口出现但不透明（内容被压在标题栏下）。
+  同理**不要**把这三项挪回 base config：`decorations:false` 会让 tao 走 borderless 分支并忽略它们。
 - 关闭流程：Rust 拦截 `CloseRequested` → 发 `phl://close-requested` → 前端确认 → `exit_app`。
   不要在前端直接 `destroy()` 绕过确认。
 - 拖拽用 `data-tauri-drag-region`（不是 Electron 的 `-webkit-app-region`）。可交互元素不要带这个属性。
@@ -77,6 +88,27 @@ npm run build      # tsc -b && vite build
 npm run typecheck
 npm run check:size # 大文件 ratchet 预算（预算表 scripts/file-size-budget.json）
 ```
+
+macOS 开发链路（2026-09-16 起）：
+`npm run app:dev` 直接跑 Tauri 窗口；`npm run app:build:mac` 打 `.app` + `.dmg`
+（`tauri.conf.json` 的默认 `targets` 仍是 `nsis`，Mac 打包走显式 `--bundles`，
+不改动 Windows 发布行为）。注意三点：
+1. **进程探测**（`launch/probe.rs` 的 `probe_process`）非 Windows 平台用
+   `ps -p <pid> -o state=,pid=,etime=,comm=` 区分「已退出（Exited）」与「存在但身份不明（Unknown）」——
+   僵尸进程算已退出（它已经终止，行还在只是父进程尚未回收）；`stop_permission` 与停止确认循环
+   都依赖这个区分，旧的 `kill -0` 近似会把已退出的进程报成 Unknown，Mac 上的停止/收养全部会被拒。
+   Unix 的停止按**进程组**进行（`launch/process.rs` 的 `terminate_tree`：先 SIGTERM 整组、
+   宽限后 SIGKILL，见 `TERM_GRACE`），仅在该进程自己带一个组（`pgid == pid`）时才发组信号。
+   系统 Node 的发现与启动共用 `discovery::inspect::resolve_system_node`（PATH → 平台已知 bin
+   目录 → fnm/nvm 别名与版本，逐个验证后取绝对路径），不要再退回裸 `node`。
+2. **凭据管理器**在 Mac 上已接入系统 Keychain（`credentials.rs` 的 macOS 后端，generic password：
+   service `PHL`、account 为完整的 `PHL:provider:<id>`，与 Windows 目标名一字不差；T-301 已完成）。
+   provider API Key 在 Mac 构建中可用。注意：从 `target/debug` 直接跑、或 ad-hoc 签名变化后首次访问
+   条目会弹一次钥匙串授权框，发布构建（稳定 Team 签名）不会反复弹；Linux（T-302）仍是
+   「不支持」占位，保存含密钥的 API 配置在 Linux 上会按预期报错回退。
+3. **本机 Node 26 跑 vitest** 需要 `NODE_OPTIONS=--localstorage-file=...`（CI 钉的是 Node 22，
+   那里没有这个 getter 差异）。若见 `Cannot read properties of undefined (reading 'setItem')`，
+   是环境差异，不是代码回归。
 
 大文件治理：受监测文件按 ratchet 预算封顶（`scripts/file-size-budget.json`，
 上限=登记时值+5%，超限 CI 直接红；未登记源文件长到 ≥40 KB 同样拦）。按 brief 完成一次拆分后运行 `npm run check:size -- --update`

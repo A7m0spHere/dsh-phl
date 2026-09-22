@@ -318,8 +318,12 @@ fn link_is_dir(link: &Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = link;
-        false
+        // A unix symlink carries no dir flag of its own — the type lives in
+        // the target, so resolve it. A dangling link cannot be resolved:
+        // report `false`, which is honest (callers refuse canonical-mode
+        // copies on dangling links anyway) and harmless for recreation,
+        // since `recreate_link` on unix uses one symlink form regardless.
+        std::fs::metadata(link).map(|m| m.is_dir()).unwrap_or(false)
     }
 }
 

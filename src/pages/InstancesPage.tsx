@@ -3,6 +3,7 @@ import { useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Boxes,
+  ChevronDown,
   CirclePause,
   CirclePlay,
   FileUp,
@@ -36,6 +37,7 @@ import { Button, EmptyState, Input, Menu, Segmented, Skeleton } from '@/componen
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceCard } from '@/components/instance/InstanceCard'
+import { InstanceWelcome } from '@/components/instance/InstanceWelcome'
 import { LaunchDock } from '@/components/instance/LaunchDock'
 
 /* ------------------------------------------------------------------ *
@@ -52,7 +54,6 @@ export function InstancesPanel() {
   const setFilter = useViewStore((s) => s.setInstanceFilter)
   const sort = useViewStore((s) => s.instanceSort)
   const setSort = useViewStore((s) => s.setInstanceSort)
-  const push = useUIStore((s) => s.push)
 
   const counts = useMemo(() => {
     const running = instances.filter((i) => states[i.id]?.status === 'running').length
@@ -131,12 +132,6 @@ export function InstancesPanel() {
         <PanelStat label="占用空间" value={formatBytes(disk)} />
       </PanelGroup>
 
-      <div className="mt-auto p-2.5">
-        <Button block variant="secondary" onClick={() => push({ name: 'create' })}>
-          <Plus size={13} />
-          新建实例
-        </Button>
-      </div>
     </PanelShell>
   )
 }
@@ -151,6 +146,7 @@ export function InstancesPage() {
   const loaded = useInstanceStore((s) => s.loaded)
   const versions = useCatalogStore((s) => s.versions)
   const query = useViewStore((s) => s.instanceQuery)
+  const setQuery = useViewStore((s) => s.setInstanceQuery)
   const filter = useViewStore((s) => s.instanceFilter)
   const setFilter = useViewStore((s) => s.setInstanceFilter)
   const sort = useViewStore((s) => s.instanceSort)
@@ -288,47 +284,38 @@ export function InstancesPage() {
       <div className="min-h-0 flex-1">
         <PageShell
           title="实例"
-          subtitle="每个实例固定自己的 DSH 版本、Runtime、插件与 DSH_HOME，可以同时运行、互不污染。"
+          subtitle="管理独立的 DSH 环境，让不同版本与配置并行工作。"
           actions={
             <>
-              {/* The three primary doors are 新建 / 接入 / 安装整合包; the
-                  legacy Bundle importer stays reachable but demoted (spec
-                  §26). Menu first, so a future second "other" format slots
-                  in without re-growing the header. */}
               <Menu
                 align="start"
                 trigger={({ toggle, menuProps }) => (
-                  <Button variant="ghost" onClick={toggle} {...menuProps}>
-                    更多导入方式
+                  <Button variant="secondary" onClick={toggle} {...menuProps}>
+                    导入 / 接入 <ChevronDown size={12} />
                   </Button>
                 )}
                 items={[
+                  { id: 'adopt', label: '接入本机 DSH', icon: <FolderInput size={13} />, onSelect: () => push({ name: 'adopt' }) },
+                  { id: 'pack', label: '安装整合包', icon: <Package size={13} />, onSelect: () => push({ name: 'installPack' }) },
                   {
                     id: 'bundle',
+                    separated: true,
                     label: '导入 Bundle',
                     icon: <FileUp size={13} />,
                     onSelect: () => void importBundle(),
                   },
                 ]}
               />
-              <Button variant="secondary" onClick={() => push({ name: 'adopt' })}>
-                <FolderInput size={13} />
-                接入本机 DSH
-              </Button>
-              <Button variant="secondary" onClick={() => push({ name: 'installPack' })}>
-                <Package size={13} />
-                安装整合包
-              </Button>
-              <Button variant="primary" onClick={() => push({ name: 'create' })}>
+              {instances.length > 0 && <Button variant="primary" onClick={() => push({ name: 'create' })}>
                 <Plus size={13} />
                 新建实例
-              </Button>
+              </Button>}
             </>
           }
-          toolbar={
+          toolbar={instances.length > 0 ? (
             <>
               <span className="text-sm text-ink-faint">
-                共 {visible.length} 个{filter !== 'all' && ' · 已筛选'}
+                共 {visible.length} 个{(filter !== 'all' || query.trim()) && ' · 已筛选'}
               </span>
               <div className="ml-auto">
                 <Segmented
@@ -342,7 +329,7 @@ export function InstancesPage() {
                 />
               </div>
             </>
-          }
+          ) : undefined}
         >
           {!loaded ? (
             <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
@@ -350,26 +337,20 @@ export function InstancesPage() {
                 <Skeleton key={i} className="h-[104px]" />
               ))}
             </div>
+          ) : instances.length === 0 ? (
+            <InstanceWelcome />
           ) : visible.length === 0 ? (
             <EmptyState
               icon={<Boxes size={20} />}
-              title={instances.length === 0 ? '还没有实例' : '没有匹配的实例'}
-              description={
-                instances.length === 0
-                  ? '创建第一个实例：选择一个 DSH 版本和 Node Runtime，PHL 会为它准备独立的 DSH_HOME、插件目录与端口。'
-                  : '试试更换筛选条件，或清空搜索关键字。'
-              }
+              title="没有匹配的实例"
+              description="试试其他关键词，或清除搜索与筛选条件。"
               action={
-                instances.length === 0 ? (
-                  <Button variant="primary" onClick={() => push({ name: 'create' })}>
-                    <Plus size={13} />
-                    新建实例
-                  </Button>
-                ) : (
-                  <Button variant="secondary" onClick={() => setFilter('all')}>
-                    显示全部实例
-                  </Button>
-                )
+                <Button variant="secondary" onClick={() => {
+                  setQuery('')
+                  setFilter('all')
+                }}>
+                  显示全部实例
+                </Button>
               }
             />
           ) : (

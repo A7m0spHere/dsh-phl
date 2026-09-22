@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use super::inspect::nvm_bin_dirs;
+use super::inspect::{fnm_bin_dirs, nvm_bin_dirs};
 
 /// Unix: npm's global install drops a bare `dsh` shim in the prefix's bin.
 pub(crate) fn executable_names() -> &'static [&'static str] {
@@ -16,21 +16,28 @@ pub(crate) fn executable_names() -> &'static [&'static str] {
 }
 
 /// Well-known DSH command locations beyond the session PATH.
+///
+/// Order is a preference: the user's own toolchains first (a version manager's
+/// bin dir is an explicit "this is my node"; fnm has no other home for its
+/// binaries, see `fnm_bin_dirs`), then the system-wide package manager dirs.
 pub(crate) fn extra_executable_roots() -> Vec<PathBuf> {
-    let mut roots = vec![
-        // Distro-neutral and Homebrew-on-Linux locations; `/usr/bin` is in
-        // every default PATH but naming it costs one stat and closes the
-        // "custom minimal session PATH" hole.
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-    ];
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".npm-global").join("bin"));
-        roots.push(home.join(".volta").join("bin"));
-        roots.push(home.join(".bun").join("bin"));
-        roots.push(home.join(".local").join("bin"));
-        roots.extend(nvm_bin_dirs(&home.join(".nvm")));
-    }
+    let Some(home) = dirs::home_dir() else {
+        return vec![
+            // Distro-neutral and Homebrew-on-Linux locations; `/usr/bin` is in
+            // every default PATH but naming it costs one stat and closes the
+            // "custom minimal session PATH" hole.
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+        ];
+    };
+    let mut roots = fnm_bin_dirs(&home);
+    roots.extend(nvm_bin_dirs(&home.join(".nvm")));
+    roots.push(home.join(".volta").join("bin"));
+    roots.push(home.join(".bun").join("bin"));
+    roots.push(home.join(".npm-global").join("bin"));
+    roots.push(home.join(".local").join("bin"));
+    roots.push(PathBuf::from("/usr/local/bin"));
+    roots.push(PathBuf::from("/usr/bin"));
     roots
 }
 

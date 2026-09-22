@@ -100,6 +100,56 @@ jobs:
       - run: cargo check --workspace
         shell: bash
 
+  # The macOS lane. Same gates as the Windows job, and it exists because the
+  # Unix halves of the launch path are *only* compiled and only exercised here:
+  # `launch::probe` (the `ps`-based pid probe), the process-group termination in
+  # `launch::process`, `discovery`'s GUI-PATH executable roots, and the
+  # Keychain-free credential paths. A change that breaks any of them compiles
+  # and passes cleanly on Windows, which is how the macOS port collected a
+  # `pub(crate) use` of a Windows-only constant and a pid-recycling test that
+  # only held on Windows (2026-09-22 review).
+  #
+  # A check, not a release: packaging, signing, notarization and a macOS entry
+  # in the updater manifest stay with the release gate, which still publishes
+  # Windows only. The Keychain round-trip and the `~/.dsh` probe stay
+  # `#[ignore]`d — a runner has no unlocked login keychain and no real DSH home.
+  rust-macos:
+    name: Rust (macOS · Unix probes and process trees)
+    runs-on: macos-latest
+    needs: frontend
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # `tauri::generate_context!` reads ../dist at compile time, so even a
+      # `cargo check` needs the frontend artifact.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo fmt --all -- --check
+        shell: bash
+
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        shell: bash
+
+      - run: cargo test --workspace
+        shell: bash
+
+      - run: cargo check --workspace
+        shell: bash
+
   # The headless Windows E2E lane: the real install→launch→adopt→snapshot→
   # pack→migrate journeys plus system-level fault injection (force-kill,
   # download abort/resume, locked destination, late exit), all against mock

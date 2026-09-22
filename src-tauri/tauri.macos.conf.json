@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PHL",
+        "width": 1000,
+        "height": 660,
+        "minWidth": 780,
+        "minHeight": 520,
+        "center": true,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "focus": true,
+        "shadow": true,
+        "dragDropEnabled": false,
+        "visible": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 12, "y": 22 }
+      }
+    ]
+  }
+}

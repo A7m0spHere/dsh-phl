@@ -36,23 +36,10 @@ pub struct PersistedProcess {
     pub exe_path: String,
 }
 
-/// Query failures are not evidence that a process exited.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ProcessState {
-    Alive,
-    Exited,
-    #[default]
-    Unknown,
-}
-
-/// What a pid probe found at adoption time.
-#[derive(Clone, Debug, Default)]
-pub struct Probe {
-    pub state: ProcessState,
-    /// `None` when the query itself failed (protected process, no rights).
-    pub exe_path: Option<String>,
-    pub created_at_ms: Option<i64>,
-}
+/// Query failures are not evidence that a process exited. See `probe.rs` for
+/// the platform implementations; re-exported here so every existing
+/// `registry::…` import (including `launch::mod`'s re-export line) is stable.
+pub(crate) use super::probe::{probe_process, Probe, ProcessState};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Adoption {
@@ -341,124 +328,6 @@ impl Registry {
             let _ = std::fs::remove_file(&tmp);
             format!("替换 {} 失败: {e}", path.display())
         })
-    }
-}
-
-/* ------------------------------ probing ------------------------------ */
-
-/// Is this pid still the same process we recorded? Windows-only identity
-/// query (manual advapi32-style FFI, matching `credentials.rs`; other
-/// platforms report "unknown", which adoption treats as
-/// `keep_running` — forget the record, touch nothing).
-pub(crate) fn probe_process(pid: u32) -> Probe {
-    #[cfg(windows)]
-    {
-        win::probe(pid)
-    }
-    #[cfg(not(windows))]
-    {
-        // A cheap portable approximation: signal 0 probes liveness only.
-        let state = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| {
-                if s.success() {
-                    ProcessState::Alive
-                } else {
-                    ProcessState::Unknown
-                }
-            })
-            .unwrap_or(ProcessState::Unknown);
-        Probe {
-            state,
-            exe_path: None,
-            created_at_ms: None,
-        }
-    }
-}
-
-#[cfg(windows)]
-mod win {
-    use super::{Probe, ProcessState};
-
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const STILL_ACTIVE: u32 = 259;
-
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct FileTime {
-        low: u32,
-        high: u32,
-    }
-
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-        fn GetLastError() -> u32;
-        fn GetExitCodeProcess(handle: *mut core::ffi::c_void, exit_code: *mut u32) -> i32;
-        fn QueryFullProcessImageNameW(
-            handle: *mut core::ffi::c_void,
-            flags: u32,
-            buffer: *mut u16,
-            size: *mut u32,
-        ) -> i32;
-        fn GetProcessTimes(
-            handle: *mut core::ffi::c_void,
-            creation: *mut FileTime,
-            exit: *mut FileTime,
-            kernel: *mut FileTime,
-            user: *mut FileTime,
-        ) -> i32;
-    }
-
-    fn filetime_to_ms(t: FileTime) -> i64 {
-        // 100 ns ticks since 1601-01-01 → ms since the Unix epoch.
-        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
-        let ticks = (((t.high as u64) << 32) | t.low as u64) as i64;
-        (ticks - EPOCH_DIFF_100NS) / 10_000
-    }
-
-    pub fn probe(pid: u32) -> Probe {
-        let mut out = Probe::default();
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                // Invalid pid is proof of absence. Access denied and every
-                // other failure keep the default Unknown state.
-                if GetLastError() == 87 {
-                    out.state = ProcessState::Exited;
-                }
-                return out;
-            }
-            let mut code: u32 = 0;
-            let ok = GetExitCodeProcess(handle, &mut code);
-            if ok == 0 {
-                CloseHandle(handle);
-                return out;
-            }
-            if code != STILL_ACTIVE {
-                out.state = ProcessState::Exited;
-                CloseHandle(handle);
-                return out;
-            }
-            out.state = ProcessState::Alive;
-            let mut buf = [0u16; 32768];
-            let mut size = buf.len() as u32;
-            if QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) != 0 {
-                out.exe_path = Some(String::from_utf16_lossy(&buf[..size as usize]));
-            }
-            let mut creation = FileTime::default();
-            let mut exit = FileTime::default();
-            let mut kernel = FileTime::default();
-            let mut user = FileTime::default();
-            if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
-                out.created_at_ms = Some(filetime_to_ms(creation));
-            }
-            CloseHandle(handle);
-        }
-        out
     }
 }
 

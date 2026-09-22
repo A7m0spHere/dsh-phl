@@ -9,6 +9,7 @@ import {
   Copy,
   Cpu,
   KeyRound,
+  Minimize2,
   Minus,
   Moon,
   Package,
@@ -19,7 +20,8 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { desktop } from '@/lib/desktop'
+import { desktop, isMac } from '@/lib/desktop'
+import { useFullscreen } from '@/lib/useFullscreen'
 import { useMaximized } from '@/lib/useMaximized'
 import { useMotion } from '@/lib/motion'
 import {
@@ -60,6 +62,7 @@ export function TitleBar() {
   const { t, spring, scale } = useMotion()
   const indicatorId = useId()
   const maximized = useMaximized()
+  const fullscreen = useFullscreen()
 
   const activeTab = routeTab(route)
 
@@ -82,7 +85,19 @@ export function TitleBar() {
       className="drag relative z-30 flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl"
       style={{ height: 'var(--titlebar-h)' }}
     >
-      <div data-tauri-drag-region className="flex shrink-0 items-center gap-1.5 pl-1 pr-1.5">
+      {/* macOS (and browser-preview-of-macOS): the native traffic lights sit
+          over this corner — the Rust shell switches the main window to
+          Titled + Overlay titleBarStyle so they exist — and the web content
+          extends under them. The native x inset is 12 logical points; leave
+          a dedicated 76px slot before the logo. Native vertical positioning
+          belongs to tauri.macos.conf.json (tao's y is not a top margin). */}
+      <div
+        data-tauri-drag-region
+        className={cn(
+          'flex shrink-0 items-center gap-1.5 pr-1.5',
+          isMac ? 'pl-[76px]' : 'pl-1',
+        )}
+      >
         <Logo size={16} />
         <span className="select-none text-sm font-semibold tracking-tight text-ink">PHL</span>
         {/* Browser/mock mode looks identical to a real run (install progress,
@@ -130,6 +145,9 @@ export function TitleBar() {
           return (
             <button
               key={tab.id}
+              aria-label={tab.label}
+              aria-current={active ? 'page' : undefined}
+              title={tab.label}
               onClick={() => navigate({ name: tab.id } as never)}
               className={cn(
                 'relative flex h-[26px] shrink-0 items-center gap-1.5 rounded-sm px-2 text-sm font-medium transition-colors duration-150',
@@ -163,7 +181,7 @@ export function TitleBar() {
         <TaskCenter />
 
         <Tooltip
-          content={<span className="flex items-center gap-1">快速跳转 <Kbd>Ctrl</Kbd><Kbd>K</Kbd></span>}
+          content={<span className="flex items-center gap-1">快速跳转 <Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd><Kbd>K</Kbd></span>}
           side="bottom"
         >
           <IconButton
@@ -212,30 +230,74 @@ export function TitleBar() {
           </IconButton>
         </Tooltip>
 
-        <div className="no-drag ml-1 flex shrink-0 items-center self-stretch">
-          <button
-            aria-label="最小化"
-            onClick={() => (desktop.isDesktop ? void desktop.minimize() : unavailable())}
-            className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-surface-hover hover:text-ink"
+        {/* State-driven escape hatch for fullscreen: on macOS the native
+            lights disappear in fullscreen and the Overlay titlebar does not
+            bring them back on hover, so without this the only exits are the
+            keyboard shortcut and force-quitting. Same button on every
+            desktop platform whenever the window reports fullscreen. */}
+        {desktop.isDesktop && fullscreen && (
+          <Tooltip
+            content={
+              <span className="flex items-center gap-1">
+                退出全屏 {isMac ? <><Kbd>⌃</Kbd><Kbd>⌘</Kbd><Kbd>F</Kbd></> : <><Kbd>Ctrl</Kbd><Kbd>Alt</Kbd><Kbd>F</Kbd></>}
+              </span>
+            }
+            side="bottom"
           >
-            <Minus size={13} />
-          </button>
-          <button
-            aria-label={maximized ? '向下还原' : '最大化'}
-            onClick={() => (desktop.isDesktop ? void desktop.toggleMaximize() : unavailable())}
-            className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-surface-hover hover:text-ink"
-          >
-            {/* Two offset squares read as "restore" the way the OS draws it. */}
-            {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={10.5} />}
-          </button>
-          <button
-            aria-label="关闭"
-            onClick={() => (desktop.isDesktop ? void desktop.requestClose() : unavailable())}
-            className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-white"
-          >
-            <X size={14} />
-          </button>
-        </div>
+            <IconButton
+              label="退出全屏"
+              size="sm"
+              variant="ghost"
+              className="no-drag"
+              onClick={() =>
+                void desktop.exitFullscreen().catch(() =>
+                  toast({
+                    kind: 'error',
+                    title: '退出全屏失败',
+                    // The chord differs per platform, and Windows has no green
+                    // button to fall back on.
+                    message: isMac
+                      ? '窗口未能退出全屏，请用 ⌃⌘F 或绿钮重试。'
+                      : '窗口未能退出全屏，请用 Ctrl+Alt+F 重试。',
+                    duration: 4000,
+                  }),
+                )
+              }
+            >
+              <Minimize2 size={14} />
+            </IconButton>
+          </Tooltip>
+        )}
+
+        {/* macOS draws the traffic lights itself (native titlebar); its own
+            close also routes through `phl://close-requested` in Rust, so the
+            custom controls are Windows/Linux/browser only. */}
+        {!isMac && (
+          <div className="no-drag ml-1 flex shrink-0 items-center self-stretch">
+            <button
+              aria-label="最小化"
+              onClick={() => (desktop.isDesktop ? void desktop.minimize() : unavailable())}
+              className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-surface-hover hover:text-ink"
+            >
+              <Minus size={13} />
+            </button>
+            <button
+              aria-label={maximized ? '向下还原' : '最大化'}
+              onClick={() => (desktop.isDesktop ? void desktop.toggleMaximize() : unavailable())}
+              className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-surface-hover hover:text-ink"
+            >
+              {/* Two offset squares read as "restore" the way the OS draws it. */}
+              {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={10.5} />}
+            </button>
+            <button
+              aria-label="关闭"
+              onClick={() => (desktop.isDesktop ? void desktop.requestClose() : unavailable())}
+              className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-white"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
       </div>
     </header>
   )

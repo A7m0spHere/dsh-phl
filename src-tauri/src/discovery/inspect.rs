@@ -11,9 +11,12 @@
 //! executable (version comes from files beside it).
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::candidate::{CandidateSource, Confidence};
+use crate::launch::node_binary;
 
 /// The harness's own bundle scope. Entries inside it are the product, not
 /// user plugins, and are filtered out of every plugin count.
@@ -189,38 +192,128 @@ fn read_package_version(raw: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-/// `node` as found on PATH, with its `--version` (leading `v` stripped).
-/// The `MAJOR.MINOR.PATCH` gate mirrors `runtimes::system_node_version`:
-/// shims that print anything else report nothing rather than noise.
-pub(crate) fn probe_node() -> (Option<String>, Option<String>) {
-    let mut command = std::process::Command::new("node");
-    command.arg("--version");
-    // Discovery runs on every page load; without this Windows flashes a
-    // console window each time (only console-subsystem binaries get one).
+/// The version a `node --version` reports, or `None` when the output is not a
+/// bare `MAJOR.MINOR.PATCH`: shims and wrappers print their own things, and a
+/// version nobody can parse must report nothing rather than noise.
+pub(crate) fn parse_node_version(stdout: &str) -> Option<String> {
+    let version = stdout.trim().strip_prefix('v')?;
+    let ok =
+        version.split('.').count() == 3 && version.chars().all(|c| c.is_ascii_digit() || c == '.');
+    ok.then(|| version.to_string())
+}
+
+/// `<candidate> --version`, run silently and *bounded*.
+///
+/// The bound is not decoration: this runs from launch and version-install paths,
+/// which are async with no timeout above them, so a wedged binary (a wrapper
+/// waiting on stdin) would park a runtime worker and hang the command. The
+/// child is killed and reported unusable instead.
+fn node_version_at(candidate: &Path, timeout: Duration) -> Option<String> {
+    let mut command = std::process::Command::new(candidate);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Only console-subsystem binaries get a console window, and this probe
+    // runs on every page load.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(crate::launch::CREATE_NO_WINDOW);
     }
-    let output = command.output().ok();
-    let Some(output) = output else {
-        return (None, None);
-    };
-    if !output.status.success() {
-        return (None, None);
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            // A non-zero exit is not a Node we can run.
+            Ok(Some(status)) if status.success() => {
+                let mut text = String::new();
+                child.stdout.take()?.read_to_string(&mut text).ok()?;
+                return parse_node_version(&text);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                // Out of time, or the wait itself failed: leave no process.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let Some(version) = text.strip_prefix('v') else {
-        return (None, None);
-    };
-    let ok =
-        version.split('.').count() == 3 && version.chars().all(|c| c.is_ascii_digit() || c == '.');
-    if ok {
-        // Report the command name, not a resolved absolute path: PATH entries
-        // can be shims, and `node` is what would actually run.
-        (Some("node".to_string()), Some(version.to_string()))
-    } else {
-        (None, None)
+}
+
+/// The first root holding a `node` that exists *and* runs, in scan order.
+///
+/// Pure over an injected runner, the way `launch::registry::decide` is pure
+/// over an injected probe: the scan is the part with behaviour worth pinning,
+/// and driving it with fixture roots keeps a test from rewriting this
+/// process's PATH — which every other test in this binary shares.
+pub(crate) fn first_runnable_node(
+    roots: &[PathBuf],
+    version_of: &dyn Fn(&Path) -> Option<String>,
+) -> Option<(PathBuf, String)> {
+    for dir in roots {
+        let candidate = dir.join(node_binary());
+        if !candidate.is_file() {
+            continue;
+        }
+        if let Some(version) = version_of(&candidate) {
+            return Some((candidate, version));
+        }
+    }
+    None
+}
+
+/// The real installation behind a resolved candidate path.
+///
+/// fnm and nvm both put a *shim* directory on PATH — `…/fnm_multishells/<id>/bin`
+/// holds nothing but links, and it is destroyed with the shell that created it.
+/// That path is worth neither reporting nor handing to `find_npm_cli`, which
+/// looks for npm *beside* the binary it is given and would find a link farm
+/// empty.
+pub(crate) fn real_node_path(candidate: &Path) -> PathBuf {
+    crate::paths::strip_verbatim(
+        &std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf()),
+    )
+}
+
+/// The system Node this machine has, as an absolute path plus the version it
+/// reported — the one value every consumer of 「系统 Node」 must agree on.
+///
+/// PATH first, so a terminal launch resolves exactly what the shell would,
+/// then the platform's well-known bin roots, because an app launched from
+/// Finder or a desktop entry inherits launchd's PATH and cannot see the
+/// toolchain a shell user has. The path is absolute and *verified* (that
+/// binary answered `--version`), which is what lets the runtime page report
+/// the version of the Node a launch will actually execute.
+pub(crate) fn resolve_system_node() -> Option<(PathBuf, String)> {
+    resolve_system_node_within(NODE_PROBE_TIMEOUT)
+}
+
+/// How long one candidate's `--version` may take. Long enough for a cold
+/// binary on a busy disk, short enough that a wedged one cannot hold a launch.
+pub(crate) const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The resolution with an explicit probe budget (the seam its timeout test
+/// needs; every production caller uses `resolve_system_node`).
+pub(crate) fn resolve_system_node_within(timeout: Duration) -> Option<(PathBuf, String)> {
+    let probe = move |candidate: &Path| node_version_at(candidate, timeout);
+    let (path, version) = first_runnable_node(&executable_roots(), &probe)?;
+    Some((real_node_path(&path), version))
+}
+
+/// `node` as this machine has it, with its `--version` (leading `v` stripped).
+/// The path is the resolved absolute one — the same value a launch uses —
+/// rather than a bare `node`, whose meaning is "whatever PATH resolves, if it
+/// resolves at all": that name is exactly what a GUI launch cannot rely on.
+pub(crate) fn probe_node() -> (Option<String>, Option<String>) {
+    match resolve_system_node() {
+        Some((path, version)) => (Some(path.to_string_lossy().into_owned()), Some(version)),
+        None => (None, None),
     }
 }
 
@@ -253,21 +346,80 @@ fn executable_names() -> &'static [&'static str] {
     platform::executable_names()
 }
 
-/// `~/.nvm/versions/node/<v>/bin` for every version nvm has installed.
+/// `~/.nvm/versions/node/<v>/bin` for every version nvm has installed,
+/// newest-first.
 /// One bounded level (never recursed): an install listing, not a disk walk.
 /// Lives here — rather than in each platform file — so tests can exercise it
 /// on any host with a fixture directory; consumers are the Unix platform
 /// modules, which is why it is dead on a non-test Windows build.
+///
+/// Sorted because the list is a *preference* order, not just a search space:
+/// `resolve_system_node` takes the first runnable candidate, so on a machine
+/// whose PATH has no `node` a readdir order would be what decides which Node an
+/// instance runs and the page reports.
 #[cfg(any(not(windows), test))]
 pub(crate) fn nvm_bin_dirs(nvm_home: &Path) -> Vec<PathBuf> {
     let versions = nvm_home.join("versions").join("node");
     let Ok(entries) = std::fs::read_dir(&versions) else {
         return Vec::new();
     };
-    entries
+    let mut dirs: Vec<(Option<semver::Version>, PathBuf)> = entries
         .flatten()
-        .map(|e| e.path().join("bin"))
-        .filter(|p| p.is_dir())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (version_of_dir_name(&name), e.path().join("bin"))
+        })
+        .filter(|(_, path)| path.is_dir())
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The version a toolchain directory name spells, e.g. `v22.2.0` → `22.2.0`.
+/// `None` for a name semver cannot read, which sorts it last in both
+/// version-manager listings rather than letting it silently win the scan.
+pub(crate) fn version_of_dir_name(name: &str) -> Option<semver::Version> {
+    semver::Version::parse(name.trim_start_matches('v')).ok()
+}
+
+/// Node bin dirs under fnm's data directory: every alias first (they are the
+/// user's own choice of default), then the installed versions newest-first.
+///
+/// fnm is the toolchain the well-known-bin list used to miss, and it is the
+/// common one on macOS. It installs nothing into `/usr/local/bin` or `~/.nvm`:
+/// it injects a per-shell shim directory into PATH, so a terminal resolves its
+/// `node` while an app launched from Finder — which inherits launchd's PATH —
+/// resolves none at all. Both data-dir conventions are probed because fnm
+/// follows XDG on Linux and `~/Library/Application Support` on macOS.
+///
+/// Kept here beside `nvm_bin_dirs`, not in the platform files, so it is
+/// testable on every host.
+#[cfg(any(not(windows), test))]
+pub(crate) fn fnm_bin_dirs(home: &Path) -> Vec<PathBuf> {
+    let data_dirs = [
+        home.join(".local").join("share").join("fnm"),
+        home.join("Library").join("Application Support").join("fnm"),
+    ];
+    let mut aliases: Vec<PathBuf> = Vec::new();
+    let mut versions: Vec<(Option<semver::Version>, PathBuf)> = Vec::new();
+    for data in data_dirs {
+        if let Ok(entries) = std::fs::read_dir(data.join("aliases")) {
+            aliases.extend(entries.flatten().map(|e| e.path().join("bin")));
+        }
+        if let Ok(entries) = std::fs::read_dir(data.join("node-versions")) {
+            versions.extend(entries.flatten().map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let version = version_of_dir_name(&name);
+                (version, e.path().join("installation").join("bin"))
+            }));
+        }
+    }
+    aliases.sort();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    aliases
+        .into_iter()
+        .chain(versions.into_iter().map(|(_, path)| path))
+        .filter(|path| path.is_dir())
         .collect()
 }
 
@@ -443,6 +595,211 @@ mod tests {
             Some("1.0.0-local")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fnm_bin_dirs_puts_aliases_first_and_versions_newest_first() {
+        let home = fixture("fnm");
+        let data = home.join(".local").join("share").join("fnm");
+        // v10 before v9 on purpose: descending *string* order puts `v9.0.0`
+        // first, so this fixture only passes if the sort reads semver.
+        for v in ["v22.2.0", "v26.3.0", "v9.0.0", "v10.0.0"] {
+            std::fs::create_dir_all(
+                data.join("node-versions")
+                    .join(v)
+                    .join("installation")
+                    .join("bin"),
+            )
+            .unwrap();
+        }
+        // A version dir with no installation/bin is skipped, not guessed at.
+        std::fs::create_dir_all(data.join("node-versions").join("v23.0.0")).unwrap();
+        // A directory name semver cannot read must sort *last*, never first.
+        let odd = data.join("node-versions").join("current");
+        std::fs::create_dir_all(odd.join("installation").join("bin")).unwrap();
+        std::fs::create_dir_all(data.join("aliases").join("default").join("bin")).unwrap();
+
+        let found = fnm_bin_dirs(&home);
+        assert_eq!(
+            found.len(),
+            6,
+            "one alias + four versions + the unreadable name: {found:?}"
+        );
+        assert!(found[0].ends_with(Path::new("aliases/default/bin")));
+        assert!(found[1].ends_with(Path::new("node-versions/v26.3.0/installation/bin")));
+        assert!(found[2].ends_with(Path::new("node-versions/v22.2.0/installation/bin")));
+        // v10 outranks v9 — the case a string sort gets backwards.
+        assert!(found[3].ends_with(Path::new("node-versions/v10.0.0/installation/bin")));
+        assert!(found[4].ends_with(Path::new("node-versions/v9.0.0/installation/bin")));
+        assert!(found[5].ends_with(Path::new("node-versions/current/installation/bin")));
+        assert!(fnm_bin_dirs(&home.join("nowhere")).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// nvm's listing feeds the same first-wins scan, so it has to be ordered
+    /// too — readdir order would decide which Node an instance runs.
+    #[test]
+    fn nvm_bin_dirs_lists_versions_newest_first() {
+        let dir = fixture("nvm-order");
+        let versions = dir.join("versions").join("node");
+        for v in ["v14.21.3", "v22.2.0", "v9.11.2", "v10.24.1"] {
+            std::fs::create_dir_all(versions.join(v).join("bin")).unwrap();
+        }
+        let found = nvm_bin_dirs(&dir);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| {
+                p.parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["v22.2.0", "v14.21.3", "v10.24.1", "v9.11.2"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe's budget is real: a binary that never answers is killed and
+    /// reported unusable instead of holding the caller forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_wedged_node_binary_is_dropped_when_the_probe_budget_runs_out() {
+        let dir = fixture("node-wedged");
+        let fake = dir.join(node_binary());
+        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let started = Instant::now();
+        assert_eq!(node_version_at(&fake, Duration::from_millis(250)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the probe must give up on its own budget, took {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and a binary that answers normally still parses, so the bound above
+    /// did not cost the happy path.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_version_string_survives_the_bounded_probe() {
+        let dir = fixture("node-probe");
+        let fake = dir.join(node_binary());
+        std::fs::write(&fake, "#!/bin/sh\necho v22.11.0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            node_version_at(&fake, NODE_PROBE_TIMEOUT).as_deref(),
+            Some("22.11.0")
+        );
+        // A binary that runs but prints something else is not a Node.
+        std::fs::write(&fake, "#!/bin/sh\necho 'command not found'\n").unwrap();
+        assert_eq!(node_version_at(&fake, NODE_PROBE_TIMEOUT), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_node_scan_stops_at_the_first_root_that_holds_a_runnable_node() {
+        let dir = fixture("node-scan");
+        let (first, second) = (dir.join("first"), dir.join("second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        // Only `second` holds a binary; an empty dir must not answer.
+        std::fs::write(second.join(node_binary()), "").unwrap();
+        let version_of = |path: &Path| {
+            Some(
+                if path.starts_with(&second) {
+                    "26.3.0"
+                } else {
+                    "1.0.0"
+                }
+                .to_string(),
+            )
+        };
+        let hit = first_runnable_node(&[first.clone(), second.clone()], &version_of)
+            .expect("second root holds a node");
+        assert_eq!(hit.0, second.join(node_binary()));
+        assert_eq!(hit.1, "26.3.0");
+
+        // A candidate that exists but will not run is skipped, and an empty
+        // scan is an honest `None` rather than a path nobody verified.
+        std::fs::write(first.join(node_binary()), "").unwrap();
+        let refuses = |_: &Path| None;
+        assert!(first_runnable_node(&[first, second.clone()], &refuses).is_none());
+        assert!(first_runnable_node(&[], &version_of).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_node_version_gates_shims_and_junk() {
+        assert_eq!(parse_node_version("v22.11.0\n").as_deref(), Some("22.11.0"));
+        // What a wrapper or a broken shim prints is not a version.
+        assert_eq!(parse_node_version("node: command not found"), None);
+        assert_eq!(parse_node_version("v22.11"), None);
+        assert_eq!(parse_node_version("v22.11.0-rc.1"), None);
+        assert_eq!(parse_node_version(""), None);
+    }
+
+    /// The shim dir a shell-based toolchain injects into PATH holds links, and
+    /// `find_npm_cli` finds no npm beside a link.
+    #[cfg(unix)]
+    #[test]
+    fn real_node_path_follows_a_shim_link_to_the_installation() {
+        let dir = fixture("node-link");
+        let real = dir.join("installation").join("bin").join("node");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        let shims = dir.join("multishells").join("1234").join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        let shim = shims.join("node");
+        std::os::unix::fs::symlink(&real, &shim).unwrap();
+
+        assert_eq!(real_node_path(&shim), std::fs::canonicalize(&real).unwrap());
+        // A path that cannot be resolved is reported as given, not dropped.
+        let missing = dir.join("gone").join("node");
+        assert_eq!(real_node_path(&missing), missing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 2026-09-22 review's repro, as a probe rather than an assertion CI
+    /// can run: it needs a machine whose Node comes from a toolchain manager
+    /// (fnm/nvm/Homebrew) and it rewrites this process's PATH, so it is
+    /// `#[ignore]`d like the network probes. Run it explicitly:
+    ///
+    /// ```text
+    /// cargo test --lib finder_launch -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[test]
+    #[ignore]
+    fn finder_launch_still_resolves_the_system_node() {
+        let before = std::env::var_os("PATH");
+        // Exactly what a Finder-launched app inherits from launchd.
+        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        let found = resolve_system_node();
+        match before {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let (node, version) = found.expect("no node found with launchd's PATH");
+        println!("launchd PATH → {} (v{version})", node.display());
+        assert!(
+            node.is_absolute(),
+            "a bare name is what a GUI launch cannot use"
+        );
+        // The point of resolving through shim links: dependency installation
+        // looks for npm *beside* the binary it is handed.
+        assert!(
+            crate::versions::dependencies::find_npm_cli(&node).is_some(),
+            "the resolved node must carry its bundled npm"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::probe::ProcessState;
 use super::Processes;
 
 /// One bounded head read: `dsh web:` prints the token line in the first
@@ -265,11 +266,25 @@ pub(crate) fn build_command(
     Ok((node, cmd_args, env_pairs))
 }
 
-/// The system runtime runs whatever `node` is on PATH; installed runtimes
-/// must have their binary in place or the launch is refused up front.
+/// The executable a launch will run: an installed runtime's own `node`, or the
+/// system Node resolved to a *verified absolute path*.
+///
+/// The system case used to hand back a bare `node` and let the OS resolve it
+/// at spawn time. That is the one resolution a GUI launch cannot perform: an
+/// app started from Finder inherits launchd's PATH, which knows nothing of
+/// fnm, nvm or Homebrew, so the instance failed to start while the identical
+/// command worked in a terminal. Resolving here makes the version the runtime
+/// page reports, the binary the log line shows and the process actually
+/// spawned one value (`discovery::inspect::resolve_system_node`).
 pub(crate) fn resolve_node(root: &Path, runtime_name: &str) -> Result<PathBuf, String> {
     if runtime_name == "node-system" {
-        return Ok(PathBuf::from("node"));
+        return crate::discovery::inspect::resolve_system_node()
+            .map(|(node, _)| node)
+            .ok_or_else(|| {
+                "系统 Node 不可用：PATH 与常见安装位置都没有找到可执行的 node。\
+                 请在「运行时」页安装一个 Node，或把 Node 加入 PATH。"
+                    .to_string()
+            });
     }
     let node = runtime_bin_dir(root, runtime_name).join(node_binary());
     if !node.exists() {
@@ -429,7 +444,10 @@ pub(crate) async fn log_tail(path: &Path, max_lines: usize) -> String {
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The spawned node is only the tree root — DSH shells out to plugins and
-/// tools, so the whole tree has to go with it.
+/// tools, so the whole tree has to go with it. Windows' `taskkill /T /F` walks
+/// that tree itself; Unix reaches it through the process group, which is
+/// `terminate_tree`'s job, so this is the direct-child fallback used when no
+/// group can be vouched for (and the only path Windows needs).
 #[cfg(windows)]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
     let output = tokio::time::timeout(
@@ -453,8 +471,9 @@ pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub(crate) async fn kill_tree(pid: u32) -> Result<(), String> {
-    // No libc dependency: `kill` on the direct child. DSH's own children are
-    // expected to exit with it; a tree-kill here would need a setsid pre-exec.
+    // Direct child only, hard. Reached when `terminate_tree` cannot vouch for
+    // a process group: DSH's own children are then expected to exit with it,
+    // because there is no group handle to take them out deliberately.
     let output = tokio::time::timeout(
         KILL_TIMEOUT,
         tokio::task::spawn_blocking(move || {
@@ -476,6 +495,103 @@ pub(crate) fn check_kill_output(pid: u32, output: std::process::Output) -> Resul
     }
     Err(format!(
         "无法终止进程 {pid}（退出码 {:?}）: {}{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    ))
+}
+
+/// How long a politely-terminated process tree gets before it is killed
+/// outright: enough for DSH to close the session files it opened (the reason a
+/// stop is not one hard kill) and for its children to follow it out, short
+/// enough that 「停止」 still feels immediate.
+pub(crate) const TERM_GRACE: Duration = Duration::from_secs(3);
+
+/// Poll `probe` until it reports the process gone, or `window` runs out.
+///
+/// The one implementation of "an exit we have observed" — the stop path's
+/// confirm window and the grace inside `terminate_tree` both use it, because
+/// a request that a signal was *delivered* is not an observed exit.
+pub(crate) async fn confirm_exit(
+    mut probe: impl FnMut() -> ProcessState,
+    window: Duration,
+) -> bool {
+    let deadline = Instant::now() + window;
+    loop {
+        if probe() == ProcessState::Exited {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Terminate a launched DSH process *and the tree it started*.
+///
+/// The spawned node is only the tree root: DSH shells out to plugins and tools,
+/// so a stop has to take the group with it. SIGTERM first so DSH closes what it
+/// opened and its children follow, then SIGKILL for whatever refused — and the
+/// hard signal is sent to the group whether or not the root has already exited,
+/// because a child that ignores SIGTERM outlives its parent. The single
+/// `kill -9 <pid>` this replaces neither gave DSH that chance nor reached
+/// anything it started (2026-09-22 review).
+///
+/// The group is only signalled when the kernel shows this pid *leading* one
+/// (`probe::owned_group_of`); everything else takes the direct-child path.
+/// Unknown pid-sharing groups are never signalled: `kill -TERM -<pgid>` reaches
+/// every member, and one of those members could be PHL itself.
+pub(crate) async fn terminate_tree(pid: u32, grace: Duration) -> Result<(), String> {
+    // Windows' `taskkill /T /F` already walks the tree; there is no group id.
+    #[cfg(windows)]
+    {
+        let _ = grace;
+        kill_tree(pid).await
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(group) = super::probe::owned_group_of(pid) else {
+            return kill_tree(pid).await;
+        };
+        // A TERM that fails is still no reason to skip the KILL below: the
+        // pid may have exited between the probe and the signal.
+        let _ = signal_group(group, "TERM").await;
+        let root_gone = confirm_exit(|| super::probe::probe_process(pid).state, grace).await;
+        let hard = signal_group(group, "KILL").await;
+        if root_gone {
+            // A group with nothing left in it cannot be signalled, and that is
+            // the outcome we were after — worth a line, not an error.
+            if let Err(e) = hard {
+                eprintln!("[phl] {e}");
+            }
+            return Ok(());
+        }
+        hard
+    }
+}
+
+/// One signal to a process group. `--` ends the option list: the group form is
+/// a negative id, which `kill` would otherwise read as an option.
+#[cfg(not(windows))]
+async fn signal_group(group: u32, signal: &'static str) -> Result<(), String> {
+    let output = tokio::time::timeout(
+        KILL_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("kill")
+                .args(["-s", signal, "--", &format!("-{group}")])
+                .output()
+        }),
+    )
+    .await
+    .map_err(|_| format!("向进程组 {group} 发送 {signal} 超时（kill 超过 10 秒无响应）"))?
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "无法向进程组 {group} 发送 {signal}（退出码 {:?}）: {}{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -507,6 +623,143 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("launch.log");
         (dir, path)
+    }
+
+    /// A shell that starts a child of its own — the shape of DSH shelling out
+    /// to a plugin — and records that child's pid where the test can read it.
+    #[cfg(unix)]
+    fn tree_fixture(tag: &str) -> (PathBuf, tokio::process::Child, u32) {
+        let dir = std::env::temp_dir().join(format!("phl-tree-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("child.pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > {} ; wait",
+                pid_file.display()
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // Exactly what launch does, so the fixture has the group the stop path
+        // is allowed to signal.
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        (pid_file, child, pid)
+    }
+
+    /// The review's finding: `kill -9 <pid>` left whatever DSH had started
+    /// running. A stop must reach the tree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminated_tree_takes_the_children_with_it() {
+        let (pid_file, mut child, pid) = tree_fixture("tree");
+        let grandchild = wait_for_pid_file(&pid_file).await;
+        assert_eq!(
+            super::super::probe::probe_process(grandchild).state,
+            ProcessState::Alive,
+            "the fixture must actually have a child running"
+        );
+        assert_eq!(super::super::probe::owned_group_of(pid), Some(pid));
+
+        terminate_tree(pid, TERM_GRACE).await.unwrap();
+
+        assert_eq!(
+            super::super::probe::probe_process(pid).state,
+            ProcessState::Exited
+        );
+        assert_eq!(
+            super::super::probe::probe_process(grandchild).state,
+            ProcessState::Exited,
+            "a child of the instance outlived the stop"
+        );
+        let _ = child.wait().await;
+        let _ = std::fs::remove_dir_all(pid_file.parent().unwrap());
+    }
+
+    /// A process that ignores SIGTERM is killed anyway — but only after the
+    /// grace, which is the whole point of asking nicely first.
+    ///
+    /// The fixture announces itself before the clock starts: signalling a shell
+    /// that has not reached `trap` yet would kill it outright, and the test
+    /// would then be asserting that a process which *did* die honours the grace
+    /// (measured: ~1 run in 5 lost that race under a full parallel suite).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sigterm_refusing_group_is_killed_after_the_grace() {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; echo ready; while :; do sleep 1; done")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let grace = Duration::from_millis(400);
+        wait_for_ready(&mut child).await;
+
+        let started = Instant::now();
+        terminate_tree(pid, grace).await.unwrap();
+
+        assert!(
+            started.elapsed() >= grace,
+            "the hard kill must wait out the grace, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            super::super::probe::probe_process(pid).state,
+            ProcessState::Exited
+        );
+        let _ = child.wait().await;
+    }
+
+    /// Block until the fixture prints its readiness line.
+    #[cfg(unix)]
+    async fn wait_for_ready(child: &mut tokio::process::Child) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdout = child.stdout.take().expect("fixture stdout is piped");
+        let mut lines = BufReader::new(stdout).lines();
+        let ready = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+        assert!(
+            matches!(ready, Ok(Ok(Some(ref line))) if line.trim() == "ready"),
+            "fixture never announced readiness: {ready:?}"
+        );
+    }
+
+    /// A pid that shares PHL's own group is never signalled as a group: the
+    /// negative-pid form would reach this test runner too. The parse half is
+    /// pinned on every host, Windows included.
+    #[test]
+    fn only_a_group_the_pid_leads_may_be_signalled() {
+        assert_eq!(
+            super::super::probe::parse_ps_pgid("4242\n", 4242),
+            Some(4242)
+        );
+        assert_eq!(
+            super::super::probe::parse_ps_pgid("  4242  ", 4242),
+            Some(4242)
+        );
+        assert_eq!(super::super::probe::parse_ps_pgid("1\n", 4242), None);
+        assert_eq!(super::super::probe::parse_ps_pgid("", 4242), None);
+        assert_eq!(super::super::probe::parse_ps_pgid("pgid\n", 4242), None);
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_pid_file(path: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    return pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "fixture never wrote {path:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Reserve a port and keep the listener: a connect to it succeeds, exactly
