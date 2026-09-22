@@ -73,6 +73,21 @@ export const isVersionInstallable = (v: DshVersion) =>
   v.state.kind === 'available' || v.state.kind === 'failed'
 
 /**
+ * Whether there is a package to fetch at all. A GitHub-ahead row
+ * (`pendingPublish`) is listed so the catalog tracks the release pace, and it
+ * carries no download source — so every affordance that means "install this"
+ * has to stand down until npm catches up. The row stays selectable: pinning an
+ * instance to a version it will install later is a legitimate choice, it just
+ * is not an install PHL can start.
+ *
+ * Deliberately separate from `isVersionInstallable`, which answers a question
+ * about the *state* machine alone (and whose drift table enumerates every
+ * kind). Folding availability into it would make a resting-but-unpublished row
+ * read as "no install offered", which is a different statement.
+ */
+export const isVersionDownloadable = (v: DshVersion) => !v.pendingPublish
+
+/**
  * The single source of truth for "an operation on this version is in flight".
  * Every busy / active / keep predicate derives from this list — the per-set
  * literals that used to live in catalogStore, the refresh merge, the wizard

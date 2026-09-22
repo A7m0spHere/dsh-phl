@@ -8,7 +8,7 @@ import {
   Download,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { isVersionInstallable, isRuntimeInstallable } from '@/types'
+import { isVersionInstallable, isVersionDownloadable, isRuntimeInstallable } from '@/types'
 import {
   draftIssues,
   useCatalogStore,
@@ -139,9 +139,13 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   useEffect(() => {
     if (draft.versionId || !versions.length) return
     const source = cloneFrom ? instances.find((i) => i.id === cloneFrom) : undefined
+    // A GitHub-ahead row sorts to the top of the catalog and cannot be
+    // downloaded yet; defaulting to it would hand back an instance whose first
+    // launch fails. It stays selectable by hand — the row says npm 未收录.
     const version =
       (source && versions.find((v) => v.id === source.versionId)) ??
       versions.find((v) => v.state.kind === 'installed' && !v.legacy) ??
+      versions.find(isVersionDownloadable) ??
       versions[0]
     const runtime =
       (source && runtimes.find((r) => r.id === source.runtimeId)) ??
@@ -160,11 +164,13 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   const hasIssues = issueKeys.some((k) => issues[k])
 
   // Components still missing a download, shown in the footer so the
-  // auto-install on submit never comes as a surprise.
+  // auto-install on submit never comes as a surprise. A version with no
+  // package behind it (`npm 未收录`) is not one of them: there is nothing to
+  // fetch, and listing it would promise an install that cannot happen.
   const pendingNames = useMemo(() => {
     const out: string[] = []
     const v = versions.find((x) => x.id === draft.versionId)
-    if (v && isVersionInstallable(v)) out.push(`DSH ${v.name}`)
+    if (v && isVersionInstallable(v) && isVersionDownloadable(v)) out.push(`DSH ${v.name}`)
     const r = runtimes.find((x) => x.id === draft.runtimeId)
     if (r && isRuntimeInstallable(r)) out.push(r.name)
     return out
@@ -204,7 +210,8 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
     const catalog = useCatalogStore.getState()
     const version = catalog.versions.find((v) => v.id === draft.versionId)
     const runtime = catalog.runtimes.find((r) => r.id === draft.runtimeId)
-    const versionPending = version && isVersionInstallable(version) ? version : null
+    const versionPending =
+      version && isVersionInstallable(version) && isVersionDownloadable(version) ? version : null
     const runtimePending = runtime && isRuntimeInstallable(runtime) ? runtime : null
 
     const instance = await createInstance(draft)

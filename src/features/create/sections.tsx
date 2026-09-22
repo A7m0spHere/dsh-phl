@@ -314,11 +314,16 @@ function VersionRow({
         </span>
 
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
+          <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-base font-medium text-ink">{version.name}</span>
             {version.latest && <Badge tone="accent">最新</Badge>}
             {version.legacy && <Badge tone="neutral">Legacy</Badge>}
             {version.channel === 'nightly' && <Badge tone="warn">Nightly</Badge>}
+            {version.pendingPublish && (
+              <Tooltip content="GitHub 已发布此版本，但 npm 尚未上架安装包。可以作为目标版本绑定，但暂时无法下载安装。">
+                <Badge tone="warn">npm 未收录</Badge>
+              </Tooltip>
+            )}
             {installed ? (
               <Badge tone="ok">已安装</Badge>
             ) : busy ? (
