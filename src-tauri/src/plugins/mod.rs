@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod catalog;
+pub(crate) mod conflicts;
 pub(crate) mod cordis;
 pub(crate) mod install;
 pub(crate) mod resolve;

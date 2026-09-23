@@ -10,6 +10,7 @@ function session(id: string): RemoteSessionInfo {
     cwd: '/work/p',
     parent: null,
     originSubagent: false,
+    formatVersion: 0,
   }
 }
 

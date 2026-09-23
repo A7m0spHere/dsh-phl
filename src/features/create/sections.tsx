@@ -2,16 +2,15 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion, useAnimation } from 'motion/react'
-import { ArrowLeft, Check, ChevronDown, CircleDashed, Download, FlaskConical, FolderOpen, Package, Search, Server, Shield, Sparkles, Square, Wrench, X } from 'lucide-react'
+import { Check, ChevronDown, CircleDashed, Download, FlaskConical, FolderOpen, Package, Search, Server, Shield, Sparkles, Square, Wrench, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { formatBytes, formatDate, slugify } from '@/lib/format'
 import { freeSpace } from '@/lib/desktop'
 import { HUES, hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
-import { draftIssues, useCatalogStore, useInstanceStore, useIsDark, useSettingsStore, useUIStore, useViewStore, useWizardStore } from '@/stores'
-import { isVersionBusy, isRuntimeBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
+import { useCatalogStore, useInstanceStore, useIsDark, useSettingsStore, useUIStore, useViewStore, useWizardStore } from '@/stores'
+import { isVersionBusy, isVersionInstallable, isRuntimeBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
 import { Badge, Button, EmptyState, Field, Input, ProgressBar, SectionCard, Segmented, Spinner, Switch, TextArea, Tooltip } from '@/components/ui'
-import { PanelGroup, PanelShell } from '@/components/layout/Panel'
 import { InstanceTile } from '@/components/instance'
 
 const KINDS: { id: InstanceKind; label: string; description: string }[] = [
@@ -89,82 +88,6 @@ interface SectionProps {
   controls: AnimControls
 }
 
-/* ------------------------------------------------------------------ *
- * context panel — required-choices checklist
- * ------------------------------------------------------------------ */
-
-export function CreateInstancePanel() {
-  const draft = useWizardStore((s) => s.draft)
-  const instances = useInstanceStore((s) => s.instances)
-  const versions = useCatalogStore((s) => s.versions)
-  const runtimes = useCatalogStore((s) => s.runtimes)
-  const back = useUIStore((s) => s.back)
-  const { scale } = useMotion()
-
-  const issues = draftIssues(draft, instances.map((i) => i.name))
-  const version = versions.find((v) => v.id === draft.versionId)
-  const runtime = runtimes.find((r) => r.id === draft.runtimeId)
-
-  const checklist = [
-    { id: 'name', label: '实例名称', ok: !issues.name, detail: draft.name.trim() || '未填写' },
-    { id: 'version', label: 'DSH 版本', ok: !issues.version, detail: version?.name ?? '未选择' },
-    { id: 'runtime', label: 'Runtime', ok: !issues.runtime, detail: runtime?.name ?? '未选择' },
-  ]
-
-  return (
-    <PanelShell>
-      <PanelGroup title="必选配置">
-        <ul className="mt-1 space-y-1">
-          {checklist.map((item) => (
-            <li key={item.id}>
-              <button
-                onClick={() =>
-                  document
-                    .getElementById(`create-section-${item.id}`)
-                    ?.scrollIntoView({ behavior: scale === 0 ? 'auto' : 'smooth', block: 'start' })
-                }
-                className="flex w-full items-center gap-2.5 rounded-sm px-1.5 py-1.5 text-left transition-colors hover:bg-surface-hover/70"
-              >
-                <span
-                  className={cn(
-                    'flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full ring-1 transition-colors duration-200',
-                    item.ok
-                      ? 'bg-ok/15 text-ok ring-ok/40'
-                      : 'bg-surface text-ink-faint ring-line-strong',
-                  )}
-                >
-                  {item.ok ? (
-                    <Check size={10} strokeWidth={3} />
-                  ) : (
-                    <span className="h-[5px] w-[5px] rounded-full bg-current opacity-50" />
-                  )}
-                </span>
-                <span className="min-w-0">
-                  <span
-                    className={cn('block text-base', item.ok ? 'text-ink-muted' : 'text-ink')}
-                  >
-                    {item.label}
-                  </span>
-                  <span className="block truncate text-sm text-ink-faint">{item.detail}</span>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </PanelGroup>
-
-      <div className="mt-auto space-y-2 p-3">
-        <Button variant="ghost" block onClick={back}>
-          <ArrowLeft size={13} />
-          返回
-        </Button>
-        <div className="rounded-lg bg-surface-sunken p-3 text-sm leading-relaxed text-ink-faint ring-1 ring-inset ring-line">
-          所有配置一次选好后统一创建。PHL 会为实例分配独立的 DSH_HOME、插件目录与 workspace，和其他实例完全隔离。
-        </div>
-      </div>
-    </PanelShell>
-  )
-}
 
 /* ------------------------------------------------------------------ *
  * left column — DSH version picker
@@ -178,6 +101,8 @@ export function VersionSection({ issue, attempted, controls }: SectionProps) {
   const { stagger } = useMotion()
   const [category, setCategory] = useState<VersionCategory>('all')
   const [query, setQuery] = useState('')
+
+  const selected = versions.find((v) => v.id === draft.versionId)
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -205,6 +130,13 @@ export function VersionSection({ issue, attempted, controls }: SectionProps) {
         description="实例会固定这个版本，与其他实例互不影响"
         extra={<SectionState issue={issue} doneLabel="已选择" />}
       >
+        {selected?.pendingPublish && (
+          <div className="mb-2.5 rounded-md bg-warn/10 px-2.5 py-2 text-sm leading-relaxed text-ink-muted ring-1 ring-inset ring-warn/25">
+            <span className="font-medium text-ink">{selected.name} 只在 GitHub 发布</span>
+            ，安装包尚未上架 npm，这里无法自动下载。先到「版本」页交给 agent 从源码构建，
+            或改选其他版本。
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <Segmented
             value={category}
@@ -352,7 +284,7 @@ function VersionRow({
           )}
         </AnimatePresence>
         </button>
-        {!installed && !busy && (
+        {isVersionInstallable(version) && (
           <Button size="sm" variant="secondary" onClick={onInstall}>
             <Download size={12} />
             安装

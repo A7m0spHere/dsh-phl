@@ -15,7 +15,9 @@ use super::{
 #[tauri::command]
 pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMeta>, String> {
     let client = http_client();
-    let (npm, latest_semver) = npm_catalog(&client, &registry_base).await?;
+    // `newest_npm` is the newest *installable* version; it drives the legacy
+    // line below, not the「最新」badge (see mark_upstream_latest).
+    let (npm, newest_npm) = npm_catalog(&client, &registry_base).await?;
     // CN registry choice implies the user also wants CN-friendly GitHub access.
     let prefer_mirror = registry_base.contains("npmmirror");
     let github = github_releases(&client, prefer_mirror)
@@ -38,8 +40,8 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
             let legacy = entry
                 .semver
                 .as_ref()
-                .zip(latest_semver.as_ref())
-                .map(|(v, latest)| v.minor < latest.minor)
+                .zip(newest_npm.as_ref())
+                .map(|(v, newest)| v.minor < newest.minor)
                 .unwrap_or(false);
             let (released_at, notes) = match github.get(&ver) {
                 Some(rel) => (rel.published_at.clone(), rel.notes.clone()),
@@ -53,7 +55,7 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
                 size: entry.size,
                 requires_node: entry.requires_node,
                 notes,
-                latest: false, // flagged once every source has joined (mark_latest)
+                latest: false, // decided by mark_upstream_latest over the merged list
                 legacy,
                 pending_publish: false,
                 source: Some(VersionSourceMeta {
@@ -66,11 +68,9 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
 
     // GitHub releases the team has cut but not published to npm yet. They
     // join the list as read-only rows so "GitHub is ahead" is visible. The
-    // legacy flag stays false — there is no older line to retire until the
-    // release is installable — but the *badge* is not withheld: a release the
-    // team has cut is the newest version, and `pending_publish` is what says
-    // it cannot be installed yet. Deciding the badge here instead of at npm
-    // publish time is the 2026-09-23 fix; see `mark_latest`.
+    // legacy flag stays false — it marks a *maintenance line behind what is
+    // installable*, and these npm-less rows belong to no such line. `latest`
+    // is decided for the whole list below.
     for (ver, rel) in github.iter().filter(|(ver, _)| !npm_names.contains(*ver)) {
         let Some(sem) = parse_semver(ver) else {
             continue;
@@ -92,7 +92,7 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
             size: 0,
             requires_node: Vec::new(),
             notes: rel.notes.clone(),
-            latest: false, // mark_latest flags the winner across all sources
+            latest: false, // decided by mark_upstream_latest over the merged list
             legacy: false,
             pending_publish: true,
             source: None,
@@ -100,14 +100,15 @@ pub async fn list_dsh_versions(registry_base: String) -> Result<Vec<DshVersionMe
     }
 
     // One badge decision, over every source. It has to run here, after the
-    // GitHub-ahead rows have joined: see `mark_latest`.
-    mark_latest(&mut out);
-
+    // GitHub-ahead rows have joined: see `mark_upstream_latest`.
     out.sort_by(|a, b| {
         parse_semver(&b.name)
             .unwrap_or_else(|| semver::Version::new(0, 0, 0))
             .cmp(&parse_semver(&a.name).unwrap_or_else(|| semver::Version::new(0, 0, 0)))
     });
+    // Last, on the assembled list: the badge has to land on the row the list
+    // shows first, and only here is every row — npm and GitHub-only — present.
+    mark_upstream_latest(&mut out);
     Ok(out)
 }
 
@@ -133,7 +134,7 @@ pub(crate) fn parse_semver(v: &str) -> Option<semver::Version> {
 struct Packument {
     #[serde(rename = "dist-tags")]
     // Shape of the packument; the badge intentionally does NOT follow
-    // dist-tags.latest (see `mark_latest`), so nothing consumes it now.
+    // dist-tags.latest (see mark_upstream_latest), so nothing consumes it now.
     #[allow(dead_code)]
     dist_tags: HashMap<String, String>,
     #[serde(default)]
@@ -260,37 +261,38 @@ pub(crate) async fn npm_catalog(
     Ok((out, newest))
 }
 
-/// The newest version the registry holds — the anchor the legacy-line check
-/// compares against. It used to hand the「最新」badge back as well; that job
-/// moved to `mark_latest` over the merged catalog, and this is what is left of
-/// the npm-side rule.
-pub(crate) fn newest_semver(out: &[(String, NpmEntry)]) -> Option<semver::Version> {
+/// The npm catalog's newest installable release anchors legacy-line warnings.
+/// GitHub-only rows affect the upstream "latest" badge but must not make every
+/// npm-backed version appear legacy while publication is catching up.
+fn newest_semver(out: &[(String, NpmEntry)]) -> Option<semver::Version> {
     out.iter()
         .filter_map(|(_, entry)| entry.semver.clone())
         .max()
 }
 
-/// The「最新」badge marks the single newest release in the merged catalog —
-/// npm rows and GitHub-only rows alike, by semver, never npm's `latest`
-/// dist-tag. Names that do not parse never take the badge.
+/// The「最新」badge marks upstream's newest release: the highest version in
+/// the *merged* catalog. That is also the row the sorted list shows first, so
+/// badge, list order and the wizard's default selection keep the agreement the
+/// alpha.5 notes promised. Two rules it deliberately is not:
 ///
-/// Two reports shaped this rule. 2026-09-11: the dist-tag kept the badge on
-/// 0.1.5-rc.1 after rc.2 shipped under `next`, so the badge has followed the
-/// highest semver since. 2026-09-23: it *still* lagged, because the rule ran
-/// over the npm list alone — upstream had cut 0.1.7-alpha.2 on GitHub while
-/// npm was still at 0.1.7-alpha.1, so the newest row rendered as「npm 未收录」
-/// with the badge one line below it. What the badge states is *which release
-/// is newest*; whether that release is installable yet is `pending_publish`'s
-/// job, and the list shows both side by side.
-fn mark_latest(out: &mut [DshVersionMeta]) {
-    let newest = out
-        .iter()
-        .enumerate()
-        .filter_map(|(i, entry)| parse_semver(&entry.name).map(|sem| (i, sem)))
-        .max_by(|a, b| a.1.cmp(&b.1))
-        .map(|(i, _)| i);
-    for (i, entry) in out.iter_mut().enumerate() {
-        entry.latest = Some(i) == newest;
+/// - not npm's `latest` dist-tag, which stays behind while prereleases ship
+///   under `next` (rc.2 out, badge stuck on rc.1 — 2026-09-11 report);
+/// - not "newest installable" either, because upstream cuts the GitHub release
+///   before publishing the package. Deciding this on npm rows alone froze the
+///   badge one row down for the whole publish lag (2026-09-17 report: GitHub
+///   had 0.1.6-alpha.2, npm stopped at 0.1.6-alpha.1, so「最新」sat under the
+///   newer row and read as a stale badge).
+///
+/// Whether the marked row can be installed stays a separate signal —
+/// `pending_publish` drives the「npm 未收录」badge and the source-build action.
+/// Names that do not parse as semver never take the badge.
+fn mark_upstream_latest(out: &mut [DshVersionMeta]) {
+    let newest = out.iter().filter_map(|v| parse_semver(&v.name)).max();
+    for v in out.iter_mut() {
+        v.latest = match (&newest, parse_semver(&v.name)) {
+            (Some(newest), Some(sem)) => sem == *newest,
+            _ => false,
+        };
     }
 }
 
@@ -298,115 +300,104 @@ fn mark_latest(out: &mut [DshVersionMeta]) {
 mod latest_badge_tests {
     use super::*;
 
-    /// A merged-catalog row. `latest` is pre-set exactly as the list builders
-    /// leave it (false everywhere) so a test can only pass if `mark_latest`
-    /// itself flags the winner.
-    fn row(name: &str, pending: bool) -> DshVersionMeta {
+    fn meta(name: &str, pending_publish: bool) -> DshVersionMeta {
         DshVersionMeta {
             id: format!("dsh-{name}"),
             name: name.to_string(),
             channel: "rc".into(),
-            released_at: "2026-09-22T00:00:00.000Z".into(),
-            size: if pending { 0 } else { 1 },
-            requires_node: Vec::new(),
-            notes: Vec::new(),
+            released_at: "2026-09-10T00:00:00.000Z".into(),
+            size: if pending_publish { 0 } else { 1 },
+            requires_node: vec![],
+            notes: vec![],
             latest: false,
             legacy: false,
-            pending_publish: pending,
+            pending_publish,
             source: None,
         }
     }
 
-    fn flagged(rows: &[DshVersionMeta]) -> Vec<String> {
-        rows.iter()
-            .filter(|r| r.latest)
-            .map(|r| r.name.clone())
+    fn flagged(out: &[DshVersionMeta]) -> Vec<&str> {
+        out.iter()
+            .filter(|v| v.latest)
+            .map(|v| v.name.as_str())
             .collect()
     }
 
-    fn nentry(v: &str) -> (String, NpmEntry) {
+    fn npm_entry(version: &str) -> (String, NpmEntry) {
         (
-            v.to_string(),
+            version.to_string(),
             NpmEntry {
                 channel: "rc".into(),
                 published_at: "2026-09-10T00:00:00.000Z".into(),
                 size: 1,
                 requires_node: vec![],
-                tarball: format!("https://registry/{v}.tgz"),
+                tarball: format!("https://registry/{version}.tgz"),
                 integrity: None,
-                semver: parse_semver(v),
+                semver: parse_semver(version),
             },
         )
     }
 
     #[test]
     fn badge_follows_highest_version_not_the_dist_tag() {
-        // The 2026-09-11 report: upstream dist-tags.latest stayed on rc.1
-        // while rc.2 published under `next`. The badge must move to rc.2 —
-        // what the sorted list shows first.
         let mut out = vec![
-            row("0.1.5-rc.1", false),
-            row("0.1.5-rc.2", false),
-            row("0.1.3-alpha.2", false),
+            meta("0.1.5-rc.1", false),
+            meta("0.1.5-rc.2", false),
+            meta("0.1.3-alpha.2", false),
         ];
-        mark_latest(&mut out);
+        mark_upstream_latest(&mut out);
         assert_eq!(flagged(&out), vec!["0.1.5-rc.2"]);
     }
 
     #[test]
-    fn a_release_only_on_github_still_takes_the_badge() {
-        // The 2026-09-23 report, with the day's real shape: npm's newest was
-        // 0.1.7-alpha.1, GitHub had already cut 0.1.7-alpha.2, and the badge
-        // was decided over the npm list alone — so the newest row rendered as
-        //「npm 未收录」with the badge one line below it. The newest release
-        // carries the badge whether or not npm has caught up; `pending_publish`
-        // is the badge that speaks to installability.
+    fn github_only_release_takes_badge_while_still_uninstallable() {
         let mut out = vec![
-            row("0.1.7-alpha.2", true),
-            row("0.1.7-alpha.1", false),
-            row("0.1.6-alpha.2", false),
+            meta("0.1.7-alpha.2", true),
+            meta("0.1.7-alpha.1", false),
+            meta("0.1.6-alpha.2", false),
         ];
-        mark_latest(&mut out);
+        mark_upstream_latest(&mut out);
         assert_eq!(flagged(&out), vec!["0.1.7-alpha.2"]);
-        assert!(out[0].pending_publish, "the winner is still uninstallable");
+        assert!(out[0].pending_publish);
         assert!(out[0].source.is_none());
     }
 
     #[test]
     fn stable_outranks_its_own_prereleases() {
         let mut out = vec![
-            row("0.1.5-rc.2", false),
-            row("0.1.4", false),
-            row("0.1.5", false),
+            meta("0.1.5-rc.2", false),
+            meta("0.1.4", false),
+            meta("0.1.5", false),
         ];
-        mark_latest(&mut out);
+        mark_upstream_latest(&mut out);
         assert_eq!(flagged(&out), vec!["0.1.5"]);
     }
 
     #[test]
-    fn unparsable_and_empty_catalogs_yield_no_badge() {
-        let mut out = vec![row("not-a-version", false), row("0.1.0-rc.3", false)];
-        mark_latest(&mut out);
+    fn unparsable_and_empty_catalogs_yield_no_badge_and_clear_stale_flags() {
+        let mut out = vec![meta("not-a-version", false), meta("0.1.0-rc.3", false)];
+        mark_upstream_latest(&mut out);
         assert_eq!(flagged(&out), vec!["0.1.0-rc.3"]);
 
-        // A stale flag must not survive a catalog with nothing to flag.
-        let mut stale = vec![row("not-a-version", false)];
+        let mut stale = vec![meta("not-a-version", false)];
         stale[0].latest = true;
-        mark_latest(&mut stale);
+        mark_upstream_latest(&mut stale);
         assert!(flagged(&stale).is_empty());
 
-        let mut empty: Vec<DshVersionMeta> = Vec::new();
-        mark_latest(&mut empty);
-        assert!(empty.is_empty());
+        let mut empty: Vec<DshVersionMeta> = vec![];
+        mark_upstream_latest(&mut empty);
+        assert!(flagged(&empty).is_empty());
     }
 
     #[test]
-    fn newest_semver_anchors_the_legacy_line() {
-        let out = vec![nentry("0.1.5-rc.1"), nentry("0.1.5-rc.2"), nentry("bad")];
-        assert_eq!(
-            newest_semver(&out).map(|s| s.to_string()).as_deref(),
-            Some("0.1.5-rc.2")
-        );
+    fn npm_newest_semver_remains_the_legacy_anchor() {
+        let out = vec![
+            npm_entry("0.1.5-rc.1"),
+            npm_entry("0.1.5-rc.2"),
+            npm_entry("bad"),
+        ];
+        let newest = newest_semver(&out);
+        assert_eq!(newest.map(|v| v.to_string()).as_deref(), Some("0.1.5-rc.2"));
         assert!(newest_semver(&[]).is_none());
     }
 }

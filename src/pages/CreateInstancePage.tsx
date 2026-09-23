@@ -8,7 +8,8 @@ import {
   Download,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { isVersionInstallable, isVersionDownloadable, isRuntimeInstallable } from '@/types'
+import { pickDefaultVersion } from '@/lib/wizardDefaults'
+import { isVersionInstallable, isRuntimeInstallable } from '@/types'
 import {
   draftIssues,
   useCatalogStore,
@@ -40,9 +41,9 @@ export function CreateInstancePanel() {
   const back = useUIStore((s) => s.back)
   const { scale } = useMotion()
 
-  const issues = draftIssues(draft, instances.map((i) => i.name))
   const version = versions.find((v) => v.id === draft.versionId)
   const runtime = runtimes.find((r) => r.id === draft.runtimeId)
+  const issues = draftIssues(draft, instances.map((i) => i.name), version)
 
   const checklist = [
     { id: 'name', label: '实例名称', ok: !issues.name, detail: draft.name.trim() || '未填写' },
@@ -134,22 +135,20 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   const versionControls = useAnimation()
   const runtimeControls = useAnimation()
 
+  const selectedVersion = versions.find((v) => v.id === draft.versionId)
+
   // Seed sensible defaults once the catalog is available: the newest installed
-  // version, and a runtime it actually supports.
+  // version, and a runtime it actually supports. `pickDefaultVersion` owns the
+  // order — including why a GitHub-only row is not a default (review #17).
   useEffect(() => {
     if (draft.versionId || !versions.length) return
     const source = cloneFrom ? instances.find((i) => i.id === cloneFrom) : undefined
-    // A GitHub-ahead row sorts to the top of the catalog and cannot be
-    // downloaded yet; defaulting to it would hand back an instance whose first
-    // launch fails. It stays selectable by hand — the row says npm 未收录.
-    const version =
-      (source && versions.find((v) => v.id === source.versionId)) ??
-      versions.find((v) => v.state.kind === 'installed' && !v.legacy) ??
-      versions.find(isVersionDownloadable) ??
-      versions[0]
+    const version = pickDefaultVersion(versions, source?.versionId)
     const runtime =
       (source && runtimes.find((r) => r.id === source.runtimeId)) ??
-      runtimes.find((r) => r.state.kind === 'installed' && version.requiresNode.includes(r.major)) ??
+      runtimes.find(
+        (r) => r.state.kind === 'installed' && !!version?.requiresNode.includes(r.major),
+      ) ??
       runtimes.find((r) => r.state.kind === 'installed')
     useWizardStore.getState().patch({
       versionId: version?.id ?? null,
@@ -159,9 +158,17 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   }, [versions, runtimes, draft.versionId, cloneFrom, instances])
 
   const names = useMemo(() => instances.map((i) => i.name), [instances])
-  const issues = useMemo(() => draftIssues(draft, names), [draft, names])
+  const issues = useMemo(
+    () => draftIssues(draft, names, selectedVersion),
+    [draft, names, selectedVersion],
+  )
   const issueKeys = ['name', 'version', 'runtime', 'port'] as const
   const hasIssues = issueKeys.some((k) => issues[k])
+
+  // A GitHub-only selection is worth its own footer line: the generic
+  // 「还需选择：版本」 would read as "nothing picked yet" while the real
+  // problem is that this version has no package to download (review #17).
+  const unpublished = selectedVersion?.pendingPublish ? selectedVersion : null
 
   // Components still missing a download, shown in the footer so the
   // auto-install on submit never comes as a surprise. A version with no
@@ -170,7 +177,7 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   const pendingNames = useMemo(() => {
     const out: string[] = []
     const v = versions.find((x) => x.id === draft.versionId)
-    if (v && isVersionInstallable(v) && isVersionDownloadable(v)) out.push(`DSH ${v.name}`)
+    if (v && isVersionInstallable(v)) out.push(`DSH ${v.name}`)
     const r = runtimes.find((x) => x.id === draft.runtimeId)
     if (r && isRuntimeInstallable(r)) out.push(r.name)
     return out
@@ -210,8 +217,7 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
     const catalog = useCatalogStore.getState()
     const version = catalog.versions.find((v) => v.id === draft.versionId)
     const runtime = catalog.runtimes.find((r) => r.id === draft.runtimeId)
-    const versionPending =
-      version && isVersionInstallable(version) && isVersionDownloadable(version) ? version : null
+    const versionPending = version && isVersionInstallable(version) ? version : null
     const runtimePending = runtime && isRuntimeInstallable(runtime) ? runtime : null
 
     const instance = await createInstance(draft)
@@ -236,7 +242,11 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
     })()
   }
 
-  const missing = issueKeys.filter((k) => issues[k]).map((k) => ISSUE_LABELS[k])
+  // The pending-version case gets its own footer line (below), so it must not
+  // also be reported as "nothing picked yet".
+  const missing = issueKeys
+    .filter((k) => issues[k] && !(k === 'version' && unpublished))
+    .map((k) => ISSUE_LABELS[k])
 
   return (
     <div className="relative h-full">
@@ -285,6 +295,13 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
               <span className="flex min-w-0 items-center gap-1.5 text-sm text-warn">
                 <AlertTriangle size={13} className="shrink-0" />
                 <span className="truncate">还需选择：{missing.join('、')}</span>
+              </span>
+            ) : unpublished ? (
+              <span className="flex min-w-0 items-center gap-1.5 text-sm text-warn">
+                <AlertTriangle size={13} className="shrink-0" />
+                <span className="truncate">
+                  {unpublished.name} 尚未上架 npm：到「版本」页让 agent 从源码构建，或改选其他版本
+                </span>
               </span>
             ) : pendingNames.length ? (
               <span className="flex min-w-0 items-center gap-1.5 text-sm text-info">

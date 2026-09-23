@@ -31,13 +31,16 @@ export const versionSeed: DshVersion[] = [
   {
     // Mirrors a real situation: GitHub cut the tag, npm hasn't published the
     // package yet. In the browser preview there is no agent to hand the build
-    // task to, so the row still surfaces the guide + GitHub link.
+    // task to, so the row still surfaces the guide + GitHub link. It also
+    // carries `latest` — the badge marks the newest release in the catalog,
+    // published to npm or not (see mark_upstream_latest).
     id: 'dsh-0.1.3-alpha.1',
     name: '0.1.3-alpha.1',
     channel: 'alpha',
     releasedAt: day(1),
     size: 0,
     requiresNode: [],
+    latest: true,
     pendingPublish: true,
     notes: ['Session 持久化 API 改为 lifecycle-scoped SessionHandle', 'Session 格式升级到 v2'],
     state: { kind: 'available' },

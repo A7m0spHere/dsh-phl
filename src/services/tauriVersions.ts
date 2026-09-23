@@ -1,21 +1,16 @@
 import * as desktopVersions from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { mockRepository } from './mockRepository'
-import { tauriPluginOverrides } from './tauriPlugins'
-import { tauriInstanceOverrides } from './tauriInstances'
-import { tauriRuntimeOverrides } from './tauriRuntimes'
-import { tauriLaunchOverrides } from './tauriLaunches'
 import type { PhlRepository, TransferProgress } from './repository'
-import { Cancelled, newTransferId } from './repository'
+import { Cancelled, InstalledScanError, newTransferId } from './repository'
 import type { DshVersion } from '@/types'
 
 /**
- * Desktop repository: the version / plugin / runtime / instance / process
- * modules are real (GitHub + npm + nodejs.org dist + on-disk instances +
- * spawned DSH processes, all through the Rust pipeline). What still delegates
- * to mock is whatever the override objects below do not cover — templates.
- * In the browser everything is mock so `npm run dev` keeps working for pure
- * UI work.
+ * Desktop overrides for the **version module**: the catalog is npm (+ GitHub
+ * releases), installs land under `<root>/versions` through the real Rust
+ * pipeline. The assembled desktop repository lives in `tauriRepository.ts` —
+ * it is an explicit, type-complete implementation; nothing here (or in the
+ * sibling override modules) silently inherits mock behaviour beyond the one
+ * shared static surface (templates) that file names.
  */
 
 /** Resolve the npm registry base from the user's download-source setting. */
@@ -30,14 +25,18 @@ export function registryBase(): string {
 const versionName = (id: string) => id.replace(/^dsh-/, '')
 
 async function listVersions(): Promise<DshVersion[]> {
+  // Remote catalog: failure degrades to null so locally installed items are
+  // still listed (offline mode). Local scan: a throw inside its catch rejects
+  // the `Promise.all`, so the refresh fails loudly and the store keeps the
+  // last trusted state — silently returning `[]` here made every installed
+  // version look installable, inviting a reinstall over a live directory.
   const [remote, installed] = await Promise.all([
     desktopVersions.listDshVersions(registryBase()).catch((err) => {
       console.warn('[phl] version catalog unavailable:', err)
       return null
     }),
     desktopVersions.listInstalledVersions().catch((err) => {
-      console.warn('[phl] installed-version scan unavailable:', err)
-      return []
+      throw new InstalledScanError(err)
     }),
   ])
 
@@ -122,40 +121,12 @@ async function installVersion(
   }
 }
 
-/**
- * `{ ...mockRepository }` would silently drop every method: class methods
- * live on the prototype and spread only copies own properties. Walk the
- * prototype chain and bind instead.
- */
-function bindRepositoryMethods(source: object): PhlRepository {
-  const out: Record<string, unknown> = {}
-  let proto: object | null = source
-  while (proto && proto !== Object.prototype) {
-    for (const name of Object.getOwnPropertyNames(proto)) {
-      if (name === 'constructor' || name in out) continue
-      const value = (source as Record<string, unknown>)[name]
-      if (typeof value === 'function') out[name] = (value as (...args: unknown[]) => unknown).bind(source)
-    }
-    proto = Object.getPrototypeOf(proto)
-  }
-  return out as unknown as PhlRepository
-}
-
-const mock = bindRepositoryMethods(mockRepository)
-
-export const tauriRepository: PhlRepository = {
-  ...mock,
+/** The version module's overrides, spread into the assembled desktop repository. */
+export const tauriVersionOverrides: Pick<
+  PhlRepository,
+  'enrichModelMetadata' | 'listVersions' | 'installVersion' | 'removeVersion'
+> = {
   enrichModelMetadata: desktopVersions.enrichModelMetadata,
-  // The plugin module is real on desktop too (community registry + Rust
-  // download pipeline); see tauriPlugins for what it overrides.
-  ...tauriPluginOverrides,
-  // Instances are real directories under <root>/instances; see tauriInstances.
-  ...tauriInstanceOverrides,
-  // Runtimes are the nodejs.org dist index + unpacked trees under
-  // <root>/runtimes; see tauriRuntimes.
-  ...tauriRuntimeOverrides,
-  // Launch/stop spawn real DSH processes; see tauriLaunches.
-  ...tauriLaunchOverrides,
   listVersions,
   installVersion,
   removeVersion: async (id) => {

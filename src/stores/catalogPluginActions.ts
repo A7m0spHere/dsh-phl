@@ -2,7 +2,7 @@ import { Cancelled, repository } from '@/services'
 import type { InstalledPlugin } from '@/types'
 import { parseThrownError } from '@/lib/errorCodes'
 import { acquireTransferSlot, releaseTransferSlot } from './transferCoordinator'
-import { useInstanceStore } from './instanceStore'
+import { instanceState } from './storeRefs'
 import { useUIStore } from './uiStore'
 import type {
   CatalogGet,
@@ -24,7 +24,7 @@ const latestGen = new Map<string, number>()
 const pluginToggles = new Set<string>()
 
 function patchInstancePlugins(instanceId: string, update: (plugins: InstalledPlugin[]) => InstalledPlugin[]): void {
-  const store = useInstanceStore.getState()
+  const store = instanceState()
   const current = store.byId(instanceId)
   if (current) store.updateInstance(instanceId, { plugins: update(current.plugins) })
 }
@@ -37,7 +37,7 @@ function patchInstancePlugins(instanceId: string, update: (plugins: InstalledPlu
  * process already changed.
  */
 function processLive(instanceId: string): boolean {
-  const status = useInstanceStore.getState().stateOf(instanceId).status
+  const status = instanceState().stateOf(instanceId).status
   return status === 'running' || status === 'starting'
 }
 
@@ -62,7 +62,7 @@ async function startLatestCheck(get: CatalogGet, set: CatalogSet, pluginId: stri
 }
 
 function launchLatestChecks(get: CatalogGet, set: CatalogSet, instanceId: string, force: boolean): Promise<void>[] {
-  const instance = useInstanceStore.getState().byId(instanceId)
+  const instance = instanceState().byId(instanceId)
   if (!instance) return []
   const runs: Promise<void>[] = []
   for (const installed of instance.plugins) {
@@ -82,7 +82,7 @@ export function createPluginActions(
 ): PluginActions {
   return {
     async installPlugin(instanceId, pluginId) {
-      const instance = useInstanceStore.getState().byId(instanceId)
+      const instance = instanceState().byId(instanceId)
       const plugin = get().pluginById(pluginId)
       if (!instance || !plugin) return
       const key = pluginKey(instanceId, pluginId)
@@ -127,10 +127,11 @@ export function createPluginActions(
               )
             : [...plugins, { pluginId, version, registryId, enabled: true, ...(trust ? { trust } : {}) }],
         )
+        const live = processLive(instanceId)
         useUIStore.getState().toast({
           kind: 'success',
           title: `已安装到「${instance.name}」`,
-          message: processLive(instanceId)
+          message: live
             ? `${plugin.name} ${version} · 实例正在运行，重启后才会加载新插件`
             : `${plugin.name} ${version}`,
         })
@@ -170,7 +171,7 @@ export function createPluginActions(
     },
 
     async setPluginEnabled(instanceId, pluginId, enabled) {
-      const instance = useInstanceStore.getState().byId(instanceId)
+      const instance = instanceState().byId(instanceId)
       if (!instance) return
       const installed = instance.plugins.find((plugin) => plugin.pluginId === pluginId)
       if (!installed) return
@@ -197,8 +198,9 @@ export function createPluginActions(
         // The toggle used to be SILENT on success: the switch visibly moved
         // while the instance was running, implying the live process had
         // re-read `cordis.patch.yml`. It had not.
+        const live = processLive(instanceId)
         useUIStore.getState().toast(
-          processLive(instanceId)
+          live
             ? { kind: 'info', title: `${label} ${enabled ? '启用' : '停用'}配置已保存，重启实例后生效` }
             : { kind: 'success', title: `${label} ${enabled ? '已启用' : '已停用'}` },
         )
@@ -208,7 +210,7 @@ export function createPluginActions(
     },
 
     async uninstallPlugin(instanceId, pluginId) {
-      const instance = useInstanceStore.getState().byId(instanceId)
+      const instance = instanceState().byId(instanceId)
       if (!instance) return
       const removed = instance.plugins.find((plugin) => plugin.pluginId === pluginId)
       if (!removed) return
@@ -238,12 +240,11 @@ export function createPluginActions(
         clear()
       }
       patchInstancePlugins(instanceId, (plugins) => plugins.filter((plugin) => plugin.pluginId !== pluginId))
+      const live = processLive(instanceId)
       useUIStore.getState().toast({
         kind: 'info',
         title: `已从「${instance.name}」移除 ${label}`,
-        ...(processLive(instanceId)
-          ? { message: '实例正在运行，该插件已随进程加载，重启后不再出现' }
-          : {}),
+        ...(live ? { message: '实例正在运行，该插件已随进程加载，重启后不再出现' } : {}),
       })
     },
   }

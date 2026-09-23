@@ -1,21 +1,19 @@
 name: Release
 
-# Tag-triggered release pipeline (T-207). CI gates every commit; this adds
-# the Windows NSIS bundle, artifact hashing and a GitHub Release. Alpha
-# builds are published as prereleases; the updater (T-208) deliberately
-# waits until this pipeline is stable.
-
+# Tag pushes publish the Windows NSIS bundle and updater manifest. Manual
+# dispatch runs the same release gates in validation-only mode and uploads
+# private Actions artifacts without creating a Release or updating `updates`.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Windows NSIS bundle + GitHub Release
+  validate:
+    name: Windows NSIS bundle + release validation
     runs-on: windows-latest
     env:
       # `secrets` cannot be read inside an `if:`, so the one condition the
@@ -48,6 +46,23 @@ jobs:
           PHL_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: node scripts/check-versions.mjs
 
+      - name: Resolve candidate tag
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_EVENT_NAME -eq 'push') { $tag = $env:GITHUB_REF_NAME } else { $tag = "v$version" }
+          if ($tag -ne "v$version") { Write-Error "workflow ref $tag does not match package version $version"; exit 1 }
+          "PHL_RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "candidate tag: $tag"
+
+      - name: Require updater signing for RC
+        if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'v0.1.0-rc.') }}
+        shell: pwsh
+        run: |
+          if ($env:HAS_SIGNING_KEY -ne 'true') {
+            Write-Error "RC validation requires TAURI_SIGNING_PRIVATE_KEY; refusing to continue without updater artifacts."
+            exit 1
+          }
       # Publication boundary - a stray internal document must stop the build
       # here, not after the installer is signed and the manifest is written.
       - name: Publication boundary (code-only tree)
@@ -178,7 +193,7 @@ jobs:
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           $sig = Get-ChildItem src-tauri/target/release/bundle/nsis/*.sig | Select-Object -First 1
           if (-not $sig) { Write-Error "the build produced no .sig - was the signing key accepted?"; exit 1 }
-          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$($installer.Name)"
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:PHL_RELEASE_TAG/$($installer.Name)"
           $manifest = [ordered]@{
             version = $version
             notes = (Get-Content docs/release-notes.md -Raw).Trim()
@@ -208,24 +223,88 @@ jobs:
           [IO.File]::WriteAllText($target, $notes + $sep + $install, (New-Object Text.UTF8Encoding($false)))
           Write-Host "release body lines: $((Get-Content $target).Count)"
 
+      - name: Verify RC installer and updater assets
+        if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'v0.1.0-rc.') }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe -File)
+          if ($installers.Count -ne 1) { Write-Error "expected exactly one NSIS installer, found $($installers.Count)"; exit 1 }
+          $installer = $installers[0]
+          $releaseInstallerPath = Join-Path 'dist-release' $installer.Name
+          $signaturePath = Join-Path 'dist-release' ($installer.Name + '.sig')
+          $checksumPath = Join-Path 'dist-release' ($installer.Name + '.sha256')
+          $manifestPath = Join-Path 'dist-release' 'latest.json'
+          foreach ($required in @($installer.FullName, $releaseInstallerPath, $signaturePath, $checksumPath, $manifestPath)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { Write-Error "missing RC release asset: $required"; exit 1 }
+          }
+          $signature = (Get-Content $signaturePath -Raw).Trim()
+          if (-not $signature) { Write-Error 'the updater signature is empty'; exit 1 }
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $version) { Write-Error "manifest version $($manifest.version) does not match $version"; exit 1 }
+          $platform = $manifest.platforms.'windows-x86_64'
+          if (-not $platform -or $platform.signature -ne $signature) { Write-Error 'latest.json has no Windows signature matching the installer .sig'; exit 1 }
+          $expectedUrl = "https://github.com/${{ github.repository }}/releases/download/$env:PHL_RELEASE_TAG/$($installer.Name)"
+          if ($platform.url -ne $expectedUrl) { Write-Error "manifest URL does not match the RC tag asset: $($platform.url)"; exit 1 }
+          $checksum = (Get-Content $checksumPath -Raw).Trim() -split '\s+', 2
+          if ($checksum.Count -ne 2 -or $checksum[1] -ne $installer.Name) { Write-Error 'the installer SHA-256 sidecar has an invalid format'; exit 1 }
+          $actualHash = (Get-FileHash $releaseInstallerPath -Algorithm SHA256).Hash
+          if ($checksum[0] -ne $actualHash) { Write-Error 'the installer SHA-256 sidecar does not match the release asset bytes'; exit 1 }
+          $updaterPubkey = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          function Get-MinisignKeyId([string]$Block) {
+            foreach ($line in ($Block -split '\r?\n')) {
+              try { $bytes = [Convert]::FromBase64String($line.Trim()) } catch { continue }
+              if ($bytes.Length -ge 10) { return [BitConverter]::ToUInt64($bytes, 2) }
+            }
+            throw 'could not decode a minisign key ID'
+          }
+          if ((Get-MinisignKeyId $signature) -ne (Get-MinisignKeyId $updaterPubkey)) { Write-Error 'the RC installer signature key ID does not match the updater public key embedded in the app'; exit 1 }
+          Write-Host "RC assets verified: $($installer.Name), SHA-256, updater signature, latest.json ($version)"
+
+      - name: Upload validated release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload composed release body
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-body
+          path: ${{ runner.temp }}/release-body.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish tag-triggered GitHub Release
+    if: ${{ github.event_name == 'push' }}
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist-release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-body
+          path: ${{ runner.temp }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Alpha line publishes as prerelease until 0.1.0 proper.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          # The composed body comes first: GitHub prepends it to the generated
-          # changelog, so readers see what changed and how to verify the
-          # download before the raw commit list.
           body_path: ${{ runner.temp }}/release-body.md
           generate_release_notes: true
           files: dist-release/*
 
-      # The updater needs a stable URL, and `releases/latest/download/latest.json`
-      # only ever points at the newest non-prerelease - the alpha line is all
-      # prereleases. A tiny `updates` branch solves that: one file, no history
-      # worth reading, fetched over raw.githubusercontent.com.
-      # It runs after the release exists so the manifest never points at an
-      # asset that is not uploaded yet.
       - name: Publish the updater manifest
         if: env.HAS_SIGNING_KEY == 'true'
         shell: pwsh
@@ -235,9 +314,6 @@ jobs:
           $url = "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git clone --depth 1 --branch updates $url $dir 2>$null
           if ($LASTEXITCODE -ne 0) {
-            # First release after this step was added: the branch does not exist
-            # yet, so create it - and remember to wire the remote, or the push
-            # below fails with "'origin' does not appear to be a git repository".
             New-Item -ItemType Directory -Force $dir | Out-Null
             git -C $dir init --quiet
             git -C $dir checkout --quiet -b updates
@@ -247,7 +323,7 @@ jobs:
           git -C $dir config user.name 'github-actions[bot]'
           git -C $dir config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git -C $dir add latest.json
-          git -C $dir commit --quiet -m "updates: ${{ github.ref_name }}"
+          git -C $dir commit --quiet -m "updates: $env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) { Write-Host "manifest unchanged"; exit 0 }
           git -C $dir push origin updates
           Write-Host "published latest.json to the updates branch"

@@ -406,12 +406,11 @@ fn command_is_built_for_the_web_entry() {
     );
     // The runtime bin dir leads PATH so child processes resolve this node.
     let path = &env.iter().find(|(k, _)| k == "PATH").unwrap().1;
-    assert!(path.starts_with(
-        root.join("runtimes")
-            .join("node-22")
-            .to_string_lossy()
-            .as_ref()
-    ));
+    let entries: Vec<_> = std::env::split_paths(std::ffi::OsStr::new(path)).collect();
+    assert_eq!(
+        entries.first(),
+        Some(&process::runtime_bin_dir(&root, "node-22"))
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -458,10 +457,9 @@ fn system_runtime_runs_the_resolved_node() {
                 "launch must run the Node the resolver verified"
             );
             assert!(program.is_absolute(), "{program:?}");
-            assert!(
-                env.iter().all(|(k, _)| k != "PATH"),
-                "system node is already on PATH"
-            );
+            let path = env.iter().find(|(k, _)| k == "PATH").unwrap().1.as_str();
+            let entries: Vec<_> = std::env::split_paths(std::ffi::OsStr::new(path)).collect();
+            assert_eq!(entries.first().map(|path| path.as_path()), node.parent());
         }
         // No Node anywhere: refuse with the actionable error instead of a
         // bare name that cannot spawn. (Resolution itself is pinned by
@@ -472,6 +470,81 @@ fn system_runtime_runs_the_resolved_node() {
         }
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn system_node_is_reachable_from_a_narrow_child_path_and_keeps_home_isolation() {
+    let Some((node, expected_version)) = crate::discovery::inspect::resolve_system_node() else {
+        // Hosts without Node exercise the resolver's failure path elsewhere.
+        return;
+    };
+    let node_dir = node.parent().expect("resolved Node has a parent");
+    let retained_path = std::env::temp_dir().join("phl-existing-path-entry");
+    let narrow = std::env::join_paths([&retained_path]).unwrap();
+    let child_path = process::prepend_path_dir(node_dir, Some(&narrow)).unwrap();
+    let entries: Vec<_> = std::env::split_paths(&child_path).collect();
+    assert_eq!(entries.first(), Some(&node_dir.to_path_buf()));
+    assert!(entries.contains(&retained_path));
+
+    // Invoke `node` by name in a process with no inherited environment. This
+    // proves the child PATH itself is enough to find the exact Node PHL chose.
+    #[cfg(windows)]
+    let mut child = {
+        let command = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        std::process::Command::new(command)
+    };
+    #[cfg(windows)]
+    child.args(["/C", "node", "--version"]);
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new("/bin/sh");
+    #[cfg(not(windows))]
+    child.args(["-c", "node --version"]);
+    let output = child
+        .env_clear()
+        .env("PATH", &child_path)
+        .env("DSH_HOME", "/temporary/phl-isolated-home")
+        .output()
+        .expect("system Node must be resolvable through the child PATH");
+    assert!(output.status.success());
+    let actual_version = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    assert_eq!(actual_version, expected_version);
+
+    let mut command = tokio::process::Command::new(&node);
+    command
+        .env("PATH", &child_path)
+        .env("DSH_HOME", "attempted-override");
+    let isolated_home = std::env::temp_dir().join("phl-isolated-home");
+    set_isolated_home(&mut command, &isolated_home);
+    let configured: Vec<_> = command.as_std().get_envs().collect();
+    let path = configured
+        .iter()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .and_then(|(_, value)| *value)
+        .expect("PATH remains configured");
+    assert_eq!(path, child_path.as_os_str());
+    let home = configured
+        .iter()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("DSH_HOME"))
+        .and_then(|(_, value)| *value)
+        .expect("DSH_HOME remains configured");
+    assert_eq!(home, isolated_home.as_os_str());
+}
+
+#[test]
+fn instance_path_precedes_but_does_not_hide_the_resolved_system_node() {
+    let custom = std::env::temp_dir().join("phl-instance-custom-path");
+    let node = std::env::temp_dir().join("phl-resolved-node-bin");
+    let inherited = std::env::temp_dir().join("phl-inherited-path");
+    let fallback = std::env::join_paths([&node, &inherited]).unwrap();
+    let custom_only = std::env::join_paths([&custom, &node]).unwrap();
+    let merged = process::merge_path_values(&custom_only, &fallback).unwrap();
+    let entries: Vec<_> = std::env::split_paths(&merged).collect();
+    assert_eq!(entries, vec![custom, node, inherited]);
 }
 
 #[test]

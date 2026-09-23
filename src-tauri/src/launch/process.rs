@@ -2,6 +2,7 @@
 //! child command builder, port allocation, log reading and process-tree
 //! termination.
 
+use std::ffi::{OsStr, OsString};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -252,18 +253,55 @@ pub(crate) fn build_command(
     cmd_args.push("--no-open".into());
 
     let mut env_pairs = vec![("DSH_HOME".into(), dsh_home.to_string_lossy().into_owned())];
-    if runtime_name != "node-system" {
-        // Put the runtime's bin dir first so DSH's own child processes
-        // resolve this exact node, not whatever is on the system PATH.
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        let bin_dir = runtime_bin_dir(root, runtime_name);
-        let existing = std::env::var("PATH").unwrap_or_default();
-        env_pairs.push((
-            "PATH".into(),
-            format!("{}{sep}{existing}", bin_dir.display()),
-        ));
-    }
+    // DSH's own child processes resolve Node by name. Put the exact runtime
+    // used above first in its PATH, including for a system Node found outside
+    // launchd's narrow PATH. `join_paths` keeps this platform-correct.
+    let node_dir = if runtime_name == "node-system" {
+        node.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+    } else {
+        runtime_bin_dir(root, runtime_name)
+    };
+    let path = prepend_path_dir(&node_dir, std::env::var_os("PATH").as_deref())?;
+    env_pairs.push(("PATH".into(), path.to_string_lossy().into_owned()));
     Ok((node, cmd_args, env_pairs))
+}
+
+/// Put `dir` first and retain each inherited PATH entry once.
+pub(crate) fn prepend_path_dir(dir: &Path, inherited: Option<&OsStr>) -> Result<OsString, String> {
+    let paths = std::iter::once(dir.to_path_buf())
+        .chain(inherited.into_iter().flat_map(std::env::split_paths));
+    join_unique_paths(paths)
+}
+
+/// Keep explicit instance PATH entries first, then append the launch's
+/// resolved-runtime PATH as a fallback. This preserves the existing
+/// instance-environment precedence while ensuring a system Node discovered
+/// outside Finder's PATH remains reachable by the DSH child process.
+pub(crate) fn merge_path_values(preferred: &OsStr, fallback: &OsStr) -> Result<OsString, String> {
+    join_unique_paths(std::env::split_paths(preferred).chain(std::env::split_paths(fallback)))
+}
+
+fn join_unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Result<OsString, String> {
+    let mut unique = Vec::<PathBuf>::new();
+    for path in paths {
+        if !unique.iter().any(|prior| same_path(prior, &path)) {
+            unique.push(path);
+        }
+    }
+    std::env::join_paths(unique).map_err(|e| format!("无法组合实例 PATH: {e}"))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&b.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
 }
 
 /// The executable a launch will run: an installed runtime's own `node`, or the

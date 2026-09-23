@@ -38,10 +38,6 @@ use crate::paths::PhlState;
 
 pub(crate) use codec::SessionHeaderRecord;
 
-/// The physical session-log filename the backend writes (Spike §4).
-pub(crate) const PLAIN_ARTIFACT: &str = "session.jsonl";
-pub(crate) const ZSTD_ARTIFACT: &str = "session.jsonl.zstd";
-
 /// One discovered session, from its header only — the list view.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +56,11 @@ pub struct SessionInfo {
     pub parent: Option<String>,
     /// Whether this is a subagent child (the UI can fold these away).
     pub origin_subagent: bool,
+    /// The session's format generation (the artifact filename's `.vN`, equal to
+    /// the header's `version`). Surfaced because it decides what a copy may do:
+    /// only generations up to [`codec::HEADER_FORK_MAX_GENERATION`] carry the
+    /// fork marker in the header a copy can rewrite.
+    pub format_version: u64,
 }
 
 /// A session plus its stored event count — the inspect/preview view.
@@ -93,32 +94,76 @@ pub(crate) struct SessionEndpoint {
 
 // ───────────────────────────── discovery walk ───────────────────────────── //
 
-/// The absolute path of a session's log artifact, preferring the zstd physical
-/// form a populated home uses and falling back to plaintext, per Spike §5.
-fn artifact_path(session_dir: &Path) -> Option<(PathBuf, codec::LogEncoding)> {
-    let zstd = session_dir.join(ZSTD_ARTIFACT);
-    if zstd.is_file() {
-        return Some((zstd, codec::LogEncoding::Zstd));
+/// The authoritative artifact of one session directory: its path and format
+/// generation, or `None` when the directory holds no canonical artifact at all.
+///
+/// The rule is DSH's own (`resolveGenerationInDirectory`): among the canonical
+/// artifacts of this home's physical encoding, the one with the **highest**
+/// generation wins. A migrated session keeps its older generation file on disk,
+/// so resolving by fixed name — the old `session.jsonl.zstd`-first preference —
+/// reads a *stale pre-migration* log and misses every session that has none.
+///
+/// An artifact of the opposite encoding in the same directory is an error, not
+/// a candidate: DSH raises `encodingMismatch` there and that error escapes the
+/// first session operation, i.e. it stops the whole instance from booting.
+fn artifact_path(
+    session_dir: &Path,
+    encoding: codec::LogEncoding,
+) -> Result<Option<(PathBuf, u64)>, codec::CodecError> {
+    let Ok(entries) = std::fs::read_dir(session_dir) else {
+        return Ok(None);
+    };
+    let opposite = match encoding {
+        codec::LogEncoding::Zstd => codec::LogEncoding::Plain,
+        codec::LogEncoding::Plain => codec::LogEncoding::Zstd,
+    };
+    let mut best: Option<(PathBuf, u64)> = None;
+    let mut mismatched: Option<String> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(generation) = codec::generation_of_filename(&name, encoding) {
+            let better = match &best {
+                Some((_, current)) => generation > *current,
+                None => true,
+            };
+            if better {
+                best = Some((entry.path(), generation));
+            }
+        } else if codec::generation_of_filename(&name, opposite).is_some() {
+            mismatched.get_or_insert(name);
+        }
     }
-    let plain = session_dir.join(PLAIN_ARTIFACT);
-    if plain.is_file() {
-        return Some((plain, codec::LogEncoding::Plain));
+    match mismatched {
+        Some(name) => Err(codec::CodecError::EncodingMismatch(name)),
+        None => Ok(best),
     }
-    None
 }
 
-fn is_session_dir(name: &str) -> bool {
-    name.starts_with("session-")
+/// The physical encoding a home's session backend uses, defaulting the way DSH
+/// does (`DEFAULT_COMPRESSION = "zstd"`) when nothing on disk says otherwise.
+fn home_encoding(home: &Path) -> codec::LogEncoding {
+    copy::home_session_encoding(home).unwrap_or(codec::LogEncoding::Zstd)
 }
 
-/// Read the header of one session directory. A directory that holds no readable
-/// artifact, or whose header fails validation, is skipped with a note by the
-/// caller — a broken session must not hide the whole list.
-fn read_header(session_dir: &Path, project: &str) -> Result<SessionInfo, codec::CodecError> {
-    let (path, _enc) = artifact_path(session_dir).ok_or(codec::CodecError::MissingHeader)?;
+/// Read one session directory. `Ok(None)` means it holds no canonical artifact
+/// at all — DSH walks *every* directory under a project and skips one with
+/// nothing to read, so that is not a broken session and must not be reported as
+/// one. `Err` means an artifact is there and cannot be read.
+///
+/// The directory name is deliberately not shape-checked: a root session's id
+/// starts with `session-`, but a subagent child's is a bare uuid, and both are
+/// sessions DSH lists. The artifact is what makes a directory a session.
+fn read_header(
+    session_dir: &Path,
+    project: &str,
+    encoding: codec::LogEncoding,
+) -> Result<Option<SessionInfo>, codec::CodecError> {
+    let Some((path, generation)) = artifact_path(session_dir, encoding)? else {
+        return Ok(None);
+    };
     let buf = std::fs::read(&path).map_err(|e| codec::CodecError::FrameDecode(e.to_string()))?;
-    let log = codec::decode(&buf)?;
-    Ok(info_from(&log.header, session_dir, project))
+    let log = codec::decode(&buf, generation)?;
+    Ok(Some(info_from(&log.header, session_dir, project)))
 }
 
 fn info_from(header: &SessionHeaderRecord, session_dir: &Path, project: &str) -> SessionInfo {
@@ -142,6 +187,7 @@ fn info_from(header: &SessionHeaderRecord, session_dir: &Path, project: &str) ->
             .get("origin")
             .and_then(serde_json::Value::as_str)
             == Some("subagent"),
+        format_version: header.generation,
     }
 }
 
@@ -156,6 +202,9 @@ pub(crate) fn list_in_home(home: &Path) -> (Vec<SessionInfo>, usize) {
     let Ok(projects) = std::fs::read_dir(&root) else {
         return (out, 0);
     };
+    // One encoding per home — DSH configures it for the backend, and every
+    // session directory in a home must agree with it.
+    let encoding = home_encoding(home);
     for project in projects.flatten() {
         if !project.path().is_dir() {
             continue;
@@ -165,12 +214,14 @@ pub(crate) fn list_in_home(home: &Path) -> (Vec<SessionInfo>, usize) {
             continue;
         };
         for sess in sessions.flatten() {
-            let name = sess.file_name().to_string_lossy().into_owned();
-            if !is_session_dir(&name) || !sess.path().is_dir() {
+            if !sess.path().is_dir() {
                 continue;
             }
-            match read_header(&sess.path(), &project_name) {
-                Ok(info) => out.push(info),
+            match read_header(&sess.path(), &project_name, encoding) {
+                Ok(Some(info)) => out.push(info),
+                // No canonical artifact: not a session directory (DSH skips it
+                // silently too), so it is neither listed nor counted as broken.
+                Ok(None) => continue,
                 Err(_) => skipped += 1,
             }
         }
@@ -235,15 +286,17 @@ fn find_and_read(home: PathBuf, session_dir: String) -> Result<SessionDetail, St
     let Ok(projects) = std::fs::read_dir(&root) else {
         return Err(errors::coded(errors::ErrCode::NotFound, "实例暂无会话目录"));
     };
+    let encoding = home_encoding(&home);
     for project in projects.flatten() {
         let cand = project.path().join(&session_dir);
         if !cand.is_dir() {
             continue;
         }
-        let (path, _enc) = artifact_path(&cand)
+        let (path, generation) = artifact_path(&cand, encoding)
+            .map_err(|e| e.to_command_error())?
             .ok_or_else(|| errors::coded(errors::ErrCode::NotFound, "会话日志文件缺失"))?;
         let buf = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let log = codec::decode(&buf).map_err(|e| e.to_command_error())?;
+        let log = codec::decode(&buf, generation).map_err(|e| e.to_command_error())?;
         let project_name = project.file_name().to_string_lossy().into_owned();
         return Ok(SessionDetail {
             info: info_from(&log.header, &cand, &project_name),
@@ -446,13 +499,36 @@ async fn copy_sessions_inner_with(
     for dir in session_dirs {
         let dir = sanitize_session_dir(dir)?;
         let located = copy::locate_source(&source.home, &dir)?;
+        // Generation gate, before anything is written: a copy re-identifies a
+        // session by rewriting its header, and only v0/v1 carry the fork marker
+        // there. Refusing the whole selection up front beats a matrix that
+        // fails halfway with a per-pair error.
+        if let Some(reason) = copy::unsupported_copy_reason(located.generation) {
+            return Err(format!("会话「{}」：{reason}", located.dir));
+        }
         sources.push(located);
+    }
+    // Encoding gate, before anything is written: DSH refuses to open a home
+    // whose session directories mix physical encodings (`encodingMismatch`),
+    // and that failure stops the target from booting — the same class of
+    // damage the publish gate below guards against per artifact.
+    for target in &targets {
+        let target_has = copy::home_session_encoding(&target.home);
+        for src in &sources {
+            if let Some(reason) = copy::encoding_conflict(src.encoding, target_has) {
+                return Err(format!("目标「{}」：{reason}", target.manifest.name));
+            }
+        }
     }
     let total = targets.len() * sources.len();
     let mut outcomes = Vec::with_capacity(total);
     for target in &targets {
+        // Resolved once per target and handed to every copy, so the publisher
+        // itself — not only this orchestrator — enforces the encoding rule.
+        let target_encoding =
+            copy::home_session_encoding(&target.home).unwrap_or(codec::LogEncoding::Zstd);
         for src in &sources {
-            let outcome = copy::copy_one(src, target).await?;
+            let outcome = copy::copy_one(src, target, target_encoding).await?;
             // The matrix owns the counters: every landed pair advances the
             // UI from `i/N`, which a select-all copy needs to read honestly.
             if let Some(ch) = on_progress {
@@ -473,15 +549,15 @@ async fn copy_sessions_inner_with(
     Ok(outcomes)
 }
 
-/// A session dir name is DSH's `session-<uuid>`; keep it to the filesystem
-/// whitelist the same way every other id-addressed path does, before it is
-/// ever joined onto a home path.
+/// A session handle is DSH's **encoded** session directory name, joined onto a
+/// home path, so it gets the shared segment whitelist (`[A-Za-z0-9._-]`, no
+/// separators, no dot-names, Win32-safe) — not a `session-` prefix check: a
+/// root session's id starts with `session-`, a subagent child's is a bare uuid,
+/// and DSH's own `encodeSegment` escapes every other code unit (including `.`,
+/// `..` and `~`), so no legitimate name needs a character the whitelist bans.
+/// A handle that resolves to nothing fails the lookup with a NotFound.
 pub(crate) fn sanitize_session_dir(name: &str) -> Result<String, String> {
-    crate::paths::sanitize_segment(name, "会话目录名")?;
-    if !name.starts_with("session-") {
-        return Err(errors::coded(errors::ErrCode::State, "非法的会话目录名"));
-    }
-    Ok(name.to_string())
+    crate::paths::sanitize_segment(name, "会话目录名")
 }
 
 pub(crate) mod copy;

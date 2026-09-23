@@ -1,5 +1,5 @@
 import { mockRepository } from './mockRepository'
-import { tauriRepository } from './tauriVersions'
+import { tauriRepository } from './tauriRepository'
 import { isDesktop } from '@/lib/desktop'
 import type { PhlRepository } from './repository'
 

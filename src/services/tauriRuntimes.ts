@@ -2,7 +2,7 @@ import * as desktop from '@/lib/desktop'
 import { NODE_DIST_MIRROR, NODE_DIST_OFFICIAL } from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { Runtime } from '@/types'
-import { Cancelled, newTransferId } from './repository'
+import { Cancelled, InstalledScanError, newTransferId } from './repository'
 import type { PhlRepository, TransferProgress } from './repository'
 
 /**
@@ -19,14 +19,19 @@ function distBase(): string {
 }
 
 async function listRuntimes(): Promise<Runtime[]> {
+  // Same split as the version list: the catalog request degrading to null is
+  // "remote unavailable" (installed items still show), but a failed
+  // installed-runtime scan must NOT arrive as "nothing installed" — that
+  // turns a live Node install into a re-installable row, and `size` /
+  // `installedAt` details vanish with it. Disk usage and the system-node
+  // probe stay degradable: they only affect display figures, never state.
   const [catalog, installed, usage, system] = await Promise.all([
     desktop.listNodeRuntimeCatalog(distBase()).catch((err) => {
       console.warn('[phl] runtime catalog unavailable:', err)
       return null
     }),
     desktop.listInstalledRuntimes().catch((err) => {
-      console.warn('[phl] installed-runtime scan unavailable:', err)
-      return []
+      throw new InstalledScanError(err)
     }),
     desktop.runtimesDiskUsage().catch(() => ({} as Record<string, number>)),
     desktop.systemNodeVersion().catch(() => null),

@@ -57,6 +57,20 @@ export class Cancelled extends Error {
 }
 
 /**
+ * The scan of **locally installed** versions/runtimes failed. This is not
+ * "nothing is installed": silently returning an empty list would make every
+ * installed item look installable and invite a reinstall over a live
+ * directory. Repositories throw this so the store keeps its last trusted
+ * state and surfaces a retryable error instead.
+ */
+export class InstalledScanError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error && cause.message ? cause.message : String(cause))
+    this.name = 'InstalledScanError'
+  }
+}
+
+/**
  * The launch was cancelled or timed out, but the backend could **not**
  * confirm the DSH process exited, so it kept the instance registered (R3).
  * Surfacing this as a distinct error — rather than a plain `Cancelled` — lets

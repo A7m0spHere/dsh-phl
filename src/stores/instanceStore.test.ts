@@ -17,9 +17,12 @@ vi.mock('@/lib/desktop', () => ({
   openDshWebUi: mocks.openDshWebUi,
   onInstanceExited: async (handler: typeof mocks.onExit) => { mocks.onExit = handler; return () => {} },
 }))
-vi.mock('./catalogStore', () => ({ useCatalogStore: { getState: () => ({
+// The lifecycle/snapshot actions read catalog state through the storeRefs
+// seam (acyclic module graph); mocking that seam replaces the old
+// './catalogStore' module mock.
+vi.mock('./storeRefs', () => ({ registerInstanceStore: vi.fn(), registerCatalogStore: vi.fn(), catalogState: () => ({
   pluginTransfers: {}, versionById: vi.fn(), runtimeById: vi.fn(),
-}) } }))
+}) }))
 vi.mock('./uiStore', () => ({ useUIStore: { getState: () => ({ toast: mocks.toast }) } }))
 
 import { useInstanceStore } from './instanceStore'

@@ -255,17 +255,22 @@ export async function maybeOfferRootChoice(): Promise<void> {
   }
   // Everything already read was resolved against the previous root; without
   // this the first screen keeps describing the directory the user just left.
+  // The refresh itself is the same shared step the storage page's switch and
+  // a completed migration run (root switch is ONE flow now) — and its failure
+  // is reported honestly instead of the unconditional success toast this used
+  // to fire behind a swallowed `.catch`.
   // Imported lazily: this module sits below the stores that would otherwise
   // cycle back into it.
-  const [{ useInstanceStore }, { useCatalogStore }, { useApiConfigStore }] = await Promise.all([
-    import('./instanceStore'),
-    import('./catalogStore'),
-    import('./apiConfigStore'),
-  ])
-  await Promise.all([
-    useInstanceStore.getState().reload(),
-    useCatalogStore.getState().load(),
-    useApiConfigStore.getState().load(),
-  ]).catch(() => undefined)
+  const { useDataRootStore } = await import('./dataRootStore')
+  const refreshError = await useDataRootStore.getState().reloadViewsAfterRootSwitch()
+  if (refreshError) {
+    useUIStore.getState().toast({
+      kind: 'warn',
+      title: '数据目录已切换，但部分列表未能刷新',
+      message: `${refreshError} 新目录 ${next} 已由后端生效；重启 PHL 可恢复显示。`,
+      duration: 9000,
+    })
+    return
+  }
   useUIStore.getState().toast({ kind: 'success', title: '数据目录已更新', message: next })
 }

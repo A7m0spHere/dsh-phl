@@ -35,7 +35,8 @@ pub(crate) mod process;
 pub(crate) mod registry;
 
 pub(crate) use registry::{
-    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, ProcessState, Registry,
+    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, Probe, ProcessState,
+    Registry,
 };
 
 pub(crate) use process::{
@@ -416,10 +417,19 @@ pub(crate) fn stop_permission(
     instance_id: &str,
     pid: u32,
 ) -> Result<(), String> {
+    stop_permission_with_probe(registry, instance_id, pid, probe_process)
+}
+
+fn stop_permission_with_probe(
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+    probe: impl FnOnce(u32) -> Probe,
+) -> Result<(), String> {
     let Some(rec) = registry.record_of(instance_id) else {
         return Ok(());
     };
-    match decide(&rec, &probe_process(pid)) {
+    match decide(&rec, &probe(pid)) {
         Adoption::Adopt => Ok(()),
         Adoption::Forget {
             keep_running: true,
@@ -433,9 +443,8 @@ pub(crate) fn stop_permission(
         Adoption::Forget { .. } => Ok(()),
     }
 }
-
-/// `stop_instance`'s core: terminate the tree, and only forget the rows once
-/// the process is verifiably not running. A kill that fails against a pid the
+/// `stop_instance`'s core: kill the tree, and only forget the rows once the
+/// process is verifiably not running. A kill that fails against a pid the
 /// kernel already reports gone IS the desired outcome — typically a kept-alive
 /// instance (R3) that exited on its own since the launch failure — so the
 /// retry succeeds instead of bouncing the user off the same error forever.
@@ -838,7 +847,23 @@ pub(crate) async fn run_launch(
     // quietly redirected it would point the process into some other instance.
     for (key, value) in &env {
         if !key.eq_ignore_ascii_case("DSH_HOME") {
-            command.env(key, value);
+            if runtime_name == "node-system" && key.eq_ignore_ascii_case("PATH") {
+                // Keep the instance's PATH first, matching its existing
+                // override priority, and append the verified system Node path
+                // as a fallback so DSH's child processes can still run Node.
+                let launch_path = env_pairs
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or_default();
+                let merged = process::merge_path_values(
+                    std::ffi::OsStr::new(value),
+                    std::ffi::OsStr::new(launch_path),
+                )?;
+                command.env("PATH", merged);
+            } else {
+                command.env(key, value);
+            }
         }
     }
     // Launch-time key injection (the cc-switch model): providers bound to
