@@ -238,7 +238,17 @@ function VersionRow({ version, usedBy }: { version: DshVersion; usedBy: string[]
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-md font-medium text-ink">{version.name}</span>
-              {version.latest && <Badge tone="accent">最新</Badge>}
+              {version.latest && (
+                <Tooltip
+                  content={
+                    version.pendingPublish
+                      ? '上游最新发布的版本；安装包尚未上架 npm，暂时只能让 agent 从源码构建'
+                      : '发布源中版本号最高的一版'
+                  }
+                >
+                  <Badge tone="accent">最新</Badge>
+                </Tooltip>
+              )}
               {version.channel === 'nightly' && <Badge tone="warn">Nightly</Badge>}
               {version.channel === 'alpha' && <Badge tone="warn">Alpha</Badge>}
               {version.legacy && <Badge tone="neutral">Legacy</Badge>}

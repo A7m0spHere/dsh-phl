@@ -127,6 +127,7 @@ pub(crate) async fn verify_instance_inner(root: &Path, id: &str) -> Result<Verif
     checks.extend(check_dsh(root, &manifest).await);
     checks.extend(check_runtime(root, &manifest).await);
     checks.extend(check_config(&dir, &manifest).await);
+    checks.extend(check_plugins(&dir, &manifest).await);
     checks.extend(check_api(root, &manifest).await);
     checks.extend(check_launch(&dir, &manifest).await);
     checks.push(check_writable(&dir).await);
@@ -356,6 +357,46 @@ async fn check_config(
         ));
     }
     out
+}
+
+/// Plugins that DSH boots with but that break it later — a class of failure
+/// whose cause lives here and whose symptom shows up inside DSH's own web UI,
+/// where nothing PHL shows can point back at it. Repairable by disabling the
+/// configuration, which is the edit verified to clear it.
+///
+/// An external instance's profile is readable but not ours to edit, so the
+/// conflict is still reported while the repair is marked for the user instead:
+/// offering a button that could only fail would be worse than naming the edit.
+async fn check_plugins(
+    dir: &Path,
+    manifest: &crate::instances::InstanceManifest,
+) -> Vec<VerifyCheck> {
+    let profile = crate::instances::profile_root_of(dir, manifest);
+    let conflicts = crate::plugins::conflicts::enabled_conflicts(&profile).await;
+    if conflicts.is_empty() {
+        return vec![VerifyCheck::pass(
+            "plugins-known-conflicts",
+            "plugins",
+            "未启用已知会让 DSH 无法新建会话的插件".into(),
+        )];
+    }
+    let external = crate::instances::is_external(manifest);
+    conflicts
+        .into_iter()
+        .map(|conflict| {
+            VerifyCheck::warn(
+                "plugins-known-conflicts",
+                "plugins",
+                if external {
+                    format!("{}（原地接入的实例需你自己改配置）", conflict.message)
+                } else {
+                    conflict.message
+                },
+                !external,
+                (!external).then_some("disable-conflicting-plugins"),
+            )
+        })
+        .collect()
 }
 
 async fn check_api(root: &Path, manifest: &crate::instances::InstanceManifest) -> Vec<VerifyCheck> {
@@ -700,6 +741,118 @@ mod tests {
         assert_eq!(result.overall, "broken");
         assert_eq!(result.checks.len(), 1);
         assert_eq!(result.checks[0].id, "manifest");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The known-conflict lifecycle in one pass: verify flags it, the offered
+    /// repair clears it, and verify then passes — the check must go quiet, or
+    /// the health card would nag about a problem its own button already fixed.
+    #[tokio::test]
+    async fn a_known_conflicting_plugin_is_flagged_then_repaired() {
+        let root = temp_root("plugin-conflict");
+        let id = "conflict-0001";
+        let mut m = manifest(id, "Conflict");
+        m.runtime_id = "node-system".into();
+        m.port = 34474; // 独立端口：并行测试同时探测同一端口会互相报占用
+        create_instance_inner(&root, m).await.unwrap();
+        let version = root.join("versions").join("0.1.0");
+        std::fs::create_dir_all(version.join("lib")).unwrap();
+        std::fs::write(version.join("package.json"), r#"{"name":"dsh"}"#).unwrap();
+        std::fs::write(version.join("lib").join("bin.js"), "// bin").unwrap();
+        std::fs::write(
+            version.join("phl-install.json"),
+            serde_json::json!({"installedAt": crate::versions::now_iso(), "version": "0.1.0"})
+                .to_string(),
+        )
+        .unwrap();
+
+        let profile = root
+            .join("instances")
+            .join(id)
+            .join("dsh-home")
+            .join("profiles")
+            .join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("cordis.patch.yml"),
+            "- insert:\n    - id: browser-use\n      name: '@deepseek-ai/dsh-browser-use'\n    - id: browser-use-chrome-devtools-mcp\n      name: '@deepseek-ai/dsh-experimental-browser-use-chrome-devtools-mcp'\n",
+        )
+        .unwrap();
+
+        let flagged = verify_instance_inner(&root, id).await.unwrap();
+        let conflict = check(&flagged, "plugins-known-conflicts");
+        assert_eq!(conflict.status, "warn");
+        assert!(conflict.repairable);
+        assert_eq!(
+            conflict.repair_action.as_deref(),
+            Some("disable-conflicting-plugins")
+        );
+        assert_eq!(flagged.overall, "degraded");
+        assert!(
+            conflict.message.contains("Browser Use") && conflict.message.contains("新建会话"),
+            "the message must name the symptom the user is searching for: {}",
+            conflict.message
+        );
+        // The instance names its own category, so the label gate has something
+        // to key on.
+        assert_eq!(conflict.category, "plugins");
+
+        let outcome = crate::repair::repair_instance_inner(
+            &root,
+            id,
+            &["disable-conflicting-plugins".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.applied, vec!["disable-conflicting-plugins"]);
+
+        let settled = verify_instance_inner(&root, id).await.unwrap();
+        let after = check(&settled, "plugins-known-conflicts");
+        assert_eq!(after.status, "pass");
+        assert!(!after.repairable);
+        // Only the conflict went quiet: the patch stays a loadable array.
+        let patched = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+        assert!(patched.lines().any(|l| l.trim_start().starts_with("- ")));
+        assert_eq!(patched.matches("disabled: true").count(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An in-place instance's profile belongs to the user: the conflict is
+    /// still reported, but PHL must not offer an edit it is not allowed to
+    /// make (the repair path refuses it too, via `writable_profile_dir`).
+    #[tokio::test]
+    async fn an_external_instances_conflict_is_reported_but_not_repairable() {
+        let root = temp_root("plugin-conflict-external");
+        let id = "external-0001";
+        let dir = root.join("instances").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = dir.join("dsh-home").join("profiles").join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("cordis.patch.yml"),
+            "- id: browser-use\n  name: '@deepseek-ai/dsh-browser-use'\n",
+        )
+        .unwrap();
+        let mut m = manifest(id, "External");
+        m.management_mode = crate::instances::ManagementMode::External;
+        m.external_home = Some(dir.join("dsh-home").to_string_lossy().into_owned());
+
+        let checks = check_plugins(&dir, &m).await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, "warn");
+        assert!(!checks[0].repairable);
+        assert!(checks[0].repair_action.is_none());
+        assert!(checks[0].message.contains("原地接入"));
+
+        let refused = crate::repair::repair_instance_inner(
+            &root,
+            id,
+            &["disable-conflicting-plugins".to_string()],
+        )
+        .await;
+        assert!(refused.is_err(), "PHL must not edit an external profile");
 
         let _ = std::fs::remove_dir_all(&root);
     }

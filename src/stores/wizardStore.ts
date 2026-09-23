@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { InstanceDraft } from '@/types'
+import type { DshVersion, InstanceDraft } from '@/types'
 
 const emptyDraft = (): InstanceDraft => ({
   name: '',
@@ -43,11 +43,24 @@ export interface DraftIssues {
   port?: string
 }
 
-export function draftIssues(draft: InstanceDraft, takenNames: string[]): DraftIssues {
+/**
+ * `version` is the selected catalog row, resolved by the caller. A GitHub-only
+ * release (`pendingPublish`) blocks submission rather than merely warning:
+ * npm carries no package for it, so creating the instance would produce one
+ * that cannot start (2026-09-10 review #17). It is a parameter — not something
+ * this function looks up — so every caller has to hand the catalog row in.
+ */
+export function draftIssues(
+  draft: InstanceDraft,
+  takenNames: string[],
+  version?: DshVersion | null,
+): DraftIssues {
   const issues: DraftIssues = {}
   if (!draft.name.trim()) issues.name = '请填写实例名称'
   else if (takenNames.includes(draft.name.trim())) issues.name = '已存在同名实例'
   if (!draft.versionId) issues.version = '请选择一个 DSH 版本'
+  else if (version?.pendingPublish)
+    issues.version = `${version.name} 仅在 GitHub 发布，安装包尚未上架 npm`
   if (!draft.runtimeId) issues.runtime = '请选择一个 Node Runtime'
   if (!draft.autoPort && (draft.port < 1024 || draft.port > 65535))
     issues.port = '端口需要在 1024 – 65535 之间'

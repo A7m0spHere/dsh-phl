@@ -219,7 +219,18 @@ pub async fn preview_adoption(req: AdoptionRequest) -> Result<AdoptionPreview, S
         let profile_choice = inspect::pick_profile(&source);
         let (profile, plugin_count, plugin_warnings, detected_version) = match &profile_choice {
             Some((name, dir)) => {
-                let (count, warns) = inspect::declared_plugins(dir).unwrap_or((0, Vec::new()));
+                let (count, mut warns) = inspect::declared_plugins(dir).unwrap_or((0, Vec::new()));
+                // A plugin set that breaks DSH travels with the copied profile:
+                // the user may never have chosen it here, and its failure
+                // appears inside DSH's own web UI where this wizard has no
+                // reach. Say it before the copy, so an instance is never
+                // adopted into a state its owner cannot explain.
+                for conflict in crate::plugins::conflicts::enabled_conflicts_blocking(dir) {
+                    warns.push(format!(
+                        "{}；接入后可在实例详情的「环境健康」一键关闭",
+                        conflict.message
+                    ));
+                }
                 (
                     name.clone(),
                     count,

@@ -17,13 +17,8 @@ import {
 } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
-import {
-  chooseBundleFile,
-  importInstanceBundle,
-  readInstanceBundle,
-  type RemoteInstanceManifest,
-} from '@/lib/desktop'
-import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
+import { chooseBundleFile } from '@/lib/desktop'
+import { importBundleAsInstance, readBundle, type BundlePreview } from '@/services/bundles'
 import {
   useCatalogStore,
   useInstanceStore,
@@ -167,9 +162,9 @@ export function InstancesPage() {
     const ui = useUIStore.getState()
     const path = await chooseBundleFile()
     if (!path) return
-    let preview: Awaited<ReturnType<typeof readInstanceBundle>>
+    let preview: BundlePreview
     try {
-      preview = await readInstanceBundle(path)
+      preview = await readBundle(path)
     } catch (err) {
       ui.toast({
         kind: 'error',
@@ -198,42 +193,22 @@ export function InstancesPage() {
     })
     if (!ok) return
 
-    // Identity fields are the importer's (fresh id, free port); the Rust side
-    // overwrites the environment fields with the bundle's own values.
-    const manifest: RemoteInstanceManifest = {
-      id: newInstanceId(preview.name),
-      name: preview.name,
-      note: null,
-      kind: 'sandbox',
-      hue: 0,
-      versionId: preview.versionId,
-      runtimeId: preview.runtimeId,
-      port: suggestPort(),
-      autoPort: true,
-      profile: 'web',
-      createdAt: new Date().toISOString(),
-      lastRunAt: null,
-      totalRuntime: 0,
-      favorite: false,
-      env: {},
-      args: [],
-      // Same promise as the create wizard: an imported instance boots
-      // configured. The Rust import applies it through the shared path.
-      api: { inheritance: 'default', providerIds: [] },
-    }
+    // Identity fields are the importer's (fresh id, free port); the manifest
+    // conventions and the backend-record conversion belong to the bundle
+    // service, not to this component.
     try {
-      const outcome = await importInstanceBundle(path, manifest)
-      admitInstance(instanceFromRecord(outcome.record))
+      const { instance, credentials } = await importBundleAsInstance(path, preview, suggestPort())
+      admitInstance(instance)
       const notes: string[] = []
       if (preview.pluginCount > 0) {
         notes.push(`包含 ${preview.pluginCount} 条插件记录，可在插件页重新安装。`)
       }
-      if (outcome.credentials.length > 0) {
-        notes.push(`需重新配置凭据：${outcome.credentials.join('、')}。`)
+      if (credentials.length > 0) {
+        notes.push(`需重新配置凭据：${credentials.join('、')}。`)
       }
       ui.toast({
         kind: 'success',
-        title: `已导入「${outcome.record.name}」`,
+        title: `已导入「${instance.name}」`,
         message: notes.length > 0 ? notes.join(' ') : undefined,
       })
     } catch (err) {

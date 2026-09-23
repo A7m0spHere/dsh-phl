@@ -22,6 +22,13 @@ export interface RemoteSessionInfo {
   /** Lineage: the id this forked from, if any. */
   parent: string | null
   originSubagent: boolean
+  /**
+   * The session's format generation (the `.vN` in its artifact filename, equal
+   * to the header's `version`). Mirrors the Rust `HEADER_FORK_MAX_GENERATION`:
+   * only generations up to 1 carry the fork marker in the header line a copy
+   * rewrites, so anything newer is listed but not migratable.
+   */
+  formatVersion: number
 }
 
 /** Mirrors the Rust `SessionDetail` (inspect). */

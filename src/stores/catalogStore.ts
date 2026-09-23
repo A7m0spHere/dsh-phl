@@ -4,6 +4,7 @@ import { parseThrownError } from '@/lib/errorCodes'
 import { resolveBoundVersion } from '@/lib/instanceVersion'
 import { isVersionBusy } from '@/types/version'
 import { isRuntimeBusy, keepRuntimeStateOnRefresh } from '@/types/runtime'
+import { registerCatalogStore } from './storeRefs'
 import { createVersionActions } from './catalogVersionActions'
 import { createRuntimeActions } from './catalogRuntimeActions'
 import { createPluginActions, pluginKey } from './catalogPluginActions'
@@ -115,3 +116,6 @@ export const useCatalogStore = create<CatalogState>()((set, get) => ({
     get().runtimes.filter(isRuntimeBusy).length +
     Object.keys(get().pluginTransfers).length,
 }))
+
+// Publish the seam (see storeRefs.ts).
+registerCatalogStore(() => useCatalogStore.getState())

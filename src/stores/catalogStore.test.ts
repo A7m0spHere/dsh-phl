@@ -22,17 +22,21 @@ vi.mock('./settingsStore', () => ({
   useSettingsStore: { getState: () => ({ pendingReleaseAlerts: false, set: vi.fn() }) },
 }))
 // One instance `inst` with a single checkable plugin `p-a` (version 1.0.0).
-vi.mock('./instanceStore', () => ({
-  useInstanceStore: {
-    getState: () => ({
-      byId: (id: string) =>
-        id === 'inst'
-          ? { id: 'inst', name: 'Inst', plugins: [{ pluginId: 'p-a', version: '1.0.0', linked: false }] }
-          : undefined,
-      updateInstance: vi.fn(),
-      stateOf: () => ({ status: instanceStatus.current }),
-    }),
-  },
+// Plugin actions reach the instance store through the `storeRefs` seam (the
+// module graph stays acyclic); mocking that seam is the stable boundary —
+// the real instance store is never loaded here.
+vi.mock('./storeRefs', () => ({
+  registerCatalogStore: vi.fn(),
+  registerInstanceStore: vi.fn(),
+  catalogState: () => ({ pluginTransfers: {} }),
+  instanceState: () => ({
+    byId: (id: string) =>
+      id === 'inst'
+        ? { id: 'inst', name: 'Inst', plugins: [{ pluginId: 'p-a', version: '1.0.0', linked: false }] }
+        : undefined,
+    updateInstance: vi.fn(),
+    stateOf: () => ({ status: instanceStatus.current }),
+  }),
 }))
 
 import { useCatalogStore } from './catalogStore'

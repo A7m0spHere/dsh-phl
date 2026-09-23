@@ -1,20 +1,17 @@
-import { parseThrownError } from '@/lib/errorCodes'
 /** The model-catalog editor: per-provider /models discovery + manual entries. */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { CloudDownload, Download, Loader2, Plus, RefreshCw, Search, WandSparkles } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { fetchProviderModels, isDesktop } from '@/lib/desktop'
+import { isDesktop } from '@/lib/desktop'
 import { ApiModelRef, RemoteModel } from '@/types'
 import { Badge, Button, Input, Tooltip } from '@/components/ui'
 import { repository } from '@/services'
+import { probeProviderModels } from '@/services/apiModels'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useMotion } from '@/lib/motion'
 import { metadataSummary } from '@/lib/modelMetadata'
 import { ModelRow } from './ModelRow'
-import {
-  ENV_MISSING_PREFIX,
-} from './fields'
 
 
 const discoveryCache = new Map<string, RemoteModel[]>()
@@ -111,33 +108,29 @@ export function ModelEditor({
     const seq = ++fetchSeq.current
     setFetching(true)
     setError(null)
-    try {
-      const out = await fetchProviderModels({
-        baseURL: fetchCtx.baseURL,
-        api: fetchCtx.api,
-        apiKeyEnv: fetchCtx.apiKeyEnv,
-        // The form's just-typed / stored key is tried first; the backend
-        // then consults the OS credential store and finally the environment.
-        apiKey: tempKey.trim() || fetchCtx.apiKey?.trim() || undefined,
-        providerId: fetchCtx.providerId,
-      })
-      if (seq !== fetchSeq.current) return
-      discoveryCache.set(cacheKey, out)
-      setListing(out)
+    const result = await probeProviderModels({
+      baseURL: fetchCtx.baseURL,
+      api: fetchCtx.api,
+      apiKeyEnv: fetchCtx.apiKeyEnv,
+      // The form's just-typed / stored key is tried first; the backend
+      // then consults the OS credential store and finally the environment.
+      apiKey: tempKey.trim() || fetchCtx.apiKey?.trim() || undefined,
+      providerId: fetchCtx.providerId,
+    })
+    if (seq !== fetchSeq.current) return
+    if (result.kind === 'ok') {
+      discoveryCache.set(cacheKey, result.models)
+      setListing(result.models)
       setNeedKey(false)
       setSelected(new Set())
       setPickerOpen(true)
-    } catch (e) {
-      if (seq !== fetchSeq.current) return
-      const msg = typeof e === 'string' ? e : parseThrownError(e).message
-      const missing = msg.startsWith(ENV_MISSING_PREFIX)
-      setNeedKey(missing)
-      setError(missing ? msg.slice(ENV_MISSING_PREFIX.length) : msg)
+    } else {
+      setNeedKey(result.kind === 'missing-key')
+      setError(result.message)
       setListing(null)
       setPickerOpen(true)
-    } finally {
-      if (seq === fetchSeq.current) setFetching(false)
     }
+    if (seq === fetchSeq.current) setFetching(false)
   }
 
   const visible = (listing ?? []).filter((m) => {

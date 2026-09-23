@@ -58,7 +58,11 @@ async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, Str
     // 4. 实例引用完整性：实例指向的 version / runtime 是否真的在磁盘上。
     items.push(instance_refs_check(root_path).await);
 
-    // 5. 孤立目录：无清单的 instances/* 目录，存储页提供回收入口。
+    // 5. 实例的插件配置冲突：已知会让 DSH 在实例内部坏掉、而症状不落在
+    //    PHL 里的那些配置。
+    items.push(plugin_conflicts_check(root_path).await);
+
+    // 6. 孤立目录：无清单的 instances/* 目录，存储页提供回收入口。
     let orphans = instances::scan_orphan_instances_inner(root_path)
         .await
         .unwrap_or_default();
@@ -78,7 +82,7 @@ async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, Str
         },
     });
 
-    // 6. 安装残留：中断的安装事务、旧版暂存目录、下载分片。只报告，不删除 ——
+    // 7. 安装残留：中断的安装事务、旧版暂存目录、下载分片。只报告，不删除 ——
     //    清理入口在各分区（版本/运行时的删除、缓存清理），这里让用户知道它们存在。
     let residue = crate::repair::scan_residue_inner(root_path)
         .await
@@ -105,7 +109,7 @@ async fn run_diagnostics_inner(root_path: &Path) -> Result<DiagnosticReport, Str
         },
     });
 
-    // 7. 下载缓存：可安全清理的 .part 残留与保留的压缩包。
+    // 8. 下载缓存：可安全清理的 .part 残留与保留的压缩包。
     let (cache_bytes, cache_files) = cache_summary(root_path).await;
     items.push(DiagnosticItem {
         id: "cache".into(),
@@ -353,6 +357,51 @@ async fn instance_refs_check(root: &Path) -> DiagnosticItem {
         } else {
             format!("引用缺失：{}", dangling.join("；"))
         },
+    }
+}
+
+/// Plugin configurations known to break DSH while enabled. Reported here as
+/// well as per instance because the failure they cause shows up inside DSH's
+/// own web UI — a user hitting it has no reason to open the instance's health
+/// card, but "something is off" is exactly when the settings-page report is
+/// read.
+async fn plugin_conflicts_check(root: &Path) -> DiagnosticItem {
+    let item = |level: &str, detail: String| DiagnosticItem {
+        id: "plugin-conflicts".into(),
+        level: level.into(),
+        label: "插件配置冲突".into(),
+        detail,
+    };
+    let records = match instances::list_instances_inner(root).await {
+        Ok(records) => records,
+        Err(e) => return item("fail", format!("无法读取实例列表: {e}")),
+    };
+    let mut found: Vec<String> = Vec::new();
+    for record in &records {
+        let dir = match instances::instance_dir(root, &record.manifest.id) {
+            Ok(dir) => dir,
+            Err(_) => continue,
+        };
+        let profile = instances::profile_root_of(&dir, &record.manifest);
+        for conflict in crate::plugins::conflicts::enabled_conflicts(&profile).await {
+            found.push(format!(
+                "{}：{}",
+                record.manifest.name,
+                conflict
+                    .message
+                    .split('：')
+                    .next()
+                    .unwrap_or(&conflict.message)
+            ));
+        }
+    }
+    if found.is_empty() {
+        item("ok", "未发现已知会让 DSH 出问题的插件配置".into())
+    } else {
+        item(
+            "warn",
+            format!("{}；可在实例详情的「环境健康」一键关闭", found.join("；")),
+        )
     }
 }
 
