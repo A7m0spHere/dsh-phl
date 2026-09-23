@@ -789,6 +789,7 @@ name = "dsh-phl"
 version = "0.1.0-rc.1"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation 0.10.1",
  "dirs 5.0.1",
  "flate2",
  "fs2",
@@ -797,6 +798,7 @@ dependencies = [
  "phl-pack-core",
  "reqwest 0.12.28",
  "ruzstd",
+ "security-framework",
  "semver",
  "serde",
  "serde_json",

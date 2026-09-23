@@ -20,6 +20,23 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 export const isDesktop =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as object)
 
+/**
+ * macOS layout probe for the title bar. The native traffic lights replace the
+ * drawn window controls there, so the title bar must leave them room.
+ *
+ * Deliberately UA-based rather than an async Tauri call: the WKWebView UA
+ * carries the host platform, browser mode can preview the mac layout (the
+ * point of `npm run dev` remaining usable), and the decision is layout-only —
+ * no capability or trust rides on it, so it is correct from the first paint
+ * with no IPC round-trip.
+ */
+export const isMac =
+  typeof navigator !== 'undefined' &&
+  (/Macintosh|Mac OS X/i.test(navigator.userAgent) ||
+    // iPadOS Safari reports a desktop UA; only it pairs with a touch iPhone
+    // form factor, so this cannot false-positive on macOS itself.
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
+
 /** A teardown handle returned by a Tauri event listener. */
 export type Unlisten = () => void
 

@@ -63,6 +63,14 @@ pub struct NodeRuntimeMeta {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SystemNodeInfo {
+    /// The canonical executable path the launch pipeline will use.
+    pub path: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstalledRuntimeInfo {
     /// Directory name under `<root>/runtimes/`, e.g. `node-22`.
     pub name: String,
@@ -137,31 +145,19 @@ pub async fn list_installed_runtimes(
     Ok(out)
 }
 
-/// The `node` found on PATH, if any — the "系统 Node" entry runs this binary,
-/// so the version shown must be what would actually execute. Spawned on a
-/// blocking thread: `node --version` is a process launch, not a syscall.
+/// The path and version of the system Node — resolved and probed through
+/// `discovery::inspect::resolve_system_node`, the same lookup a launch uses.
+/// One resolution for both is the whole point: a bare `node` means "whatever
+/// PATH resolves", which in an app launched from Finder is nothing at all, so
+/// the page could report a version that no instance would ever run.
+/// Spawned on a blocking thread: this runs a process, not a syscall.
 #[tauri::command]
-pub async fn system_node_version() -> Option<String> {
+pub async fn system_node_version() -> Option<SystemNodeInfo> {
     tokio::task::spawn_blocking(|| {
-        let mut command = std::process::Command::new("node");
-        command.arg("--version");
-        // A console program opens a console window unless told not to; this
-        // probe runs on every refresh, so it must stay silent.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
-        }
-        let output = command.output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let version = text.strip_prefix('v')?;
-        // Accept only `MAJOR.MINOR.PATCH`; shims and wrappers print other things.
-        let ok = version.split('.').count() == 3
-            && version.chars().all(|c| c.is_ascii_digit() || c == '.');
-        ok.then(|| version.to_string())
+        crate::discovery::inspect::resolve_system_node().map(|(path, version)| SystemNodeInfo {
+            path: path.to_string_lossy().into_owned(),
+            version,
+        })
     })
     .await
     .ok()
@@ -509,7 +505,17 @@ mod tests {
         let dest = Path::new("phl").join("runtimes").join("node-22");
         assert!(safe_join(&dest, Path::new("node.exe")).is_ok());
         assert!(safe_join(&dest, Path::new("../evil")).is_err());
-        assert!(safe_join(&dest, Path::new("C:\\evil")).is_err());
+        if cfg!(windows) {
+            // `\` separates here, so `C:\evil` is an absolute escape.
+            assert!(safe_join(&dest, Path::new("C:\\evil")).is_err());
+        } else {
+            // …and on Unix the same string is ONE ordinary (ugly) name, which
+            // must pass: Windows-made archives legitimately carry such member
+            // names, and refusing them would reject the archive, not the bug.
+            assert!(safe_join(&dest, Path::new("C:\\evil")).is_ok());
+        }
+        // What the guard refuses on every platform: an absolute root.
+        assert!(safe_join(&dest, Path::new("/etc/evil")).is_err());
     }
 
     fn rt_task() -> crate::resources::Task {

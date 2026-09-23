@@ -9,11 +9,11 @@ import { invoke } from '@tauri-apps/api/core'
  * without booting Rust.
  */
 
-import { isDesktop, currentWindow, noop, type Unlisten } from './desktopCore'
+import { isDesktop, isMac, currentWindow, noop, type Unlisten } from './desktopCore'
 
 // Re-exported so existing `from '@/lib/desktop'` imports keep working while
 // the domain split (roadmap O-13) lands one interaction at a time.
-export { isDesktop }
+export { isDesktop, isMac }
 export type { Unlisten } from './desktopCore'
 
 export const desktop = {
@@ -62,6 +62,28 @@ export const desktop = {
     } catch {
       return false
     }
+  },
+
+  async isFullscreen(): Promise<boolean> {
+    if (!isDesktop) return false
+    try {
+      return await currentWindow().isFullscreen()
+    } catch {
+      return false
+    }
+  },
+
+  /** Toggle native fullscreen. On macOS the green traffic light does this too. */
+  async toggleFullscreen(): Promise<void> {
+    if (!isDesktop) return noop()
+    const win = currentWindow()
+    const fs = await win.isFullscreen().catch(() => false)
+    await win.setFullscreen(!fs)
+  },
+
+  async exitFullscreen(): Promise<void> {
+    if (!isDesktop) return noop()
+    await currentWindow().setFullscreen(false)
   },
 
   /** Fires whenever the window is resized, which covers maximize/restore. */

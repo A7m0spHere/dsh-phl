@@ -19,9 +19,8 @@ interface Props {
 
 /**
  * The card is the app's primary object. Its resting state is quiet — name,
- * environment, status — and it only reveals controls once the pointer is on
- * it, so a page of ten instances reads as ten facts rather than thirty
- * buttons.
+ * environment, status — with visible controls so actions are discoverable
+ * without hovering. Grid cards give identity and controls their own rows.
  *
  * Click semantics are the launcher's: single click *selects the launch
  * target* (the dock below always follows this focus), double click starts
@@ -89,7 +88,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
         style={{ background: tone.solid, transform: running || focused ? 'scaleY(1)' : undefined }}
       />
 
-      <div className={cn('flex gap-2.5', layout === 'grid' ? 'items-start' : 'items-center')}>
+      <div className={cn('flex gap-2.5', layout === 'grid' ? 'flex-wrap items-start' : 'items-center')}>
         <InstanceTile
           name={instance.name}
           hue={instance.hue}
@@ -173,7 +172,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
         </div>
 
         {layout === 'list' && (
-          <div className="hidden items-center gap-2 md:flex">
+          <div className="hidden items-center gap-2 lg:flex">
             <Chip>:{instance.port}</Chip>
             <span className="w-[84px] text-right text-sm text-ink-faint">
               {formatRelative(instance.lastRunAt)}
@@ -188,7 +187,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           </span>
         ) : (
         <div
-          className="flex shrink-0 items-center gap-1"
+          className={cn('flex shrink-0 items-center gap-1', layout === 'grid' && 'w-full border-t border-line pt-2')}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
@@ -211,11 +210,8 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             variant={running ? 'secondary' : failed ? 'secondary' : 'primary'}
             onClick={primaryAction}
             className={cn(
-              'group/sheen w-[54px] transition-opacity duration-200',
-              // Controls stay out of the way until the card is engaged — but a
-              // running, failed, or *focused* card always keeps its primary
-              // reachable: focus means "this is what the dock aims at".
-              !running && !busy && !failed && !focused && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
+              'group/sheen w-[54px]',
+              layout === 'grid' && 'ml-auto',
             )}
             sheen={!running && !busy}
           >
@@ -229,10 +225,6 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
               size="sm"
               variant="ghost"
               onClick={openDetail}
-              className={cn(
-                'transition-opacity duration-200',
-                !focused && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
-              )}
             >
               <ArrowUpRight size={14} />
             </IconButton>
@@ -240,7 +232,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
 
           <Menu
             items={menuItems}
-            trigger={({ open: isOpen, toggle: t2, menuProps }) => (
+            trigger={({ toggle: t2, menuProps }) => (
               <Tooltip content="更多操作" side="top">
                 <IconButton
                   label="更多操作"
@@ -248,10 +240,6 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
                   variant="ghost"
                   onClick={t2}
                   {...menuProps}
-                  className={cn(
-                    'transition-opacity duration-200',
-                    !isOpen && 'opacity-0 group-hover/card:opacity-100 focus:opacity-100',
-                  )}
                 >
                   <MoreHorizontal size={14} />
                 </IconButton>
@@ -264,7 +252,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
 
       {/* Secondary row only exists in the grid layout, where there is room. */}
       {layout === 'grid' && (
-        <div className="mt-2 flex items-center gap-2 border-t border-line pt-1.5 text-sm text-ink-faint">
+        <div className="mt-2 flex items-center gap-2 text-sm text-ink-faint">
           <Chip>:{instance.port}</Chip>
           {instance.autoPort && <span className="text-2xs text-ink-faint">自动分配</span>}
           <span className="ml-auto truncate">{formatRelative(instance.lastRunAt)}</span>

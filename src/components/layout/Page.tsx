@@ -27,7 +27,7 @@ export function PageShell({
   bodyClassName?: string
   maxWidth?: number
 }) {
-  const { t } = useMotion()
+  const { t, scale } = useMotion()
   // On a scaled window the header actions would squeeze the subtitle into a
   // broken sliver. min() lets the column fall back to the full content width
   // while large screens keep the reading measure.
@@ -35,7 +35,7 @@ export function PageShell({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <motion.header
-        initial={{ opacity: 0, y: -6 }}
+        initial={{ opacity: 0, y: scale === 0 ? 0 : -6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={t(0.24)}
         className="shrink-0 px-[var(--page-pad)] pb-2 pt-3"
@@ -51,7 +51,7 @@ export function PageShell({
               {subtitle && <PageSubtitle subtitle={subtitle} />}
             </div>
             {actions && (
-              <div className="ml-auto flex shrink-0 items-center gap-1.5">{actions}</div>
+              <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">{actions}</div>
             )}
           </div>
           {toolbar && <div className="mt-2.5 flex items-center gap-2">{toolbar}</div>}

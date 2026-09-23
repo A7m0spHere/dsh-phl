@@ -492,23 +492,36 @@ mod tests {
         assert!(state.is_provisional());
         assert!(!pointer.exists(), "boot alone must not write the pointer");
 
-        // The handshake adopts the frontend's stored root once.
-        let adopted = state.adopt(Some("C:\\PHL Data")).unwrap();
-        assert_eq!(adopted, PathBuf::from("C:\\PHL Data"));
-        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), "C:\\PHL Data");
+        // The handshake adopts the frontend's stored root once. Platform-
+        // absolute spellings: on Unix a drive letter is just a relative name
+        // and `validate_root` would (rightly) refuse it.
+        let root_a = if cfg!(windows) {
+            "C:\\PHL Data"
+        } else {
+            "/PHL Data"
+        };
+        let root_b = if cfg!(windows) {
+            "D:\\Elsewhere"
+        } else {
+            "/Elsewhere"
+        };
+        let root_c = if cfg!(windows) { "E:\\Moved" } else { "/Moved" };
+        let adopted = state.adopt(Some(root_a)).unwrap();
+        assert_eq!(adopted, PathBuf::from(root_a));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), root_a);
         // …and only once: a later handshake cannot re-point a decided root.
-        state.adopt(Some("D:\\Elsewhere")).unwrap();
-        assert_eq!(state.root(), PathBuf::from("C:\\PHL Data"));
-        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), "C:\\PHL Data");
+        state.adopt(Some(root_b)).unwrap();
+        assert_eq!(state.root(), PathBuf::from(root_a));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), root_a);
 
         // An explicit set always wins and persists.
-        state.set_root("E:\\Moved").unwrap();
-        assert_eq!(state.root(), PathBuf::from("E:\\Moved"));
-        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), "E:\\Moved");
+        state.set_root(root_c).unwrap();
+        assert_eq!(state.root(), PathBuf::from(root_c));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), root_c);
 
         // The pointer file is authoritative on the next boot.
         let reloaded = PhlState::with_pointer(Some(pointer));
-        assert_eq!(reloaded.root(), PathBuf::from("E:\\Moved"));
+        assert_eq!(reloaded.root(), PathBuf::from(root_c));
         assert!(!reloaded.is_provisional());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -520,13 +533,24 @@ mod tests {
         assert!(validate_root("  ").is_err());
         assert!(validate_root("relative\\path").is_err());
         assert!(validate_root("C:\\a\\..\\b").is_err());
+        assert!(validate_root("/a/../b").is_err());
         // `.` never reaches validate_root: Path::components normalizes it
         // away, which is exactly why only `..` needs refusing lexically.
+        let dotted = if cfg!(windows) {
+            Path::new("C:\\a\\.\\b")
+        } else {
+            Path::new("/a/./b")
+        };
         assert_eq!(
-            Path::new("C:\\a\\.\\b").components().next_back(),
+            dotted.components().next_back(),
             Some(Component::Normal(OsStr::new("b")))
         );
-        assert!(validate_root("C:\\PHL Data").is_ok());
+        assert!(validate_root(if cfg!(windows) {
+            "C:\\PHL Data"
+        } else {
+            "/PHL Data"
+        })
+        .is_ok());
     }
 
     #[test]

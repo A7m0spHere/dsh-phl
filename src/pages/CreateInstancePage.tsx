@@ -171,7 +171,9 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
   const unpublished = selectedVersion?.pendingPublish ? selectedVersion : null
 
   // Components still missing a download, shown in the footer so the
-  // auto-install on submit never comes as a surprise.
+  // auto-install on submit never comes as a surprise. A version with no
+  // package behind it (`npm 未收录`) is not one of them: there is nothing to
+  // fetch, and listing it would promise an install that cannot happen.
   const pendingNames = useMemo(() => {
     const out: string[] = []
     const v = versions.find((x) => x.id === draft.versionId)

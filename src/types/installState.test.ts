@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isVersionBusy,
   isVersionBusyKind,
+  isVersionDownloadable,
   isVersionInstallable,
   keepVersionStateOnRefresh,
   type DshVersion,
@@ -138,5 +139,26 @@ describe('installable predicates (wizard auto-install affordance)', () => {
     for (const [kind, on] of Object.entries(runtimeInstallable)) {
       expect(isRuntimeInstallable(runtime({ kind } as RuntimeInstallState))).toBe(on)
     }
+  })
+})
+
+/**
+ * Availability is a separate question from state: a version the team has cut
+ * on GitHub but not published to npm rests in `available` and is still worth
+ * pinning an instance to, yet there is no package for PHL to fetch — the
+ * wizard must not promise an install it cannot perform.
+ */
+describe('download affordance', () => {
+  it('a GitHub-ahead row is selectable but not downloadable', () => {
+    const pending = {
+      id: 'v',
+      pendingPublish: true,
+      state: { kind: 'available' },
+    } as DshVersion
+    expect(isVersionInstallable(pending)).toBe(false)
+    expect(isVersionDownloadable(pending)).toBe(false)
+
+    const published = { id: 'v', state: { kind: 'available' } } as DshVersion
+    expect(isVersionDownloadable(published)).toBe(true)
   })
 })

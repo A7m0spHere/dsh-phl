@@ -364,6 +364,26 @@ pub fn run() {
             // upscaled (see apply_taskbar_icon).
             if let Some(window) = app.get_webview_window("main") {
                 apply_taskbar_icon(&window);
+                // macOS UI adaptation (traffic lights + full-size content) is
+                // entirely declarative: `tauri.macos.conf.json` (merged into
+                // this config at build time by tauri-build) gives the main
+                // window `decorations:true` + `titleBarStyle:Overlay` +
+                // `hiddenTitle`, so it is *created* with the
+                // `Titled | FullSizeContentView` mask — native traffic lights
+                // at their standard position, web content drawn underneath
+                // them, the header strip doubling as the native titlebar for
+                // drag / double-click zoom / green-fullscreen. Doing it at
+                // creation avoids the runtime `set_decorations(true)` path,
+                // whose absolute-mask rewrite races with the Overlay's
+                // FullSizeContentView bit and strands the content under an
+                // opaque titlebar. The base config keeps `decorations:false`
+                // for Windows/Linux (their borderless custom titlebar is
+                // unchanged); the frontend hides the drawn window controls and
+                // clears room for the lights on macOS via `isMac`
+                // (see TitleBar.tsx). The close-confirm chain is already
+                // platform-agnostic: Rust intercepts the red button's
+                // `CloseRequested` and hands it to the frontend, so the
+                // running-instances guard runs there unchanged.
             }
             // Safety net: if the frontend fails to boot it can never call
             // `app_ready`, and a permanently invisible window looks like a
