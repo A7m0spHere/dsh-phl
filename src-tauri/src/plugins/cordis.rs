@@ -127,14 +127,20 @@ pub(crate) async fn restore_plugin_registration_state(
 }
 
 pub(crate) async fn declared_plugin_ids(profile: &Path) -> std::collections::HashMap<String, bool> {
-    let lines = read_patch_lines(profile).await;
+    declared_plugin_ids_in(&read_patch_lines(profile).await)
+}
+
+/// The scan itself, over lines the caller already has. Split out for the
+/// adoption inspection, which reads the source home synchronously and must
+/// reach the same verdict as the async path.
+pub(crate) fn declared_plugin_ids_in(lines: &[String]) -> std::collections::HashMap<String, bool> {
     let mut out = std::collections::HashMap::new();
-    for row in mount_rows(&lines) {
+    for row in mount_rows(lines) {
         let range = row.range;
-        let disabled = row_value(&lines, range, "disabled")
-            .is_some_and(|v| v == serde_yaml::Value::Bool(true));
+        let disabled =
+            row_value(lines, range, "disabled").is_some_and(|v| v == serde_yaml::Value::Bool(true));
         for key in ["id", "name"] {
-            if let Some(serde_yaml::Value::String(id)) = row_value(&lines, range, key) {
+            if let Some(serde_yaml::Value::String(id)) = row_value(lines, range, key) {
                 out.entry(id).or_insert(disabled);
             }
         }

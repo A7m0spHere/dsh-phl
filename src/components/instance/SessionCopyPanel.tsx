@@ -27,6 +27,18 @@ import { useInstanceStore } from '@/stores/instanceStore'
 import { useUIStore } from '@/stores/uiStore'
 import { Badge, Button, Checkbox, Spinner } from '@/components/ui'
 
+/**
+ * The newest format generation a copy can re-identify: it rewrites the header
+ * line's `seedLength`/`parentSession`, and only v0/v1 have a `seedLength` field.
+ * Mirrors the Rust `codec::HEADER_FORK_MAX_GENERATION` — the backend refuses
+ * these generations anyway, so this is the honest affordance, not the gate.
+ */
+const COPYABLE_MAX_FORMAT = 1
+
+const whyNotCopyable = (formatVersion: number) =>
+  `格式 v${formatVersion} 的会话无法迁移：它的继承前缀写在日志体内（session/end-seed 事件），` +
+  '而复制只能改写 header 行 —— 强行复制会让目标实例起不来。该会话仍可正常打开与使用。'
+
 export function SessionCopyPanel({
   instanceId,
   onCopied,
@@ -145,6 +157,11 @@ export function SessionCopyPanel({
     )
   }
 
+  // Sessions a copy can actually carry: newer generations keep their inherited
+  // prefix in the log body, which only DSH can write.
+  const copyableDirs = sessions.filter((s) => s.formatVersion <= COPYABLE_MAX_FORMAT).map((s) => s.sessionDir)
+  const blocked = sessions.length - copyableDirs.length
+
   return (
     <div className="mt-2 flex flex-col gap-2 rounded-lg bg-surface-sunken p-2.5 ring-1 ring-inset ring-line">
       <div>
@@ -154,38 +171,56 @@ export function SessionCopyPanel({
             {selected.size > 0 && <span className="ml-1.5 text-accent-ink">已选 {selected.size}</span>}
           </p>
           <button
-            className="text-xs text-accent hover:underline"
+            className="text-xs text-accent hover:underline disabled:text-ink-faint disabled:no-underline"
+            disabled={copyableDirs.length === 0}
             onClick={() =>
               setSelected(
-                selected.size === sessions.length
+                copyableDirs.length > 0 && copyableDirs.every((d) => selected.has(d))
                   ? new Set()
-                  : new Set(sessions.map((s) => s.sessionDir)),
+                  : new Set(copyableDirs),
               )
             }
           >
-            {selected.size === sessions.length ? '取消全选' : `全选（${sessions.length}）`}
+            {copyableDirs.length > 0 && copyableDirs.every((d) => selected.has(d))
+              ? '取消全选'
+              : `全选（${copyableDirs.length}）`}
           </button>
         </div>
         <div className="max-h-44 space-y-1 overflow-y-auto">
-          {sessions.map((s) => (
-            <label
-              key={s.sessionDir}
-              className="flex cursor-pointer items-center gap-2 text-sm"
-            >
-              <Checkbox checked={selected.has(s.sessionDir)} onChange={() => setSelected(toggle(selected, s.sessionDir))} />
-              <span className="min-w-0 flex-1 truncate">
-                <span className="block truncate text-ink">
-                  {s.id.replace(/^session-/, '').slice(0, 8)}
-                  {s.parent ? ' · 由复制而来' : ''}
+          {sessions.map((s) => {
+            const copyable = s.formatVersion <= COPYABLE_MAX_FORMAT
+            return (
+              <label
+                key={s.sessionDir}
+                title={copyable ? undefined : whyNotCopyable(s.formatVersion)}
+                className={`flex items-center gap-2 text-sm ${copyable ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+              >
+                <Checkbox
+                  checked={selected.has(s.sessionDir)}
+                  disabled={!copyable}
+                  onChange={() => copyable && setSelected(toggle(selected, s.sessionDir))}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="block truncate text-ink">
+                    {s.id.replace(/^session-/, '').slice(0, 8)}
+                    {s.parent ? ' · 由复制而来' : ''}
+                  </span>
+                  <span className="block truncate text-xs text-ink-faint">
+                    {s.cwd ?? s.project} · {formatDateTime(s.createdAtMs)}
+                  </span>
                 </span>
-                <span className="block truncate text-xs text-ink-faint">
-                  {s.cwd ?? s.project} · {formatDateTime(s.createdAtMs)}
-                </span>
-              </span>
-              {s.originSubagent && <Badge tone="neutral">子代理</Badge>}
-            </label>
-          ))}
+                {s.originSubagent && <Badge tone="neutral">子代理</Badge>}
+                {!copyable && <Badge tone="warn">v{s.formatVersion} 不可迁移</Badge>}
+              </label>
+            )
+          })}
         </div>
+        {blocked > 0 && (
+          <p className="mt-1 text-xs text-ink-faint">
+            其中 {blocked} 条是较新的格式（v2/v3），继承前缀在日志体内，只能由 DSH 自己分叉，PHL
+            无法安全迁移 —— 它们照常可用，只是不能复制到别的实例。
+          </p>
+        )}
       </div>
       <div>
         <p className="mb-1 text-xs font-medium text-ink-muted">目标实例</p>

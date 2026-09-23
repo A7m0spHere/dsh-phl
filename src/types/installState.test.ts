@@ -122,6 +122,18 @@ describe('installable predicates (wizard auto-install affordance)', () => {
     }
   })
 
+  it('a GitHub-only version is never installable, whatever its state', () => {
+    // npm has no package for it, so "install here" would promise a download
+    // that cannot happen (2026-09-10 review #17). The pending row's state is
+    // the ordinary resting `available`, which is exactly why the flag has to
+    // be part of the predicate rather than inferred from `state`.
+    for (const kind of Object.keys(versionInstallable) as VersionInstallState['kind'][]) {
+      expect(
+        isVersionInstallable({ ...version({ kind } as VersionInstallState), pendingPublish: true }),
+      ).toBe(false)
+    }
+  })
+
   it('runtime', () => {
     for (const [kind, on] of Object.entries(runtimeInstallable)) {
       expect(isRuntimeInstallable(runtime({ kind } as RuntimeInstallState))).toBe(on)

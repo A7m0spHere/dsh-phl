@@ -10,16 +10,8 @@ import {
 import { cn } from '@/lib/cn'
 import {
   chooseDirectory,
-  cancelTransfer,
   desktop,
   freeSpace,
-  migrationStatus,
-  migrationUndo,
-  migrationFinish,
-  moveRootData,
-  type MigrationJournal,
-  rootDataSummary,
-  type MoveProgress,
 } from '@/lib/desktop'
 import { formatBytes } from '@/lib/format'
 import { useTruncated } from '@/lib/hooks'
@@ -28,7 +20,7 @@ import { repository } from '@/services'
 import {
   normalizeRoot,
   useCatalogStore,
-  useApiConfigStore,
+  useDataRootStore,
   useInstanceStore,
   useSettingsStore,
   useUIStore,
@@ -125,8 +117,6 @@ export function SettingsPage() {
   const settings = useSettingsStore(
     useShallow((s) => ({
       root: s.root,
-      setRoot: s.setRoot,
-      setRootVerified: s.setRootVerified,
       reset: s.reset,
       startup: s.startup,
       minimizeToTray: s.minimizeToTray,
@@ -154,13 +144,16 @@ export function SettingsPage() {
    * Real sizes are only measured when this section is open. Walking every
    * instance tree — `node_modules` included — is far too slow to do on page
    * load, and nothing outside the storage view reads `diskUsage`.
+   * `settings.root` re-runs this after a switch/migration committed a new
+   * root: the lists the store reloads do not include these two view metrics,
+   * which used to be refreshed by the page's own (now centralized) reload.
    */
   const [orphans, setOrphans] = useState<{ name: string; size: number }[]>([])
   useEffect(() => {
     if (section !== 'storage') return
     void measureDiskUsage()
     void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
-  }, [section, measureDiskUsage])
+  }, [section, settings.root, measureDiskUsage])
 
   const dropOrphan = async (name: string, size: number) => {
     const ok = await ui.confirm({
@@ -187,52 +180,35 @@ export function SettingsPage() {
 
   const [rootDraft, setRootDraft] = useState(settings.root)
 
-  /**
-   * Points the app at a new data root and re-reads everything from it.
-   *
-   * Without the reload the in-memory instance and catalog lists keep
-   * describing the old root while every subsequent write resolves against the
-   * new one — edits fail with "实例不存在", and a delete reports success while
-   * the real directory survives, unreachable, in the old location.
-   */
-  const refreshRootView = async (next: string) => {
-    setRootDraft(next)
-    await Promise.all([
-      useInstanceStore.getState().reload(),
-      useCatalogStore.getState().load(),
-      useApiConfigStore.getState().load(),
-    ]).catch((err) => {
-      ui.toast({ kind: 'error', title: '新目录读取失败', message: parseThrownError(err).message })
-    })
-    void measureDiskUsage()
-    void repository.listOrphanInstanceDirs().then(setOrphans, () => setOrphans([]))
-  }
-
-  const mirrorCommittedRoot = async (root: string) => {
-    settings.setRoot(root)
-    await refreshRootView(root)
-  }
-
-  const switchRootTo = async (next: string): Promise<boolean> => {
-    // The backend has to adopt the path before the UI moves: a local-only
-    // switch would leave the field pointing at one directory while every read
-    // and write resolved against the other (see `setRootVerified`).
-    if (!(await settings.setRootVerified(next))) {
-      ui.toast({
-        kind: 'error',
-        title: '无法切换数据目录',
-        message: `PHL 没有接受 ${next}。路径必须是绝对路径（例如 D:\\PHL），且配置目录可写；当前数据目录保持不变。`,
-        duration: 8000,
-      })
-      setRootDraft(settings.root)
-      return false
-    }
-    await refreshRootView(useSettingsStore.getState().root)
-    return true
-  }
-
-  // Keep the field in step when the root changes from somewhere else.
+  // Keep the field in step when the root changes from somewhere else (first
+  // run chooser, migration commit, journal finish).
   useEffect(() => setRootDraft(settings.root), [settings.root])
+
+  /**
+   * The data-root switch and migration flow lives in `useDataRootStore`
+   * (stores/dataRootStore.ts): validation, the in-progress-task guard, the
+   * confirms, the migration run / resume / undo / finish, and the shared
+   * post-commit refresh. This page collects input and renders state.
+   */
+  const dataRoot = useDataRootStore(
+    useShallow((s) => ({
+      migration: s.migration,
+      moveProgress: s.moveProgress,
+      journal: s.journal,
+      journalBusy: s.journalBusy,
+      refreshJournal: s.refreshJournal,
+      startMigration: s.startMigration,
+      cancelMigration: s.cancelMigration,
+      undoMigration: s.undoMigration,
+      finishCommittedMigration: s.finishCommittedMigration,
+      applyRootFlow: s.applyRootFlow,
+    })),
+  )
+
+  useEffect(() => {
+    if (section !== 'storage') return
+    void dataRoot.refreshJournal()
+  }, [section, dataRoot.refreshJournal])
 
   /** Free bytes per known path; `null` = the drive could not be queried. */
   const [driveSpace, setDriveSpace] = useState<Record<string, number | null>>({})
@@ -247,143 +223,6 @@ export function SettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [section, settings.root, rootDraft])
 
-  /**
-   * An in-flight root migration. While it exists, the storage view shows a
-   * progress overlay; the root itself only flips once the move reports done.
-   */
-  const [migration, setMigration] = useState<null | { from: string; to: string; transferId: string }>(null)
-  const [moveProgress, setMoveProgress] = useState<MoveProgress | null>(null)
-
-  /**
-   * A migration cancelled or interrupted by a crash leaves its journal
-   * behind; entering the storage view surfaces it as 继续 / 撤销 (O-06),
-   * so the half-moved directories are never a silent dead end.
-   */
-  const [openJournal, setOpenJournal] = useState<MigrationJournal | null>(null)
-  const [journalBusy, setJournalBusy] = useState<'undo' | 'finish' | null>(null)
-  useEffect(() => {
-    if (section !== 'storage') return
-    void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
-  }, [section])
-
-  const clearJournal = () => void setOpenJournal(null)
-
-  /**
-   * The committed journal: every directory has arrived at the new root, but
-   * the pointer switch never completed (crash or failed commit between the
-   * two). The backend finishes it from the journal's own record — never from
-   * a path the UI re-sends — and the reload below re-reads the lists from
-   * the adopted root.
-   */
-  const finishCommittedMigration = async () => {
-    if (!openJournal) return
-    setJournalBusy('finish')
-    try {
-      const adopted = await migrationFinish()
-      if (adopted) {
-        // The pointer is already the backend's; this mirrors it into the UI
-        // store and re-reads instances/catalog/API from the adopted root.
-        await mirrorCommittedRoot(adopted)
-      }
-      ui.toast({
-        kind: 'success',
-        title: '数据目录已切换',
-        message: '迁移早已完成数据搬运，目录指针现已指向新目录。',
-      })
-      clearJournal()
-    } catch (err) {
-      ui.toast({
-        kind: 'error',
-        title: '完成切换失败',
-        message: parseThrownError(err).message,
-        duration: 8000,
-      })
-    } finally {
-      setJournalBusy(null)
-    }
-  }
-
-  const undoOpenMigration = async () => {
-    if (!openJournal) return
-    const ok = await ui.confirm({
-      title: '撤销未完成的迁移',
-      message: '已复制到新目录的数据将全部搬回旧目录，新目录恢复迁移前的状态。期间不要移动这两个目录。',
-      detail: `${openJournal.from}\n  ↑\n${openJournal.to}`,
-      tone: 'danger',
-      confirmLabel: '撤销迁移',
-    })
-    if (!ok) return
-    setJournalBusy('undo')
-    try {
-      await migrationUndo()
-      ui.toast({ kind: 'success', title: '迁移已撤销', message: '数据已回到旧目录。' })
-      clearJournal()
-      await useInstanceStore.getState().reload().catch(() => undefined)
-    } catch (err) {
-      ui.toast({
-        kind: 'error',
-        title: '撤销失败',
-        message: parseThrownError(err).message,
-        duration: 8000,
-      })
-    } finally {
-      setJournalBusy(null)
-    }
-  }
-
-  const beginMigration = async (from: string, to: string) => {
-    const transferId = `move-${Date.now()}`
-    setMigration({ from, to, transferId })
-    setMoveProgress(null)
-    try {
-      const summary = await moveRootData(from, to, transferId, setMoveProgress)
-      if (summary.cancelled) {
-        ui.toast({
-          kind: 'info',
-          title: '迁移已取消',
-          message: `已完成 ${formatBytes(summary.bytes)}，数据目录未更改。进度已记录，可在「存储」页继续或撤销。`,
-          duration: 6000,
-        })
-        void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
-        return
-      }
-      if (!summary.root) throw new Error('迁移结果缺少已提交的数据目录，请重启 PHL 重新读取目录状态。')
-      await mirrorCommittedRoot(summary.root)
-      clearJournal()
-      ui.toast({
-        kind: 'success',
-        title: '数据迁移完成',
-        message: `已迁移 ${summary.moved.length} 个目录（${formatBytes(summary.bytes)}），新目录即刻生效。`,
-        duration: 6000,
-      })
-    } catch (err) {
-      // Rust reports a cancelled transfer as `Err("cancelled")`; showing the
-      // failure toast for it told the user their migration broke when they had
-      // simply stopped it.
-      if (parseThrownError(err).message.trim() === 'cancelled') {
-        ui.toast({
-          kind: 'info',
-          title: '迁移已取消',
-          message: '数据目录未更改；已完成的部分保留在新目录，可在本页继续或撤销。',
-          duration: 6000,
-        })
-        return
-      }
-      ui.toast({
-        kind: 'error',
-        title: '迁移失败',
-        message: `${parseThrownError(err).message} 数据目录未更改；已完成的部分保留在新目录，处理后可重新迁移续传。`,
-        duration: 8000,
-      })
-    } finally {
-      setMigration(null)
-      setMoveProgress(null)
-      // The journal is the truth: a cancelled run leaves a resume entry, a
-      // committed one deletes itself. Reflect whichever outcome happened.
-      void migrationStatus().then(setOpenJournal, () => setOpenJournal(null))
-    }
-  }
-
   const pickRoot = async () => {
     const picked = await chooseDirectory(settings.root)
     if (picked) setRootDraft(picked)
@@ -395,75 +234,6 @@ export function SettingsPage() {
         duration: 3000,
       })
     }
-  }
-
-  /**
-   * Why a typed path cannot be a data root, in the same terms the backend
-   * enforces (`paths::validate_root`). Checked before the two confirmations so
-   * the user is not walked through a migration decision that cannot happen.
-   */
-  const rootProblem = (raw: string): string | null => {
-    const path = raw.trim()
-    if (!path) return '请输入目录路径。'
-    if (!/^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(path)) return '请填写绝对路径，例如 D:\\PHL。'
-    if (/[\\/]\.{1,2}(?:[\\/]|$)/.test(path)) return '路径里不能包含 . 或 .. 这样的相对段。'
-    return null
-  }
-
-  const applyRoot = async () => {
-    const next = normalizeRoot(rootDraft)
-    if (!next || next === settings.root) return
-    const problem = rootProblem(next)
-    if (problem) {
-      ui.toast({ kind: 'warn', title: '数据目录无效', message: problem })
-      return
-    }
-    const live = useInstanceStore.getState()
-    if (Object.values(live.states).some((s) => ['running', 'starting', 'stopping'].includes(s.status))
-      || live.hasPendingWrites() || live.createProgress || Object.keys(live.snapshotTransfers).length
-      || useApiConfigStore.getState().saving || useApiConfigStore.getState().pendingSaves > 0
-      || useApiConfigStore.getState().syncing
-      || useCatalogStore.getState().activeTransfers() > 0) {
-      ui.toast({
-        kind: 'warn',
-        title: '暂时无法更改数据目录',
-        message: '请先停止所有实例，并等待下载、快照和配置保存完成。',
-      })
-      return
-    }
-    const ok = await ui.confirm({
-      title: '更改数据目录',
-      message: 'PHL 之后会从新目录读写版本、Runtime 与实例。',
-      detail: `${settings.root}\n  ↓\n${next}`,
-      tone: 'danger',
-      confirmLabel: '仍要更改',
-    })
-    if (!ok) return
-    const summary = await rootDataSummary(settings.root).catch(() => null)
-    if (summary?.hasData) {
-      const parts = [
-        summary.instances.entries && `${summary.instances.entries} 个实例`,
-        summary.versions.entries && `${summary.versions.entries} 个版本`,
-        summary.runtimes.entries && `${summary.runtimes.entries} 个 Runtime`,
-        summary.config.entries && 'API 配置库',
-      ].filter(Boolean)
-      const move = await ui.confirm({
-        title: '立即迁移现有数据？',
-        message: `旧目录中仍有 ${parts.join('、') || '数据'}。迁移会把它们连同下载缓存完整搬到新目录；不迁移的话它们将留在原处，且不再出现在 PHL 的列表里。`,
-        confirmLabel: '立即迁移',
-        cancelLabel: '以后再说',
-      })
-      if (move) {
-        void beginMigration(settings.root, next)
-        return
-      }
-    }
-    await switchRootTo(next)
-    ui.toast({
-      kind: 'info',
-      title: '数据目录已更新',
-      message: '旧目录的数据仍在原处，之后可在本页重新迁移。',
-    })
   }
 
   const instanceDisk = instances.reduce((sum, i) => sum + i.diskUsage, 0)
@@ -767,53 +537,53 @@ export function SettingsPage() {
 
         {section === 'storage' && (
           <>
-            {openJournal && !migration && (
+            {dataRoot.journal && !dataRoot.migration && (
               <PageSection
-                title={openJournal.committed ? '待确认的迁移' : '未完成的迁移'}
+                title={dataRoot.journal.committed ? '待确认的迁移' : '未完成的迁移'}
               >
-                {openJournal.committed ? (
+                {dataRoot.journal.committed ? (
                   // The recovery entry for R1's window: the journal says every
                   // directory arrived, yet the pointer still names the old
                   // root. One click commits the switch; nothing is re-copied.
                   <Notice tone="warn" title="数据已全部到达新目录，迁移记录尚未清理">
                     <div className="mt-1 break-all text-sm">
-                      {openJournal.from} → {openJournal.to}（{openJournal.entries.length}/
-                      {openJournal.entries.length} 个目录已到达）。确认后将使用新目录并清理记录，不会重新搬运数据。
+                      {dataRoot.journal.from} → {dataRoot.journal.to}（{dataRoot.journal.entries.length}/
+                      {dataRoot.journal.entries.length} 个目录已到达）。确认后将使用新目录并清理记录，不会重新搬运数据。
                     </div>
                     <div className="mt-2.5 flex gap-2">
                       <Button
                         size="sm"
                         variant="primary"
-                        disabled={journalBusy !== null}
-                        onClick={() => void finishCommittedMigration()}
+                        disabled={dataRoot.journalBusy !== null}
+                        onClick={() => void dataRoot.finishCommittedMigration()}
                       >
-                        {journalBusy === 'finish' ? '切换中…' : '完成切换'}
+                        {dataRoot.journalBusy === 'finish' ? '切换中…' : '完成切换'}
                       </Button>
                     </div>
                   </Notice>
                 ) : (
                   <Notice tone="warn" title={`旧目录 → 新目录的数据搬运尚未结束`}>
                     <div className="mt-1 break-all text-sm">
-                      {openJournal.from} → {openJournal.to}（{openJournal.entries.filter((e) => e.state === 'moved').length}/{openJournal.entries.length} 个目录已到达，
-                      {formatBytes(openJournal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
+                      {dataRoot.journal.from} → {dataRoot.journal.to}（{dataRoot.journal.entries.filter((e) => e.state === 'moved').length}/{dataRoot.journal.entries.length} 个目录已到达，
+                      {formatBytes(dataRoot.journal.entries.reduce((sum, e) => sum + (e.state === 'moved' ? e.bytes : 0), 0))}）。
                       可从中断处继续，或将已复制的数据原路退回。
                     </div>
                     <div className="mt-2.5 flex gap-2">
                       <Button
                         size="sm"
                         variant="primary"
-                        disabled={journalBusy !== null}
-                        onClick={() => void beginMigration(openJournal.from, openJournal.to)}
+                        disabled={dataRoot.journalBusy !== null}
+                        onClick={() => void dataRoot.startMigration(dataRoot.journal!.from, dataRoot.journal!.to)}
                       >
                         继续迁移
                       </Button>
                       <Button
                         size="sm"
                         variant="secondary"
-                        disabled={journalBusy !== null}
-                        onClick={() => void undoOpenMigration()}
+                        disabled={dataRoot.journalBusy !== null}
+                        onClick={() => void dataRoot.undoMigration()}
                       >
-                        {journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
+                        {dataRoot.journalBusy === 'undo' ? '撤销中…' : '撤销并还原'}
                       </Button>
                     </div>
                   </Notice>
@@ -855,7 +625,7 @@ export function SettingsPage() {
                   <Button
                     variant="primary"
                     disabled={normalizeRoot(rootDraft) === settings.root || !rootDraft.trim()}
-                    onClick={applyRoot}
+                    onClick={() => void dataRoot.applyRootFlow(rootDraft)}
                   >
                     应用
                   </Button>
@@ -1107,9 +877,9 @@ export function SettingsPage() {
       </PageShell>
 
       <MigrationOverlay
-        info={migration}
-        progress={moveProgress}
-        onCancel={() => migration && void cancelTransfer(migration.transferId)}
+        info={dataRoot.migration}
+        progress={dataRoot.moveProgress}
+        onCancel={dataRoot.cancelMigration}
       />
     </div>
   )

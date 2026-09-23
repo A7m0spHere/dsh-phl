@@ -28,7 +28,12 @@ const RESIDUE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// The repair actions this module executes itself. Everything else that
 /// verify can flag (install-version, install-runtime, reinstall-*) needs a
 /// download and stays a user-routed action.
-const LOCAL_ACTIONS: &[&str] = &["recreate-workspace", "recreate-skeleton", "cleanup-txn"];
+const LOCAL_ACTIONS: &[&str] = &[
+    "recreate-workspace",
+    "recreate-skeleton",
+    "cleanup-txn",
+    "disable-conflicting-plugins",
+];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -253,6 +258,7 @@ pub(crate) async fn repair_instance_inner(
             "recreate-workspace" => recreate_workspace(root, instance_id).await,
             "recreate-skeleton" => recreate_skeleton(root, instance_id).await,
             "cleanup-txn" => cleanup_txn(root).await,
+            "disable-conflicting-plugins" => disable_conflicting_plugins(root, instance_id).await,
             _ => unreachable!("LOCAL_ACTIONS is the whitelist above"),
         };
         match result {
@@ -323,6 +329,17 @@ async fn recreate_workspace(root: &Path, instance_id: &str) -> Result<(), String
             .await
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Turn off every plugin configuration verify flags as breaking DSH. The
+/// write goes through `writable_profile_dir`, so an in-place (external)
+/// instance is refused with the same message every other profile write gives
+/// — verify already marks that case unrepairable, and this is the backstop
+/// for a request that arrives anyway.
+async fn disable_conflicting_plugins(root: &Path, instance_id: &str) -> Result<(), String> {
+    let profile = crate::instances::writable_profile_dir(root, instance_id, "修改插件配置").await?;
+    crate::plugins::conflicts::disable_all(&profile).await?;
     Ok(())
 }
 

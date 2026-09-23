@@ -46,7 +46,13 @@ export interface DshVersion {
    */
   requiresNode: number[]
   notes: string[]
-  /** Latest release on its channel. */
+  /**
+   * Upstream's newest release in the merged catalog (npm + GitHub releases) —
+   * the row the list shows first. It can be a version npm has not published
+   * yet (`pendingPublish`): the badge tracks what upstream released, not what
+   * is installable, so it moves the moment GitHub tags a release instead of
+   * freezing one row down for the whole publish lag.
+   */
   latest?: boolean
   /** Kept for compatibility testing; PHL warns before removing it. */
   legacy?: boolean
@@ -63,14 +69,17 @@ export interface DshVersion {
 export const isVersionInstalled = (v: DshVersion) => v.state.kind === 'installed'
 
 /**
- * The wizard's "install it here" affordance: only from a resting state with
- * no operation running. `failed` counts because retry-in-place is the
- * wizard's own recovery path. One predicate (audit A) — the four hand-written
- * `=== 'available' || === 'failed'` copies it replaces would each have to be
- * remembered when a new resting state lands.
+ * The wizard's "install it here" affordance: a resting state with no operation
+ * running, and something to download. `failed` counts because retry-in-place is
+ * the wizard's own recovery path; a GitHub-only row (`pendingPublish`) does not,
+ * because npm carries no package for it yet — the wizard used to promise a
+ * background download for those and then fail inside `installVersion` with
+ * 「这个版本没有可用的下载源」(2026-09-10 review #17). One predicate (audit A) —
+ * the four hand-written `=== 'available' || === 'failed'` copies it replaces
+ * would each have to be remembered when a new resting state lands.
  */
 export const isVersionInstallable = (v: DshVersion) =>
-  v.state.kind === 'available' || v.state.kind === 'failed'
+  !v.pendingPublish && (v.state.kind === 'available' || v.state.kind === 'failed')
 
 /**
  * The single source of truth for "an operation on this version is in flight".

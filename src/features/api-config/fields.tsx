@@ -11,7 +11,8 @@ import { ApiModelRef, ApiProvider } from '@/types'
 import { Button, Field, Input, SettingRow, Switch } from '@/components/ui'
 import { ModelEditor } from './ModelEditor'
 
-export const ENV_MISSING_PREFIX = 'ENV_MISSING:'
+/* `ENV_MISSING:` (the backend's temp-key marker wire format) is parsed in
+ * one place — `@/services/apiModels` — not duplicated here. */
 
 /* ------------------------------------------------------------------ *
  * helpers

@@ -1,5 +1,5 @@
 import { parseThrownError } from '@/lib/errorCodes'
-import { categoryLabel } from '@/lib/healthCategories'
+import { categoryLabel, repairActionLabel } from '@/lib/healthCategories'
 import { useCallback, useEffect, useState } from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, Wrench, XCircle } from 'lucide-react'
 import {
@@ -80,9 +80,12 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
     try {
       const outcome = await repairInstance(instanceId, actions)
       const parts: string[] = []
-      if (outcome.applied.length > 0) parts.push(`已修复：${outcome.applied.join('、')}`)
+      if (outcome.applied.length > 0)
+        parts.push(`已修复：${outcome.applied.map(repairActionLabel).join('、')}`)
       if (outcome.requiresUser.length > 0)
-        parts.push(`需要重新安装（请在版本/Runtime 页操作）：${outcome.requiresUser.join('、')}`)
+        parts.push(
+          `需要重新安装（请在版本/Runtime 页操作）：${outcome.requiresUser.map(repairActionLabel).join('、')}`,
+        )
       setRepairNote(parts.join('；') || '没有可执行的修复动作')
       await run()
     } catch (err) {

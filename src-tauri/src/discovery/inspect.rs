@@ -70,31 +70,40 @@ pub(crate) fn pick_profile(home: &Path) -> Option<(String, PathBuf)> {
     fallback
 }
 
-/// Count session artifacts under `<home>/sessions`: files named
-/// `session.jsonl` or `session.jsonl.zstd` inside `<project>/<session>/`
-/// directories. A pure filename walk — the log content is never read
-/// (spike §8: P0 must not take on the zstd/packed-row parsing obligation).
+/// Count sessions under `<home>/sessions`: canonical artifacts
+/// (`session[.vN].jsonl[.zstd]`, any format generation) inside
+/// `<project>/<session>/` directories. A pure filename walk — the log content is
+/// never read (spike §8: P0 must not take on the zstd/packed-row parsing
+/// obligation).
+///
+/// The count is per session **directory**, not per file: a migrated session
+/// keeps its older generation on disk beside the new one
+/// (`session.jsonl.zstd` + `session.v3.jsonl.zstd`), and that is one
+/// conversation, not two. Counting only `session.jsonl[.zstd]` undercounted
+/// every home a current DSH has touched — the migration engine's blindness, in
+/// its counting form.
 pub(crate) fn count_sessions(home: &Path) -> usize {
+    use crate::sessions::codec::{generation_of_filename, LogEncoding};
     let root = home.join("sessions");
     let Ok(projects) = std::fs::read_dir(&root) else {
         return 0;
     };
     let mut count = 0;
     for project in projects.flatten() {
-        let project_path = project.path();
-        let Ok(sessions) = std::fs::read_dir(&project_path) else {
+        let Ok(sessions) = std::fs::read_dir(project.path()) else {
             continue;
         };
         for session in sessions.flatten() {
-            let session_path = session.path();
-            let Ok(files) = std::fs::read_dir(&session_path) else {
+            let Ok(files) = std::fs::read_dir(session.path()) else {
                 continue;
             };
-            for file in files.flatten() {
+            let holds_a_session = files.flatten().any(|file| {
                 let name = file.file_name().to_string_lossy().into_owned();
-                if name == "session.jsonl" || name == "session.jsonl.zstd" {
-                    count += 1;
-                }
+                generation_of_filename(&name, LogEncoding::Zstd).is_some()
+                    || generation_of_filename(&name, LogEncoding::Plain).is_some()
+            });
+            if holds_a_session {
+                count += 1;
             }
         }
     }
@@ -364,16 +373,28 @@ mod tests {
             let p = dir.join("sessions").join(project).join(name);
             std::fs::create_dir_all(&p).unwrap();
             std::fs::write(p.join("session.jsonl.zstd"), b"x").unwrap();
+            p
         };
-        s("--D-a--", "session-1");
+        let first = s("--D-a--", "session-1");
         s("--D-a--", "session-2");
         s("--D-b--", "session-3");
+        // A migrated session keeps its older generation beside the new one:
+        // one conversation, not two.
+        std::fs::write(first.join("session.v3.jsonl.zstd"), b"x").unwrap();
+        // A newer generation without any v0 artifact counts too — a subagent
+        // child's directory is its bare uuid, and a current DSH writes v3.
+        let child = dir
+            .join("sessions")
+            .join("--D-b--")
+            .join("3996cc7d-be3f-4a5a-bb24-93258dbe037c");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("session.v3.jsonl.zstd"), b"x").unwrap();
         // Junk that must not count.
         let other = dir.join("sessions").join("--D-c--").join("loose");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("notes.txt"), b"x").unwrap();
         std::fs::write(dir.join("sessions").join("session.jsonl"), b"x").unwrap();
-        assert_eq!(count_sessions(&dir), 3);
+        assert_eq!(count_sessions(&dir), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

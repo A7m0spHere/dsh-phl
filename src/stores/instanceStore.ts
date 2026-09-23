@@ -1,16 +1,28 @@
-import { MIN_WEB_PORT } from '@/lib/ports'
 import { parseThrownError } from '@/lib/errorCodes'
 import { create } from 'zustand'
-import { repository, Cancelled, KeptRunningError, LaunchError, type CopyProgress, type CreateProgress } from '@/services'
-import { adoptProcesses, isDesktop, onInstanceExited, openDshWebUi } from '@/lib/desktop'
+import { repository, Cancelled, type CreateProgress } from '@/services'
+import { isDesktop, adoptProcesses } from '@/lib/desktop'
 import { createOptimisticQueue } from '@/lib/optimisticQueue'
 import type { Instance, InstanceDraft, InstanceRuntimeState, Snapshot } from '@/types'
-import { isInstanceLiveForSnapshot } from '@/types/instance'
-import { useCatalogStore } from './catalogStore'
+import { catalogState, registerInstanceStore } from './storeRefs'
 import { useSettingsStore } from './settingsStore'
 import { useUIStore } from './uiStore'
+import { STOPPED, createLifecycleActions } from './instanceLifecycleActions'
+import { abortSnapshotCopy, createSnapshotActions } from './instanceSnapshotActions'
+import type { CopyProgress } from '@/services/repository'
 
-interface InstanceState {
+/**
+ * The instance store: one public surface (`useInstanceStore`) composed from
+ * three modules so each business concern owns its own state transitions:
+ *
+ * - `instanceLifecycleActions.ts` — launch / stop / exit-event handling /
+ *   WebUI open, and the controllers & sets they keep privately.
+ * - `instanceSnapshotActions.ts` — the create/restore/delete snapshot copy
+ *   workflows and the one-copy-per-instance guard.
+ * - this file — the instance list, adoption, CRUD, the optimistic save
+ *   queue, and the selectors everyone else reads.
+ */
+export interface InstanceState {
   instances: Instance[]
   /** Live status keyed by instance id; kept apart from the persisted model. */
   states: Record<string, InstanceRuntimeState>
@@ -64,6 +76,12 @@ interface InstanceState {
    */
   adoptPreviousSession: () => Promise<void>
 
+  /**
+   * Binds the process-exit listener (lifecycle module). Called from `load()`;
+   * the latch inside makes repeat calls no-ops. Internal seam, not UI-facing.
+   */
+  ensureExitListener: () => void
+
   launch: (id: string) => Promise<void>
   cancelLaunch: (id: string) => void
   stop: (id: string) => Promise<boolean>
@@ -102,85 +120,28 @@ interface InstanceState {
   flushWrites: () => Promise<void>
 }
 
-const STOPPED: InstanceRuntimeState = { status: 'stopped' }
-
-const launchControllers = new Map<string, AbortController>()
-const snapshotControllers = new Map<string, AbortController>()
-const exitedDuringStop = new Set<string>()
-const exitedDuringLaunch = new Map<string, { pid: number; code: number | null }>()
+/**
+ * Create-flow ownership: `createController` is the single in-flight wizard
+ * (the UI only exposes one create at a time); it is nulled in `finally` on
+ * every path. `loadStarted` is the StrictMode-safe load latch (reset only on
+ * `reload()` and on load failure, so a retry stays possible). The optimistic
+ * save queue (`instanceWriters`) is owned here: one writer per instance,
+ * dropped with the row on delete, never reset across root reloads (writers
+ * hold unsaved edits to the OLD root, which a switch guard already forbids).
+ */
 let createController: AbortController | null = null
 let loadStarted = false
-let exitListenerBound = false
 const instanceWriters = new Map<string, ReturnType<typeof createOptimisticQueue<Instance>>>()
 const derivedFields = new Set<keyof Instance>(['plugins', 'snapshots', 'diskUsage', 'dshHome', 'workspace'])
 
-/**
- * 插件安装正在往实例的 node_modules 里写文件；此刻拷贝它（快照）或换掉它
- * （回滚）都会得到撕裂的结果。Rust 看不到这些传输，只能在这里拦。
- */
-function pluginInstallActive(id: string): boolean {
-  const transfers = useCatalogStore.getState().pluginTransfers
-  return Object.keys(transfers).some((key) => key.startsWith(`p:${id}:`))
-}
-
-/**
- * One event for every way a process can die. The Rust watcher removes its map
- * entry and emits; here the instance state folds back to stopped and the run
- * time is banked. A manual stop already resolved the state before the event
- * arrives, so this is a no-op on that path.
- */
-function bindExitListener(
-  set: (partial: Partial<InstanceState>) => void,
-  get: () => InstanceState,
-) {
-  if (exitListenerBound || !isDesktop) return
-  exitListenerBound = true
-  void onInstanceExited(({ instanceId, pid, code }) => {
-    const state = get().stateOf(instanceId)
-    if (state.status === 'starting') {
-      exitedDuringLaunch.set(instanceId, { pid, code })
-      return
-    }
-    if (state.pid !== undefined && state.pid !== pid) return
-    if (state.status !== 'running' && state.status !== 'stopping') return
-    // A manual stop owns the bookkeeping: it captured `ranFor` before awaiting
-    // and banks it once the call returns. Banking here too counted the session
-    // twice and fired a second toast whenever the process happened to die
-    // inside that await — which is the normal case, not an edge one.
-    if (state.status === 'stopping') {
-      exitedDuringStop.add(instanceId)
-      return
-    }
-    const crashed = code !== 0
-    const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
-    set({
-      states: {
-        ...get().states,
-        [instanceId]: crashed
-          ? { status: 'stopped', lastExit: { code: code ?? null, at: Date.now(), ranFor } }
-          : STOPPED,
-      },
-    })
-    const instance = get().byId(instanceId)
-    if (instance && ranFor > 0) {
-      get().updateInstance(instanceId, {
-        totalRuntime: instance.totalRuntime + ranFor,
-        lastRunAt: new Date().toISOString(),
-      })
-    }
-    if (crashed) {
-      useUIStore.getState().toast({
-        kind: 'error',
-        title: `${instance?.name ?? instanceId} 进程异常退出`,
-        message: `退出码 ${code ?? '未知'}。日志在实例目录的 logs/ 下。`,
-      })
-    } else {
-      useUIStore.getState().toast({ kind: 'info', title: `${instance?.name ?? instanceId} 已退出` })
-    }
-  })
-}
-
-export const useInstanceStore = create<InstanceState>()((set, get) => ({
+export const useInstanceStore = create<InstanceState>()((set, get) => {
+  // The lifecycle (launch/stop/exit/WebUI) and snapshot workflows live in
+  // their own modules; the factories bind to this store's `set`/`get` so
+  // every transition still runs on the one public surface the rest of the
+  // app reads.
+  const lifecycle = createLifecycleActions(set, get)
+  const snapshots = createSnapshotActions(set, get)
+  return {
   instances: [],
   states: {},
   loaded: false,
@@ -198,7 +159,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     // seeded runtime states from being reset under the user.
     if (get().loaded || loadStarted) return
     loadStarted = true
-    bindExitListener(set, get)
+    lifecycle.ensureExitListener()
     try {
       const instances = await repository.listInstances()
       const states: Record<string, InstanceRuntimeState> = {}
@@ -272,322 +233,16 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     }
   },
 
-  /* ---------------- lifecycle ---------------- */
-
-  async launch(id) {
-    const instance = get().byId(id)
-    if (!instance) return
-    const current = get().stateOf(id).status
-    if (current === 'starting' || current === 'running' || current === 'stopping') return
-
-    const catalog = useCatalogStore.getState()
-    const ui = useUIStore.getState()
-    const controller = new AbortController()
-    launchControllers.set(id, controller)
-    exitedDuringLaunch.delete(id)
-
-    const patch = (s: InstanceRuntimeState) => set({ states: { ...get().states, [id]: s } })
-    set({ focusId: id })
-    // The stored port can predate the reserved-port floor (the adoption
-    // draft used `port: 0`, and the old scan advanced 0 → 1 — a port
-    // Chromium refuses to open). With auto-port on, re-suggest here; the
-    // successful `outcome.port` write-back below heals the record for good.
-    const launchTarget =
-      instance.autoPort && instance.port < MIN_WEB_PORT
-        ? { ...instance, port: get().suggestPort() }
-        : instance
-    // Build ctx BEFORE the `starting` flip: portsInUse counts starting as
-    // held, so self would read as the occupier of its own fixed port.
-    const ctx = {
-      version: catalog.versionById(instance.versionId),
-      runtime: catalog.runtimeById(instance.runtimeId),
-      portsInUse: get().portsInUse(),
-    }
-    patch({ status: 'starting', progress: 0, phase: 'resolve-version' })
-
-    try {
-      const outcome = await repository.launch(
-        launchTarget,
-        ctx,
-        (p) => patch({ status: 'starting', phase: p.phase, progress: p.progress }),
-        controller.signal,
-      )
-
-      const exited = exitedDuringLaunch.get(id)
-      if (exited?.pid === outcome.pid) {
-        throw new LaunchError('进程在启动完成前退出', `退出码 ${exited.code ?? '未知'}，请查看实例 logs/ 下的日志。`)
-      }
-
-      patch({
-        status: 'running',
-        progress: 1,
-        pid: outcome.pid,
-        startedAt: Date.now(),
-        webUrl: outcome.webUrl,
-      })
-      // The allocated port and the run timestamp are real configuration now —
-      // memory-only updates used to lose the port on restart.
-      get().updateInstance(id, { lastRunAt: new Date().toISOString(), port: outcome.port })
-      // A launcher's delivered promise: getting to the running app must not
-      // cost an extra click. Desktop opens (or focuses) the instance's
-      // embedded WebUI window; the browser mock build keeps the manual
-      // action instead of spawning unasked tabs on every mock launch. The
-      // auto-open is user-switchable (设置 → 常规) — when off, the instance is
-      // ready and the toast's own 打开 button is the only thing that opens it.
-      const autoOpen = isDesktop && useSettingsStore.getState().autoOpenWebUi
-      if (autoOpen) void get().openWebUi(id)
-      ui.toast({
-        kind: 'success',
-        title: `${instance.name} 已就绪`,
-        message: autoOpen
-          ? 'WebUI 已在独立窗口打开'
-          : `WebUI 运行在 localhost:${outcome.port}`,
-        action: { label: '打开', run: () => void get().openWebUi(id) },
-      })
-    } catch (err) {
-      if (err instanceof KeptRunningError) {
-        const exited = exitedDuringLaunch.get(id)
-        if (exited?.pid === err.pid) {
-          patch(exited.code === 0 ? STOPPED : {
-            status: 'stopped',
-            lastExit: { code: exited.code, at: Date.now(), ranFor: 0 },
-          })
-          ui.toast({ kind: 'info', title: `${instance.name} 已确认退出` })
-          return
-        }
-        // R3: the DSH process is alive but termination could not be
-        // confirmed, so the backend kept it registered on `err.port`.
-        // Presenting it as running is what preserves a working stop entry —
-        // a generic error state would strand a live process with no button.
-        patch({ status: 'running', progress: 1, pid: err.pid, startedAt: Date.now() })
-        get().updateInstance(id, { port: err.port, lastRunAt: new Date().toISOString() })
-        ui.toast({
-          kind: 'warn',
-          title: `${instance.name} 未能确认退出，已保留为运行中`,
-          message: `${err.detail} 端口 ${err.port} 仍被占用；可直接重试停止。`,
-          duration: 9000,
-          action: { label: '停止', run: () => void get().stop(id) },
-        })
-      } else if (err instanceof Cancelled) {
-        patch(STOPPED)
-        ui.toast({ kind: 'info', title: `已取消启动 ${instance.name}` })
-      } else if (err instanceof LaunchError) {
-        patch({
-          status: 'error',
-          error: { title: err.title, detail: err.detail, hint: err.hint },
-        })
-        ui.toast({
-          kind: 'error',
-          title: `${instance.name} 启动失败`,
-          message: err.title,
-          action: { label: '查看', run: () => ui.push({ name: 'instance', id }) },
-        })
-      } else {
-        patch({ status: 'error', error: { title: '未知错误', detail: parseThrownError(err).message } })
-      }
-    } finally {
-      launchControllers.delete(id)
-      exitedDuringLaunch.delete(id)
-    }
-  },
-
-  cancelLaunch(id) {
-    launchControllers.get(id)?.abort()
-  },
-
-  async stop(id) {
-    const instance = get().byId(id)
-    if (!instance) return true
-    const state = get().stateOf(id)
-    if (state.status !== 'running') return state.status === 'stopped' || state.status === 'error'
-
-    const ranFor = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0
-    set({ states: { ...get().states, [id]: { ...state, status: 'stopping' } } })
-
-    const controller = new AbortController()
-    exitedDuringStop.delete(id)
-    try {
-      await repository.stop(instance, controller.signal)
-    } catch (err) {
-      // The exit event can confirm death while the stop command is pending.
-      // Otherwise keep the process tracked and allow a retry.
-      if (!exitedDuringStop.has(id)) {
-        set({ states: { ...get().states, [id]: state } })
-        useUIStore.getState().toast({
-          kind: 'error', title: `${instance.name} 停止失败`, message: parseThrownError(err).message,
-        })
-        return false
-      }
-    } finally {
-      exitedDuringStop.delete(id)
-    }
-
-    set({ states: { ...get().states, [id]: STOPPED } })
-    // Re-read after the await: `instance` is a pre-await snapshot, and a
-    // plugin install or an edit that landed while the process was shutting
-    // down would be added back on top of a stale `totalRuntime`.
-    const current = get().byId(id)
-    if (current) {
-      get().updateInstance(id, {
-        totalRuntime: current.totalRuntime + ranFor,
-        lastRunAt: new Date().toISOString(),
-      })
-    }
-    useUIStore.getState().toast({ kind: 'info', title: `${instance.name} 已停止` })
-    return true
-  },
-
-  toggle(id) {
-    const status = get().stateOf(id).status
-    if (status === 'running') void get().stop(id)
-    else if (status === 'starting') get().cancelLaunch(id)
-    else void get().launch(id)
-  },
-
-  /* ---------------- snapshots ---------------- */
-
-  async createSnapshot(id) {
-    const instance = get().byId(id)
-    if (!instance || snapshotControllers.has(id)) return null
-    const status = get().stateOf(id).status
-    if (isInstanceLiveForSnapshot(status)) {
-      useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再创建快照' })
-      return null
-    }
-    if (pluginInstallActive(id)) {
-      useUIStore
-        .getState()
-        .toast({ kind: 'info', title: '有插件正在安装', message: '等插件安装完成后再创建快照。' })
-      return null
-    }
-    const controller = new AbortController()
-    snapshotControllers.set(id, controller)
-    const patchTransfer = (p: CopyProgress) =>
-      set({ snapshotTransfers: { ...get().snapshotTransfers, [id]: p } })
-    set({ snapshotOps: { ...get().snapshotOps, [id]: 'create' } })
-    patchTransfer({ progress: 0, bytesDone: 0, bytesTotal: 0 })
-    try {
-      const snap = await repository.createSnapshot(instance, patchTransfer, controller.signal)
-      // snapshots 是磁盘派生的列表；saveInstance 的 manifest 不含它，落内存即可。
-      // Read the list back after the await rather than closing over the
-      // pre-await copy: a snapshot deleted while this one was being written
-      // would otherwise be resurrected by the stale array.
-      const current = get().byId(id)
-      get().updateInstance(id, { snapshots: [snap, ...(current?.snapshots ?? [])] })
-      useUIStore.getState().toast({ kind: 'success', title: '已创建快照', message: snap.label })
-      return snap
-    } catch (err) {
-      if (err instanceof Cancelled) {
-        useUIStore.getState().toast({ kind: 'info', title: '已取消创建快照' })
-      } else {
-        useUIStore
-          .getState()
-          .toast({
-            kind: 'error',
-            title: '创建快照失败',
-            message: parseThrownError(err).message,
-          })
-      }
-      return null
-    } finally {
-      snapshotControllers.delete(id)
-      const transfers = { ...get().snapshotTransfers }
-      delete transfers[id]
-      const ops = { ...get().snapshotOps }
-      delete ops[id]
-      set({ snapshotTransfers: transfers, snapshotOps: ops })
-    }
-  },
-
-  cancelSnapshot(id) {
-    snapshotControllers.get(id)?.abort()
-  },
-
-  async restoreSnapshot(id, snapshotId) {
-    const instance = get().byId(id)
-    if (!instance) return
-    // One snapshot copy per instance at a time — the same guard create uses;
-    // a double click used to fire a second guarded task straight into a
-    // busy-lock error while the first was still copying.
-    if (snapshotControllers.has(id)) return
-    const status = get().stateOf(id).status
-    if (isInstanceLiveForSnapshot(status)) {
-      useUIStore.getState().toast({ kind: 'info', title: '先停止实例，再还原快照' })
-      return
-    }
-    if (pluginInstallActive(id)) {
-      useUIStore
-        .getState()
-        .toast({ kind: 'info', title: '有插件正在安装', message: '等插件安装完成后再回滚。' })
-      return
-    }
-    const controller = new AbortController()
-    snapshotControllers.set(id, controller)
-    const patchTransfer = (p: CopyProgress) =>
-      set({ snapshotTransfers: { ...get().snapshotTransfers, [id]: p } })
-    set({ snapshotOps: { ...get().snapshotOps, [id]: 'restore' } })
-    patchTransfer({ progress: 0, bytesDone: 0, bytesTotal: 0 })
-    try {
-      const fresh = await repository.restoreSnapshot(instance, snapshotId, patchTransfer, controller.signal)
-      // 还原换掉了整个 dsh-home：插件列表由磁盘反推，必须以还原后的为准。
-      get().updateInstance(id, { plugins: fresh.plugins })
-      useUIStore
-        .getState()
-        .toast({ kind: 'success', title: '已还原快照', message: '插件与配置已回到快照时的状态。' })
-    } catch (err) {
-      if (err instanceof Cancelled) {
-        useUIStore.getState().toast({ kind: 'info', title: '已取消还原快照' })
-      } else {
-        useUIStore
-          .getState()
-          .toast({
-            kind: 'error',
-            title: '还原快照失败',
-            message: parseThrownError(err).message,
-          })
-      }
-    } finally {
-      snapshotControllers.delete(id)
-      const transfers = { ...get().snapshotTransfers }
-      delete transfers[id]
-      const ops = { ...get().snapshotOps }
-      delete ops[id]
-      set({ snapshotTransfers: transfers, snapshotOps: ops })
-    }
-  },
-
-  async deleteSnapshot(id, snapshotId) {
-    const instance = get().byId(id)
-    if (!instance) return
-    const key = `${id}:${snapshotId}`
-    if (get().deletingSnapshots[key]) return
-    // Deleting walks the copied tree; show the row busy and absorb repeat
-    // clicks the same way instance deletion does.
-    set({ deletingSnapshots: { ...get().deletingSnapshots, [key]: true } })
-    try {
-      await repository.deleteSnapshot(instance, snapshotId)
-      get().updateInstance(id, {
-        snapshots: (get().byId(id)?.snapshots ?? []).filter((s) => s.id !== snapshotId),
-      })
-    } catch (err) {
-      useUIStore
-        .getState()
-        .toast({
-          kind: 'error',
-          title: '删除快照失败',
-          message: parseThrownError(err).message,
-        })
-    } finally {
-      const deleting = { ...get().deletingSnapshots }
-      delete deleting[key]
-      set({ deletingSnapshots: deleting })
-    }
-  },
+  /* lifecycle (launch/stop/exit/WebUI) and snapshot workflows: see the
+   * two action modules; spread into this store so the public surface is
+   * unchanged for every existing consumer. */
+  ...lifecycle,
+  ...snapshots,
 
   /* ---------------- CRUD ---------------- */
 
   async createInstance(draft) {
-    const catalog = useCatalogStore.getState()
+    const catalog = catalogState()
     const template = catalog.templates.find((t) => t.id === draft.templateId)
     createController = new AbortController()
     set({ createProgress: { step: 'create', progress: 0 } })
@@ -715,14 +370,13 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
       useUIStore.getState().toast({ kind: 'info', title: '请等待实例配置保存完成后再删除' })
       return
     }
-    launchControllers.get(id)?.abort()
+    lifecycle.cancelLaunch(id)
     // A snapshot copy in flight is reading the very tree that is about to
     // vanish — abort it and drop its progress row.
-    snapshotControllers.get(id)?.abort()
-    snapshotControllers.delete(id)
-    const transfers = { ...get().snapshotTransfers }
-    delete transfers[id]
-    if (transfers[id] !== undefined || get().snapshotTransfers[id] !== undefined) {
+    abortSnapshotCopy(id)
+    if (get().snapshotTransfers[id] !== undefined) {
+      const transfers = { ...get().snapshotTransfers }
+      delete transfers[id]
       set({ snapshotTransfers: transfers })
     }
     // Pending FIRST: the tree walk takes seconds, and the user must see the
@@ -826,44 +480,11 @@ export const useInstanceStore = create<InstanceState>()((set, get) => ({
     get().instances.filter((i) => get().stateOf(i.id).status === 'running').length,
   hasPendingWrites: () => [...instanceWriters.values()].some((writer) => writer.busy),
 
-  /**
-   * "打开 WebUI" for one instance. The bridge reports whether the request
-   * reached an embedded window or fell back to the system browser; a double
-   * failure becomes a toast here instead of a promise rejected into `void`.
-   */
-  async openWebUi(id: string) {
-    const instance = get().byId(id)
-    if (!instance) return
-    const state = get().states[id]
-    const url = state?.webUrl ?? `http://localhost:${instance.port}`
-    // A record predating the port floor can still carry a reserved port in
-    // `webUrl` (the launch log quoted it, adoption replayed it). Opening the
-    // window would only render Chromium's ERR_UNSAFE_PORT page — unexplainable
-    // to the user — so name the cause and the fix instead.
-    try {
-      const port = Number(new URL(url).port)
-      if (port > 0 && port < MIN_WEB_PORT) {
-        useUIStore.getState().toast({
-          kind: 'warn',
-          title: `${instance.name} 的 WebUI 端口 ${port} 无法在浏览器中打开`,
-          message: '这是浏览器封锁的保留端口。停止实例后重新启动，会自动换用可用端口。',
-          duration: 9000,
-          action: { label: '停止', run: () => void get().stop(id) },
-        })
-        return
-      }
-    } catch {
-      // Unparseable URL: let the open itself surface the failure as before.
-    }
-    const result = await openDshWebUi(id, url, instance.name)
-    if (!result.ok) {
-      useUIStore.getState().toast({
-        kind: 'error',
-        title: `无法打开 ${instance.name} 的 WebUI`,
-        message: result.reason,
-        duration: 8000,
-      })
-    }
-  },
   flushWrites: async () => { await Promise.all([...instanceWriters.values()].map((writer) => writer.flush())) },
-}))
+  }
+})
+
+// Publish the seam (see storeRefs.ts): plugin actions read instance records
+// and the lifecycle reads catalog state; the ref lets both directions stay
+// synchronous without a static module cycle.
+registerInstanceStore(() => useInstanceStore.getState())
