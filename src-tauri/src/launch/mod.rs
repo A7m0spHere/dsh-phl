@@ -34,7 +34,8 @@ pub(crate) mod process;
 pub(crate) mod registry;
 
 pub(crate) use registry::{
-    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, ProcessState, Registry,
+    decide, latest_launch_log, probe_process, Adoption, PersistedProcess, Probe, ProcessState,
+    Registry,
 };
 
 pub(crate) use process::{
@@ -422,10 +423,19 @@ pub(crate) fn stop_permission(
     instance_id: &str,
     pid: u32,
 ) -> Result<(), String> {
+    stop_permission_with_probe(registry, instance_id, pid, probe_process)
+}
+
+fn stop_permission_with_probe(
+    registry: &Registry,
+    instance_id: &str,
+    pid: u32,
+    probe: impl FnOnce(u32) -> Probe,
+) -> Result<(), String> {
     let Some(rec) = registry.record_of(instance_id) else {
         return Ok(());
     };
-    match decide(&rec, &probe_process(pid)) {
+    match decide(&rec, &probe(pid)) {
         Adoption::Adopt => Ok(()),
         Adoption::Forget {
             keep_running: true,
@@ -439,7 +449,6 @@ pub(crate) fn stop_permission(
         Adoption::Forget { .. } => Ok(()),
     }
 }
-
 /// `stop_instance`'s core: kill the tree, and only forget the rows once the
 /// process is verifiably not running. A kill that fails against a pid the
 /// kernel already reports gone IS the desired outcome — typically a kept-alive
@@ -1778,11 +1787,9 @@ mod tests {
     #[test]
     fn stop_refuses_a_pid_the_registry_does_not_own() {
         let registry = Registry::default();
-        // No record: a process PHL launched in this session is ours.
+        // A process launched in this session has no persisted identity row.
         assert!(stop_permission(&registry, "inst", 1234).is_ok());
 
-        // A record whose creation stamp cannot belong to this pid: the number
-        // has been reused, so PHL must refuse to kill it.
         registry.remember(PersistedProcess {
             instance_id: "inst".into(),
             pid: 1234,
@@ -1790,14 +1797,24 @@ mod tests {
             started_at_ms: 0,
             exe_path: "C:\\node.exe".into(),
         });
-        let err = stop_permission(&registry, "inst", std::process::id()).unwrap_err();
+        let err = stop_permission_with_probe(&registry, "inst", 1234, |_| Probe {
+            state: ProcessState::Alive,
+            exe_path: Some("C:\\other.exe".into()),
+            created_at_ms: Some(1),
+        })
+        .unwrap_err();
         assert!(err.contains("身份无法确认"), "{err}");
 
-        // A pid that is already gone is not a kill target, but must not block
-        // the cleanup either.
-        assert!(stop_permission(&registry, "inst", 1234).is_ok());
+        // A known-exited process is safe to forget without consulting the host PID table.
+        assert!(
+            stop_permission_with_probe(&registry, "inst", 1234, |_| Probe {
+                state: ProcessState::Exited,
+                exe_path: None,
+                created_at_ms: None,
+            })
+            .is_ok()
+        );
     }
-
     #[test]
     fn a_watcher_only_closes_the_window_of_its_own_process() {
         // The other half of the relaunch race: the old watcher must not close
