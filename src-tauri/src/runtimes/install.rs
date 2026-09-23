@@ -2,7 +2,7 @@
 //! staging tree, SHASUMS256 verification, health gate (runnable node
 //! reporting the requested version) and the backup-swap commit.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tauri::ipc::Channel;
@@ -174,14 +174,7 @@ pub(crate) async fn run_runtime_install(
                 parsed.version
             ));
         }
-        // The zip layout puts node.exe at the top level, the tar layout
-        // in bin/ — same distinction `runtime_bin_dir` encodes.
-        let bin = if cfg!(windows) {
-            installed.to_path_buf()
-        } else {
-            installed.join("bin")
-        };
-        if !bin.join(node_binary()).exists() {
+        if !runtime_node_path(installed).exists() {
             return Err("node 可执行文件缺失".into());
         }
         Ok(())
@@ -194,7 +187,7 @@ pub(crate) async fn run_runtime_install(
 /// and report the requested version. Spawned on a blocking thread — this is
 /// a process launch, not a syscall.
 pub(crate) async fn check_runtime_health(staging: &Path, version: &str) -> Result<(), String> {
-    let node = staging.join(node_binary());
+    let node = runtime_node_path(staging);
     if !node.exists() {
         return Err("node 可执行文件缺失".into());
     }
@@ -223,6 +216,17 @@ pub(crate) async fn check_runtime_health(staging: &Path, version: &str) -> Resul
         return Err(format!("node --version 返回 {stdout}，期望 v{version}"));
     }
     Ok(())
+}
+
+/// Node's Windows archive places `node.exe` at its root; Unix archives put
+/// `node` under `bin/`. Keep the commit gate and health probe on that same
+/// layout so a runtime is validated at the path instance launches will use.
+fn runtime_node_path(runtime_root: &Path) -> PathBuf {
+    if cfg!(windows) {
+        runtime_root.join(node_binary())
+    } else {
+        runtime_root.join("bin").join(node_binary())
+    }
 }
 
 /// The dist archive layout for this machine. Node publishes `.zip` only for
@@ -379,4 +383,81 @@ pub(crate) async fn extract_zip<F: Fn(f64) + Send + Sync>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_node_path_matches_the_archive_layout() {
+        let root = Path::new("staging");
+        let expected = if cfg!(windows) {
+            root.join(node_binary())
+        } else {
+            root.join("bin").join(node_binary())
+        };
+        assert_eq!(runtime_node_path(root), expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn extracted_runtime_keeps_the_node_executable_and_passes_health_check() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::os::unix::fs::PermissionsExt;
+        use tar::{Builder, Header};
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let staging = std::env::temp_dir().join(format!(
+            "phl-runtime-health-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        let archive_path = staging.join("node.tar.gz");
+        let encoder = GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            Compression::default(),
+        );
+        let mut archive = Builder::new(encoder);
+        let script = b"#!/bin/sh\nprintf 'v24.21.0\\n'\n";
+        let mut header = Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header
+            .set_path("node-v24.21.0-darwin-arm64/bin/node")
+            .unwrap();
+        header.set_size(script.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, &script[..]).unwrap();
+        archive.finish().unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
+
+        let extracted = staging.join("unpacked");
+        let node = runtime_node_path(&extracted);
+        let result: Result<(), String> = async {
+            crate::versions::extract(
+                &archive_path,
+                &extracted,
+                &|_| {},
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .await?;
+            let mode = std::fs::metadata(&node)
+                .map_err(|e| e.to_string())?
+                .permissions()
+                .mode();
+            if mode & 0o111 == 0 {
+                return Err("tar 解压没有保留 Node 的执行权限".into());
+            }
+            check_runtime_health(&extracted, "24.21.0").await
+        }
+        .await;
+        let cleanup = std::fs::remove_dir_all(&staging);
+
+        cleanup.unwrap();
+        result.expect("extracted node under bin/ passes the health gate");
+    }
 }

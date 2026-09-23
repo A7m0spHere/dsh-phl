@@ -63,6 +63,14 @@ pub struct NodeRuntimeMeta {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SystemNodeInfo {
+    /// The canonical executable path the launch pipeline will use.
+    pub path: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstalledRuntimeInfo {
     /// Directory name under `<root>/runtimes/`, e.g. `node-22`.
     pub name: String,
@@ -137,16 +145,19 @@ pub async fn list_installed_runtimes(
     Ok(out)
 }
 
-/// The version of the system Node — resolved and probed through
+/// The path and version of the system Node — resolved and probed through
 /// `discovery::inspect::resolve_system_node`, the same lookup a launch uses.
 /// One resolution for both is the whole point: a bare `node` means "whatever
 /// PATH resolves", which in an app launched from Finder is nothing at all, so
 /// the page could report a version that no instance would ever run.
 /// Spawned on a blocking thread: this runs a process, not a syscall.
 #[tauri::command]
-pub async fn system_node_version() -> Option<String> {
+pub async fn system_node_version() -> Option<SystemNodeInfo> {
     tokio::task::spawn_blocking(|| {
-        crate::discovery::inspect::resolve_system_node().map(|(_, version)| version)
+        crate::discovery::inspect::resolve_system_node().map(|(path, version)| SystemNodeInfo {
+            path: path.to_string_lossy().into_owned(),
+            version,
+        })
     })
     .await
     .ok()

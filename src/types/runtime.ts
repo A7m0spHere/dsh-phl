@@ -56,5 +56,7 @@ export interface Runtime {
   size: number
   /** Discovered on PATH rather than installed by PHL. */
   system?: boolean
+  /** Canonical executable path for the discovered system Node. */
+  path?: string
   state: RuntimeInstallState
 }

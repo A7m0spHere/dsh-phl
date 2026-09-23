@@ -65,4 +65,16 @@ describe('listRuntimes failure paths', () => {
       ['node-20', 'available'],
     ])
   })
+
+  it('keeps the verified system Node path alongside its version', async () => {
+    mocks.systemNodeVersion.mockResolvedValue({
+      path: '/opt/homebrew/Cellar/node/26.0.0/bin/node',
+      version: '26.0.0',
+    })
+    const runtimes = await tauriRuntimeOverrides.listRuntimes()
+    expect(runtimes.find((r) => r.id === 'node-system')).toMatchObject({
+      version: '26.0.0',
+      path: '/opt/homebrew/Cellar/node/26.0.0/bin/node',
+    })
+  })
 })

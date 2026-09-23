@@ -92,6 +92,23 @@ pub(crate) async fn extract<F: Fn(f64) + Send + Sync>(
                     }
                     let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
                     std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+                    // Preserve only the archive's executable bits. Files are
+                    // created with the process umask's read/write permissions;
+                    // setuid, setgid and sticky bits are never restored.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+
+                        let executable = entry.header().mode().unwrap_or_default() & 0o111;
+                        if executable != 0 {
+                            let mut permissions = std::fs::metadata(&target)
+                                .map_err(|e| e.to_string())?
+                                .permissions();
+                            permissions.set_mode(permissions.mode() | executable);
+                            std::fs::set_permissions(&target, permissions)
+                                .map_err(|e| format!("解压权限写入失败: {e}"))?;
+                        }
+                    }
                 }
                 let progress = if compressed > 0 {
                     (consumed.load(Ordering::Relaxed) as f64 / compressed as f64).min(1.0)

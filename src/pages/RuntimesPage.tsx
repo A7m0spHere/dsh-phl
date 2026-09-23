@@ -134,6 +134,11 @@ export function RuntimesPage() {
                           </>
                         )}
                       </div>
+                      {r.system && r.path && (
+                        <div className="mt-1 truncate font-mono text-xs text-ink-faint" title={r.path}>
+                          {r.path}
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">

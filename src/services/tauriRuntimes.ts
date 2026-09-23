@@ -76,15 +76,16 @@ async function listRuntimes(): Promise<Runtime[]> {
   out.sort((a, b) => b.major - a.major)
 
   if (system) {
-    const major = Number(system.split('.')[0])
+    const major = Number(system.version.split('.')[0])
     out.push({
       id: 'node-system',
       name: '系统 Node',
       major: Number.isFinite(major) ? major : 0,
-      version: system,
+      version: system.version,
       lts: false,
       size: 0,
       system: true,
+      path: system.path,
       state: { kind: 'installed', installedAt: new Date().toISOString() },
     })
   }

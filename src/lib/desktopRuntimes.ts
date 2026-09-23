@@ -44,11 +44,16 @@ export async function listInstalledRuntimes(): Promise<InstalledRuntimeInfo[]> {
   return invoke('list_installed_runtimes', {})
 }
 
-/** `node --version` on PATH, or null when there is no usable answer. */
-export async function systemNodeVersion(): Promise<string | null> {
+/** The verified system Node executable path and version, or null when absent. */
+export interface SystemNodeInfo {
+  path: string
+  version: string
+}
+
+export async function systemNodeVersion(): Promise<SystemNodeInfo | null> {
   if (!isDesktop) return null
   try {
-    return await invoke<string | null>('system_node_version')
+    return await invoke<SystemNodeInfo | null>('system_node_version')
   } catch {
     return null
   }
