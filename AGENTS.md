@@ -93,10 +93,12 @@ macOS 开发链路（2026-09-16 起）：
 `npm run app:dev` 直接跑 Tauri 窗口；`npm run app:build:mac` 打 `.app` + `.dmg`
 （`tauri.conf.json` 的默认 `targets` 仍是 `nsis`，Mac 打包走显式 `--bundles`，
 不改动 Windows 发布行为）。注意三点：
-1. **进程探测**（`launch/probe.rs` 的 `probe_process`）非 Windows 平台用
-   `ps -p <pid> -o state=,pid=,etime=,comm=` 区分「已退出（Exited）」与「存在但身份不明（Unknown）」——
-   僵尸进程算已退出（它已经终止，行还在只是父进程尚未回收）；`stop_permission` 与停止确认循环
-   都依赖这个区分，旧的 `kill -0` 近似会把已退出的进程报成 Unknown，Mac 上的停止/收养全部会被拒。
+1. **进程探测**（`launch/probe.rs` 的 `probe_process`）用 `ps` 区分 Unix 进程活跃、僵尸与退出；
+   macOS 的接管身份另外从内核进程路径和 birth token 获取，不能用 `comm`/argv 名称代替。
+   Apple 当前只通过私有 libproc 接口暴露这两项数据，可能随系统版本变化；任何接口错误、PID
+   不一致或 ABI 长度不符都必须 fail closed：进程保持运行，但 PHL 拒绝接管或停止，且旧登记不接管。
+   macOS CI 的真实子进程探针覆盖同名不同路径、同路径 PID 重用和缺少身份。Linux 与其他 Unix
+   在此 PR 中仍保留原有行为，procfs 身份后端需另行实现并加入对应 Rust CI 后再收紧。
    Unix 的停止按**进程组**进行（`launch/process.rs` 的 `terminate_tree`：先 SIGTERM 整组、
    宽限后 SIGKILL，见 `TERM_GRACE`），仅在该进程自己带一个组（`pgid == pid`）时才发组信号。
    系统 Node 的发现与启动共用 `discovery::inspect::resolve_system_node`（PATH → 平台已知 bin

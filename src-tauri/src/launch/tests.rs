@@ -57,12 +57,14 @@ fn uncertain_or_live_registration_blocks_a_second_launch() {
             port: 3099,
             started_at_ms: 1000,
             exe_path: "node.exe".into(),
+            process_start_token: Some("live-start".into()),
         };
         registry.remember(rec.clone());
         // Covers a durable record that boot could not adopt into memory.
         let err = ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
             state,
             exe_path: Some("node.exe".into()),
+            process_start_token: Some("live-start".into()),
             created_at_ms: Some(1000),
         })
         .unwrap_err();
@@ -105,10 +107,12 @@ fn reused_registration_is_forgotten_without_touching_the_other_process() {
         port: 3099,
         started_at_ms: 1000,
         exe_path: "node.exe".into(),
+        process_start_token: Some("old-start".into()),
     });
     ensure_launch_available(&processes, &registry, "inst", |_| registry::Probe {
         state: ProcessState::Alive,
         exe_path: Some("unrelated.exe".into()),
+        process_start_token: None,
         created_at_ms: Some(2000),
     })
     .unwrap();
@@ -159,6 +163,7 @@ async fn termination_faults_keep_rows_until_exit_is_observed() {
                 port: 3099,
                 started_at_ms: 0,
                 exe_path: "x".into(),
+                process_start_token: None,
             });
             let kill = if kill_ok {
                 Ok(())
@@ -220,6 +225,7 @@ async fn kept_child_exit_clears_rows_and_delivers_one_notification() {
         port: 3099,
         started_at_ms: 0,
         exe_path: "x".into(),
+        process_start_token: None,
     });
     assert!(finish_termination(
         &processes,
@@ -626,6 +632,7 @@ async fn termination_is_forgotten_only_once_exit_is_confirmed() {
         port: 3099,
         started_at_ms: 0,
         exe_path: "x".into(),
+        process_start_token: None,
     });
     terminate_and_forget(
         &processes,
@@ -671,6 +678,7 @@ async fn termination_is_forgotten_only_once_exit_is_confirmed() {
         port: 3100,
         started_at_ms: 0,
         exe_path: "x".into(),
+        process_start_token: None,
     });
     terminate_and_forget(
         &processes,
@@ -718,6 +726,7 @@ async fn a_stop_takes_a_real_tree_down_and_forgets_the_rows() {
         port: 3099,
         started_at_ms: 0,
         exe_path: "x".into(),
+        process_start_token: None,
     });
     assert_eq!(probe_process(pid).state, ProcessState::Alive);
 
@@ -759,6 +768,7 @@ async fn a_stop_of_a_process_that_died_after_the_keep_clears_the_rows() {
         port: 3099,
         started_at_ms: 0,
         exe_path: "x".into(),
+        process_start_token: None,
     });
     // `stop_permission`'s decide() gate accepts a dead pid, and the stop
     // core clears the rows against it.
@@ -798,6 +808,7 @@ fn stop_refuses_a_pid_the_registry_does_not_own() {
         port: 3080,
         started_at_ms: 0,
         exe_path: "C:\\node.exe".into(),
+        process_start_token: None,
     });
     let err = stop_permission(&registry, "inst", std::process::id()).unwrap_err();
     assert!(err.contains("身份无法确认"), "{err}");

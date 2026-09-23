@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// Everything an adoption needs to answer "is this pid still *our* DSH, or
 /// has the OS handed the number to someone else since".
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedProcess {
     pub instance_id: String,
@@ -34,6 +34,9 @@ pub struct PersistedProcess {
     pub started_at_ms: i64,
     /// Canonicalized node binary path, for the identity comparison.
     pub exe_path: String,
+    /// macOS birth token; legacy records fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_token: Option<String>,
 }
 
 /// Query failures are not evidence that a process exited. See `probe.rs` for
@@ -47,13 +50,10 @@ pub enum Adoption {
     Forget { reason: String, keep_running: bool },
 }
 
-/// The ± tolerance between our spawn stamp and the kernel creation time.
-/// Generous enough for a slow first disk, narrow enough to reject a reused
-/// pid (the same exe would have to be relaunched within the window by hand).
+/// Windows process-start tolerance.
 const CREATION_TOLERANCE_MS: i64 = 10 * 60 * 1000;
 
-/// Normalize for comparison: strip the Windows verbatim prefix and case,
-/// unify separators.
+/// Normalize Windows image paths.
 pub(crate) fn normalize_exe(raw: &str) -> String {
     let text = raw
         .strip_prefix(r"\\?\UNC\")
@@ -83,6 +83,18 @@ pub fn decide(rec: &PersistedProcess, probe: &Probe) -> Adoption {
                     reason: "该 PID 已被其他程序复用".into(),
                     keep_running: true,
                 };
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if !super::probe::same_process_start_token(
+                    &rec.process_start_token,
+                    &probe.process_start_token,
+                ) {
+                    return Adoption::Forget {
+                        reason: "PID身份不匹配或缺失".into(),
+                        keep_running: true,
+                    };
+                }
             }
             if let Some(created) = probe.created_at_ms {
                 let delta = (created - rec.started_at_ms).abs();
@@ -355,6 +367,7 @@ mod tests {
             port: 3080,
             started_at_ms: 1_700_000_000_000,
             exe_path: r"C:\PHL\runtimes\node-22\node.exe".into(),
+            process_start_token: Some("test".into()),
         }
     }
 
@@ -362,6 +375,7 @@ mod tests {
         Probe {
             state: ProcessState::Alive,
             exe_path: exe.map(str::to_string),
+            process_start_token: exe.map(|_| "test".into()),
             created_at_ms: created,
         }
     }
@@ -523,6 +537,7 @@ mod tests {
                         port: 3000,
                         started_at_ms: 0,
                         exe_path: "x".into(),
+                        ..Default::default()
                     });
                     r.forget(&id);
                 }
@@ -568,6 +583,7 @@ mod tests {
                         port: 3000,
                         started_at_ms: 0,
                         exe_path: "x".into(),
+                        ..Default::default()
                     });
                 }
             }));
@@ -614,6 +630,7 @@ mod tests {
             port: 3000,
             started_at_ms: 0,
             exe_path: "x".into(),
+            ..Default::default()
         });
 
         // A commits again — must keep B's "other" row on disk.
@@ -623,6 +640,7 @@ mod tests {
             port: 3001,
             started_at_ms: 0,
             exe_path: "x".into(),
+            ..Default::default()
         });
 
         let reloaded = Registry::default();

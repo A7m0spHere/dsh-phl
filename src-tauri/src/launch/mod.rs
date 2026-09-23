@@ -886,7 +886,8 @@ pub(crate) async fn run_launch(
     // Record the executable *as the kernel sees it*: adoption compares against
     // the full image path, which argv is not — argv can hold a bare name, a
     // wrapper or a symlink.
-    let exe_path = probe_process(pid)
+    let identity = probe_process(pid);
+    let exe_path = identity
         .exe_path
         .unwrap_or_else(|| program.to_string_lossy().into_owned());
     processes.set(&instance_id, ProcessEntry { pid, port });
@@ -898,6 +899,7 @@ pub(crate) async fn run_launch(
         port,
         started_at_ms,
         exe_path,
+        process_start_token: identity.process_start_token,
     });
 
     // Readiness is the port answering *and* this boot's own `dsh web:` line —
