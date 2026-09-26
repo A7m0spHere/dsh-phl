@@ -803,6 +803,16 @@ async fn retarget_version_links(
     }
     let mut redirects = 0usize;
     let mut failures = Vec::new();
+    // TEMP-PROBE (remove after CI diagnosis): dump the environment facts the
+    // retarget decision depends on, once per call.
+    #[cfg(test)]
+    eprintln!(
+        "PHL-PROBE retarget home={:?} root={:?} old={old_bare} new={new_bare} temp={:?} canon_home={:?}",
+        home,
+        root,
+        std::env::temp_dir(),
+        std::fs::canonicalize(home).ok()
+    );
     let mut stack = vec![home.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
@@ -825,8 +835,20 @@ async fn retarget_version_links(
             if is_reparse {
                 // Candidate: read where it points.
                 if let Some(target) = read_link_target(&path) {
+                    // TEMP-PROBE (remove after CI diagnosis)
+                    #[cfg(test)]
+                    eprintln!(
+                        "PHL-PROBE link={:?} read_link_target={:?} raw_read_link={:?} canon={:?}",
+                        path,
+                        target,
+                        std::fs::read_link(&path).ok(),
+                        std::fs::canonicalize(&path).ok()
+                    );
                     let versions_prefix = root.join("versions").join(old_bare);
                     if let Some(rel) = strip_prefix_ci(&target, &versions_prefix) {
+                        // TEMP-PROBE (remove after CI diagnosis)
+                        #[cfg(test)]
+                        eprintln!("PHL-PROBE matched prefix, rel={rel:?}");
                         let new_target = root.join("versions").join(new_bare).join(rel);
                         if new_target.exists() {
                             // A junction is a directory reparse point:
