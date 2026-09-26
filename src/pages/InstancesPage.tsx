@@ -320,7 +320,7 @@ export function InstancesPage() {
           }
         >
           {!loaded ? (
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
               {[0, 1, 2, 3].map((i) => (
                 <Skeleton key={i} className="h-[104px]" />
               ))}
@@ -353,7 +353,7 @@ export function InstancesPage() {
               initial="hidden"
               animate="show"
               className={
-                layout === 'grid' ? 'grid grid-cols-1 gap-2.5 lg:grid-cols-2' : 'flex flex-col gap-1.5'
+                layout === 'grid' ? 'grid grid-cols-1 gap-2.5 lg:grid-cols-2 2xl:grid-cols-3' : 'flex flex-col gap-1.5'
               }
             >
               {/* `sync`, not `popLayout`: popLayout lifts an exiting card out of

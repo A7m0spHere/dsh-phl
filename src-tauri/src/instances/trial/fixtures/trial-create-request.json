@@ -1,0 +1,12 @@
+{
+  "_comment": "The create_trial payload as the frontend declares it — read by BOTH sides so the two DTOs cannot drift apart. Keys must stay in step with TrialRequest in src/lib/desktopTrial.ts and src-tauri/src/instances/trial/mod.rs. Tests substitute values for the placeholder tokens per case: the vitest test asserts buildTrialCreateRequest (src/features/trial/trialPlan.ts) produces exactly these keys, and each Rust test fills them and drives the real create entry with the result.",
+  "sourceId": "{{sourceId}}",
+  "targetVersion": "{{targetVersion}}",
+  "targetRuntimeId": "{{targetRuntimeId}}",
+  "name": "review",
+  "scope": "config",
+  "workspace": "fresh",
+  "planId": "{{planId}}",
+  "targetId": "{{targetId}}",
+  "sourceFingerprint": "{{sourceFingerprint}}"
+}

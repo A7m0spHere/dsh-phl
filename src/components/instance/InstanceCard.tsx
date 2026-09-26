@@ -1,15 +1,15 @@
 import { memo } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowUpRight, Loader2, MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
+import { ArrowUpRight, MoreHorizontal, Play, RotateCcw, Square, Star, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { formatRelative } from '@/lib/format'
 import { hueTone } from '@/lib/hue'
 import { useMotion } from '@/lib/motion'
 import { useCatalogStore, useInstanceStore, useIsDark, useUIStore } from '@/stores'
 import { LAUNCH_PHASE_LABEL, type Instance } from '@/types'
-import { Button, Chip, EdgeProgress, IconButton, Menu, Tooltip } from '@/components/ui'
+import { Button, Chip, EdgeProgress, IconButton, Menu, Spinner, Tooltip } from '@/components/ui'
 import { InstanceTile } from './InstanceTile'
-import { StatusPill } from './StatusPill'
+import { STATUS_LABEL, StatusPill } from './StatusPill'
 import { useInstanceActions } from './useInstanceActions'
 
 interface Props {
@@ -27,6 +27,12 @@ interface Props {
  * target* (the dock below always follows this focus), double click starts
  * (or stops) the instance, and the detail page is reached through the
  * explicit 详情 affordance — never as a side effect of aiming.
+ *
+ * Keyboard is the mouse's equal, not an afterthought: the card itself takes
+ * focus (roving into it also moves the launch target), Enter opens the detail
+ * page and Space runs the primary action, so the whole page is usable without
+ * a pointer. The card is a `group` rather than a `button` because it contains
+ * real buttons — nesting them inside a button role would misdescribe it.
  */
 export const InstanceCard = memo(function InstanceCard({ instance, layout = 'grid' }: Props) {
   const state = useInstanceStore((s) => s.states[instance.id]) ?? { status: 'stopped' as const }
@@ -68,8 +74,24 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
       exit="out"
       layout={scale === 0 ? false : 'position'}
       transition={t(0.26)}
+      tabIndex={0}
+      aria-label={`${instance.name}，${STATUS_LABEL[status]}。回车查看详情，空格${primaryLabel}。`}
+      data-card
       onClick={() => setFocus(instance.id)}
+      onFocus={() => setFocus(instance.id)}
       onDoubleClick={primaryAction}
+      onKeyDown={(e) => {
+        // Let the revealed controls keep their own keys; only act when the
+        // card itself holds focus.
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          openDetail()
+        } else if (e.key === ' ') {
+          e.preventDefault()
+          primaryAction()
+        }
+      }}
       whileHover={scale === 0 ? undefined : { y: -2 }}
       className={cn(
         'group/card relative cursor-pointer overflow-hidden rounded-lg bg-surface ring-1 ring-inset transition-[box-shadow,background-color] duration-200 ease-out',
@@ -100,7 +122,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <h3 className="truncate text-base font-medium leading-4 text-ink">{instance.name}</h3>
+            <h3 className="truncate text-md font-medium leading-4 text-ink">{instance.name}</h3>
             {instance.favorite && (
               <Star size={10} className="shrink-0 fill-warn text-warn" aria-label="已置顶" />
             )}
@@ -120,7 +142,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
                   exit="out"
                   className="absolute inset-0 flex items-center gap-1.5 text-sm text-warn"
                 >
-                  <Loader2 size={11} className="shrink-0 animate-spin" />
+                  <Spinner size={11} weight={2.6} />
                   <span className="truncate">{deleting ? '正在删除实例目录…' : '正在克隆到新实例…'}</span>
                 </motion.div>
               ) : busy ? (
@@ -183,7 +205,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
 
         {deleting ? (
           <span className="flex shrink-0 items-center gap-1.5 text-sm text-ink-faint">
-            <Loader2 size={12} className="animate-spin" />
+            <Spinner size={12} weight={2.6} />
             删除中…
           </span>
         ) : (

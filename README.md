@@ -114,10 +114,11 @@ npm run app:dev
 |---|---|
 | `npm run dev` | 浏览器 UI 预览，使用 Mock 数据 |
 | `npm run app:dev` | 启动桌面应用，连接真实 Rust 后端 |
+| `npm run app:build:dev` | 构建可直接运行的调试版，不生成安装包 |
 | `npm run app:build` | 构建 Windows 应用与 NSIS 安装包 |
 | `npm run icon` | 从仓库内母版生成应用图标 |
 
-安装包输出到 `src-tauri/target/release/bundle/nsis/`，也可双击 [`build-app.cmd`](./build-app.cmd) 构建并打开产物目录。浏览器预览不执行真实桌面操作。
+调试版输出到 `src-tauri/target/debug/dsh-phl.exe`；安装包输出到 `src-tauri/target/release/bundle/nsis/`，也可双击 [`build-app.cmd`](./build-app.cmd) 构建并打开产物目录。浏览器预览不执行真实桌面操作。
 
 <details>
 <summary>开发检查与代码导航</summary>

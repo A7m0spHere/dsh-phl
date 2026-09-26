@@ -88,6 +88,16 @@ fn snapshot_dir(dir: &Path, snapshot_id: &str) -> Result<PathBuf, String> {
     Ok(snapshots_root(dir).join(safe))
 }
 
+/// Whether any snapshot of this instance records `runtime_id` (CR-09):
+/// snapshots remember the runtime they were taken under, so a restore
+/// after a runtime deletion must not strand on a phantom reference.
+pub(crate) async fn snapshots_reference_runtime(dir: &Path, runtime_id: &str) -> bool {
+    scan_snapshots(dir)
+        .await
+        .iter()
+        .any(|snap| snap.runtime_id == runtime_id)
+}
+
 pub(crate) fn ensure_not_running(processes: &Processes, id: &str) -> Result<(), String> {
     if processes.0.lock().expect("processes lock").contains_key(id) {
         return Err("实例正在运行，请先停止再进行快照操作".into());

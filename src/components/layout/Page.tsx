@@ -9,6 +9,11 @@ import { Tooltip } from '@/components/ui'
  * Standard page frame: a header that does not scroll, a body that does.
  * Keeping the header fixed means the page title and its primary action stay
  * available no matter how long the list gets.
+ *
+ * The default measure is the *data* width, not a prose width: these are dense
+ * two-column/table pages, and 900px left a third of a 27" monitor as gutter
+ * while squeezing cards into two columns. Prose-heavy screens (settings) pass
+ * a narrower `maxWidth` and grid screens a wider one.
  */
 export function PageShell({
   title,
@@ -17,7 +22,7 @@ export function PageShell({
   toolbar,
   children,
   bodyClassName,
-  maxWidth = 900,
+  maxWidth = 1000,
 }: {
   title: ReactNode
   subtitle?: ReactNode
@@ -103,7 +108,7 @@ export function PageSection({
       {(title || action) && (
         <div className="mb-2 flex items-baseline gap-3">
           <div className="min-w-0">
-            {title && <h2 className="text-base font-medium text-ink">{title}</h2>}
+            {title && <h2 className="text-md font-medium text-ink">{title}</h2>}
             {description && <p className="mt-0.5 text-sm text-ink-faint">{description}</p>}
           </div>
           {action && <div className="ml-auto shrink-0">{action}</div>}

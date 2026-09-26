@@ -21,7 +21,7 @@ import {
 import { cn } from '@/lib/cn'
 import { desktop } from '@/lib/desktop'
 import { useMaximized } from '@/lib/useMaximized'
-import { useMotion } from '@/lib/motion'
+import { CHROME_Z, D, useMotion } from '@/lib/motion'
 import {
   routeTab,
   useInstanceStore,
@@ -79,7 +79,7 @@ export function TitleBar() {
     // app's own overflow-hidden, which clipped 最小化/最大化/关闭 off the screen.
     <header
       data-tauri-drag-region
-      className="drag relative z-30 flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl"
+      className={cn('drag relative flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl', CHROME_Z)}
       style={{ height: 'var(--titlebar-h)' }}
     >
       <div data-tauri-drag-region className="flex shrink-0 items-center gap-1.5 pl-1 pr-1.5">
@@ -203,7 +203,7 @@ export function TitleBar() {
                 initial={{ opacity: 0, rotate: -60, scale: 0.7 }}
                 animate={{ opacity: 1, rotate: 0, scale: 1 }}
                 exit={{ opacity: 0, rotate: 60, scale: 0.7 }}
-                transition={t(0.2)}
+                transition={t(D.base)}
                 className="flex"
               >
                 {isDark ? <Moon size={14} /> : <Sun size={14} />}
@@ -231,7 +231,7 @@ export function TitleBar() {
           <button
             aria-label="关闭"
             onClick={() => (desktop.isDesktop ? void desktop.requestClose() : unavailable())}
-            className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-white"
+            className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-danger-on"
           >
             <X size={14} />
           </button>

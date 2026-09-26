@@ -13,7 +13,7 @@ import { parseThrownError } from '@/lib/errorCodes'
  * refuses writes there and we don't offer it as a target.
  */
 import { useEffect, useState } from 'react'
-import { ArrowRight, Check, Copy, Loader2, X } from 'lucide-react'
+import { ArrowRight, Check, Copy, X } from 'lucide-react'
 import {
   copySessions,
   listSessions,
@@ -232,7 +232,7 @@ export function SessionCopyPanel({
                 key={i.id}
                 onClick={() => setTargets(toggle(targets, i.id))}
                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ring-1 transition-colors ${
-                  on ? 'bg-accent text-white ring-accent' : 'bg-surface text-ink-muted ring-line hover:ring-line-strong'
+                  on ? 'bg-accent text-accent-on ring-accent' : 'bg-surface text-ink-muted ring-line hover:ring-line-strong'
                 }`}
               >
                 {on ? <Check size={11} /> : <ArrowRight size={11} />}
@@ -263,7 +263,7 @@ export function SessionCopyPanel({
           disabled={!selected.size || !targets.size || busy}
           onClick={() => void run()}
         >
-          {busy ? <Loader2 size={12} className="animate-spin" /> : <Copy size={12} />}
+          {busy ? <Spinner size={12} weight={2.6} /> : <Copy size={12} />}
           {busy && progress
             ? `正在复制 ${progress.done}/${progress.total}…`
             : `复制到其他实例（${selected.size}→${targets.size}）`}

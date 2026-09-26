@@ -523,3 +523,28 @@ async fn run_npm_install(
 fn cancelled_flag(flag: &AtomicBool) -> bool {
     flag.load(Ordering::SeqCst)
 }
+
+/// One `npm install` against an arbitrary directory that already carries a
+/// `package.json` (the community-pack profile rebuild). Same fixed argv as
+/// the version pipeline — `--ignore-scripts` is the standing policy, a pack
+/// field never gets to interpolate a shell.
+pub(crate) async fn run_profile_npm_install(
+    node_program: &Path,
+    install_dir: &Path,
+    registry_base: &str,
+    flag: &AtomicBool,
+    on_progress: &(dyn Fn(f64) + Send + Sync),
+) -> Result<(), String> {
+    let npm_cli = find_npm_cli(node_program)
+        .ok_or("未找到 Node 自带的 npm-cli.js，无法安装整合包依赖。请安装一个 Runtime 后重试。")?;
+    on_progress(0.0);
+    run_npm_install(
+        node_program,
+        &npm_cli,
+        install_dir,
+        registry_base,
+        flag,
+        on_progress,
+    )
+    .await
+}

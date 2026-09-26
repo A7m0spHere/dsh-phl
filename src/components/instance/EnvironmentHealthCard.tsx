@@ -8,7 +8,7 @@ import {
   type RemoteVerifyCheck,
   type RemoteVerifyResult,
 } from '@/lib/desktop'
-import { Badge, Button, SectionCard } from '@/components/ui'
+import { Badge, Button, SectionCard, Skeleton } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { useUIStore } from '@/stores'
 
@@ -32,10 +32,15 @@ function StatusIcon({ check }: { check: RemoteVerifyCheck }) {
   return <XCircle className={cn(cls, 'text-danger')} />
 }
 
-/** 缺失的版本 / Runtime 要通过各自页面的安装流程补齐（T-204 的下载一半）。 */
-const NAV_ROUTES: Record<string, { label: string; route: 'versions' | 'runtimes' }> = {
+/** 缺失的版本 / Runtime 要通过各自页面的安装流程补齐（T-204 的下载一半）；
+ *  损坏的整合包导入记录无法在本地重建，只能重新导入原包（R4-01）。 */
+const NAV_ROUTES: Record<
+  string,
+  { label: string; route: 'versions' | 'runtimes' | 'installPack' }
+> = {
   'install-version': { label: '去安装版本', route: 'versions' },
   'install-runtime': { label: '去安装 Runtime', route: 'runtimes' },
+  'reimport-pack': { label: '重新导入整合包', route: 'installPack' },
 }
 
 export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
@@ -122,20 +127,30 @@ export function EnvironmentHealthCard({ instanceId }: { instanceId: string }) {
       }
     >
       {error && (
-        <p className="px-4 py-3 text-sm text-danger">检查失败：{error}</p>
+        <p className="px-3 py-3 text-sm text-danger">检查失败：{error}</p>
       )}
       {repairNote && (
-        <p className="border-b border-line/60 px-4 py-2 text-sm text-ink-muted">{repairNote}</p>
+        <p className="border-b border-line/60 px-3 py-2 text-sm text-ink-muted">{repairNote}</p>
       )}
       {!error && !report && (
-        <p className="px-4 py-3 text-sm text-ink-faint">正在读取实例环境…</p>
+        // Rows-in-the-making, not a sentence: a text flash settles into the
+        // same rhythm the finished list has, so the result doesn't jump.
+        <ul aria-hidden>
+          {[0, 1, 2, 3].map((i) => (
+            <li key={i} className="flex items-center gap-2.5 px-3 py-[9px]">
+              <Skeleton className="h-[14px] w-[14px] shrink-0 rounded-full" />
+              <Skeleton className="h-[13px] flex-1" />
+              <Skeleton className="h-[11px] w-12 shrink-0" />
+            </li>
+          ))}
+        </ul>
       )}
       {report && (
         <ul>
           {report.checks.map((check) => (
             <li
               key={check.id}
-              className="flex items-start gap-2.5 px-4 py-[7px] transition-colors hover:bg-surface-hover/60"
+              className="flex items-start gap-2.5 px-3 py-[7px] transition-colors hover:bg-surface-hover/60"
             >
               <span className="mt-[3px]">
                 <StatusIcon check={check} />

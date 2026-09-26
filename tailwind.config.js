@@ -34,8 +34,15 @@ export default {
         },
         ok: withOpacity('--c-ok'),
         warn: withOpacity('--c-warn'),
-        danger: withOpacity('--c-danger'),
+        danger: {
+          DEFAULT: withOpacity('--c-danger'),
+          on: withOpacity('--c-danger-on'),
+        },
         info: withOpacity('--c-info'),
+        // travelling highlight on buttons/progress — inverts with the theme
+        sheen: withOpacity('--c-sheen'),
+        // switch thumb: a physical knob, light in both themes
+        knob: withOpacity('--c-knob'),
       },
       borderRadius: {
         xs: '3px',
@@ -60,6 +67,11 @@ export default {
         ],
         mono: ['JetBrains Mono', 'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'monospace'],
       },
+      // Roles, not just sizes. `sm` (11.5) carries metadata and `base` (12.5)
+      // carries body copy — one pixel apart, so the two read as "the same size,
+      // slightly off" rather than as a hierarchy. Block titles therefore take
+      // `md` (13.5): a deliberate 2px step above the meta they sit over, which
+      // is what makes a card's name scan before its environment line.
       fontSize: {
         '2xs': ['10px', { lineHeight: '13px', letterSpacing: '0.02em' }],
         xs: ['11px', { lineHeight: '15px' }],

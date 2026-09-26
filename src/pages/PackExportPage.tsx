@@ -1,6 +1,6 @@
 import { parseThrownError } from '@/lib/errorCodes'
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, ArrowLeft, Check, Download, Loader2, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Check, Download, ShieldCheck } from 'lucide-react'
 import {
   choosePackSavePath,
   exportInstancePack,
@@ -10,7 +10,7 @@ import {
 } from '@/lib/desktop'
 import { isDesktop } from '@/lib/desktopCore'
 import { useUIStore } from '@/stores'
-import { Badge, Button, Card, Checkbox, EmptyState, ProgressBar, SectionCard, Skeleton } from '@/components/ui'
+import { Badge, Button, Card, Checkbox, EmptyState, ProgressBar, SectionCard, Skeleton, Spinner } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 
 /**
@@ -215,7 +215,7 @@ export function PackExportPage({ id }: { id: string }) {
               </Button>
             )}
             <Button variant="primary" disabled={working} onClick={() => void startExport()}>
-              {working ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+              {working ? <Spinner size={13} /> : <Check size={13} />}
               导出为 .phlpack
             </Button>
           </div>

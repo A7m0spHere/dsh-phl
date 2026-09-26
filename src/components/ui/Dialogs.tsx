@@ -143,7 +143,7 @@ export function DialogHost() {
                   </span>
                 )}
                 <div className="min-w-0 flex-1">
-                  <h2 id="phl-dialog-title" className="text-base font-medium text-ink">
+                  <h2 id="phl-dialog-title" className="text-md font-medium text-ink">
                     {dialog.spec.title}
                   </h2>
                   {dialog.kind === 'confirm' && (

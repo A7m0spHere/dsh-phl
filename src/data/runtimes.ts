@@ -2,7 +2,7 @@ import type { Runtime } from '@/types'
 
 export const runtimeSeed: Runtime[] = [
   {
-    id: 'node-24',
+    id: 'node-24.4.1',
     name: 'Node 24',
     major: 24,
     version: '24.4.1',
@@ -11,7 +11,7 @@ export const runtimeSeed: Runtime[] = [
     state: { kind: 'available' },
   },
   {
-    id: 'node-22',
+    id: 'node-22.11.0',
     name: 'Node 22',
     major: 22,
     version: '22.11.0',
@@ -21,7 +21,7 @@ export const runtimeSeed: Runtime[] = [
     state: { kind: 'available' },
   },
   {
-    id: 'node-20',
+    id: 'node-20.18.1',
     name: 'Node 20',
     major: 20,
     version: '20.18.1',
@@ -31,7 +31,7 @@ export const runtimeSeed: Runtime[] = [
     state: { kind: 'available' },
   },
   {
-    id: 'node-18',
+    id: 'node-18.20.5',
     name: 'Node 18',
     major: 18,
     version: '18.20.5',

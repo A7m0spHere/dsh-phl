@@ -3,6 +3,7 @@ import { tauriVersionOverrides } from './tauriVersions'
 import { tauriPluginOverrides } from './tauriPlugins'
 import { tauriInstanceOverrides } from './tauriInstances'
 import { tauriRuntimeOverrides } from './tauriRuntimes'
+import { tauriEnvironmentOverrides } from './tauriEnvironment'
 import { tauriLaunchOverrides } from './tauriLaunches'
 import type { PhlRepository } from './repository'
 
@@ -30,6 +31,7 @@ export const tauriRepository: PhlRepository = {
   ...tauriPluginOverrides,
   ...tauriInstanceOverrides,
   ...tauriRuntimeOverrides,
+  ...tauriEnvironmentOverrides,
   ...tauriLaunchOverrides,
   // Shared static demo data (roadmap: retire with a template backend).
   listTemplates: () => mockRepository.listTemplates(),

@@ -28,11 +28,15 @@ export const MOTION_SCALE: Record<MotionLevel, number> = {
  * desktop tool should never make you wait for its own chrome.
  */
 export const D = {
+  /** Press feedback — must land inside the click, not after it. */
+  press: 0.09,
   micro: 0.12,
   fast: 0.16,
   base: 0.22,
   page: 0.26,
   slow: 0.36,
+  /** The travelling sheen sweep — long, ambient, only on hero/primary chrome. */
+  sheen: 0.65,
 } as const
 
 export function useMotionScale(): number {
@@ -45,7 +49,15 @@ export interface MotionKit {
   t: (duration?: number, delay?: number, ease?: Cubic) => Transition
   spring: Transition
   springSoft: Transition
-  /** Page-level enter/exit. `custom` is the navigation direction (1 fwd, -1 back). */
+  /**
+   * Motion-safe value: returns `v` while motion is on, `off` when the user
+   * turned it off. Collapses the `scale === 0 ? off : v` ternary that used to
+   * be retyped at every call site.
+   */
+  v: <T>(v: T, off: T) => T
+  /** Motion-safe translate distance in px: 0 when motion is off. */
+  shift: (px: number) => number
+  /** Page-level enter/exit. `custom` is the navigation direction (1 fwd, -1 back, 0 lateral cross-fade). */
   page: Variants
   /** Container that reveals its children in sequence. */
   stagger: (step?: number, delay?: number) => Variants
@@ -67,15 +79,25 @@ export function useMotion(): MotionKit {
 
     const spring: Transition = scale === 0 ? { duration: 0 } : SPRING
     const springSoft: Transition = scale === 0 ? { duration: 0 } : SPRING_SOFT
+    const v = <T,>(value: T, off: T): T => (scale === 0 ? off : value)
+    const shift = (px: number): number => (scale === 0 ? 0 : px)
 
-    const shift = scale === 0 ? 0 : 22
+    const pageShift = shift(22)
 
+    /**
+     * The one page variant. `custom` is the direction from the nav store:
+     * 1 = drill-in (list → detail), -1 = back, 0 = lateral (a title-bar tab
+     * switch). Zero is not a degenerate case — it means the two screens are
+     * peers, so it cross-fades with the same blur and no travel at all; only
+     * an actual journey moves. One variant covers both, because a tab switch
+     * and a drill-in must not be told apart by remembering two code paths.
+     */
     const page: Variants = {
-      enter: (dir: number = 1) => ({ opacity: 0, x: dir * shift, filter: 'blur(1px)' }),
+      enter: (dir: number = 1) => ({ opacity: 0, x: dir * pageShift, filter: 'blur(1px)' }),
       center: { opacity: 1, x: 0, filter: 'blur(0px)', transition: t(D.page) },
       exit: (dir: number = 1) => ({
         opacity: 0,
-        x: dir * -shift * 0.6,
+        x: dir * -pageShift * 0.6,
         filter: 'blur(1px)',
         transition: t(D.fast),
       }),
@@ -92,21 +114,21 @@ export function useMotion(): MotionKit {
     })
 
     const riseItem: Variants = {
-      hidden: { opacity: 0, y: scale === 0 ? 0 : 10 },
+      hidden: { opacity: 0, y: shift(10) },
       show: { opacity: 1, y: 0, transition: t(D.base) },
-      out: { opacity: 0, y: scale === 0 ? 0 : -6, transition: t(D.micro) },
+      out: { opacity: 0, y: shift(-6), transition: t(D.micro) },
     }
 
     const pop: Variants = {
-      hidden: { opacity: 0, y: scale === 0 ? 0 : 10, scale: scale === 0 ? 1 : 0.97 },
+      hidden: { opacity: 0, y: shift(10), scale: v(0.97, 1) },
       show: { opacity: 1, y: 0, scale: 1, transition: t(D.base) },
-      out: { opacity: 0, y: scale === 0 ? 0 : 6, scale: scale === 0 ? 1 : 0.98, transition: t(D.fast) },
+      out: { opacity: 0, y: shift(6), scale: v(0.98, 1), transition: t(D.fast) },
     }
 
     const swap: Variants = {
-      hidden: { opacity: 0, y: scale === 0 ? 0 : 5 },
+      hidden: { opacity: 0, y: shift(5) },
       show: { opacity: 1, y: 0, transition: t(D.fast) },
-      out: { opacity: 0, y: scale === 0 ? 0 : -4, transition: t(D.micro) },
+      out: { opacity: 0, y: shift(-4), transition: t(D.micro) },
     }
 
     const overlay: Variants = {
@@ -115,7 +137,20 @@ export function useMotion(): MotionKit {
       out: { opacity: 0, transition: t(D.fast) },
     }
 
-    return { scale, t, spring, springSoft, page, stagger, riseItem, pop, swap, overlay }
+    return {
+      scale,
+      t,
+      v,
+      shift,
+      spring,
+      springSoft,
+      page,
+      stagger,
+      riseItem,
+      pop,
+      swap,
+      overlay,
+    }
   }, [scale])
 }
 
@@ -131,12 +166,22 @@ export const MODAL_SCRIM = 'absolute inset-0 bg-canvas/60 backdrop-blur-[2px]'
 /* ------------------------------ overlay layers ----------------------------- *
  * The global stacking ladder, lowest → highest. Every overlay references a
  * token from here instead of a raw z-[..], so the relative order lives in
- * exactly one place: menus under toasts under modals, and tooltips — which
- * can be opened from inside any of the others — above everything. (Tooltips
- * once shared the modal level and only out-stacked it by DOM append order —
- * an accident, not a rule; 2026-09-12 review.)
+ * exactly one place: page-local scrims and menus under toasts under modals,
+ * and tooltips — which can be opened from inside any of the others — above
+ * everything. (Tooltips once shared the modal level and only out-stacked it by
+ * DOM append order — an accident, not a rule; 2026-09-12 review. The raw
+ * z-10/20/30/40/50 values that had grown up beside it were pulled in here so
+ * "who is on top" is one readable list instead of a grep.)
  */
-/** Anchored dropdown panels (the Menu). */
+/** Page-local sticky bars, cleared by their own scrolling content. */
+export const STICKY_Z = 'z-10'
+/** The launch dock pinned to the shell, under the page it serves. */
+export const DOCK_Z = 'z-20'
+/** The title bar: above the dock, below every overlay it can open. */
+export const CHROME_Z = 'z-30'
+/** In-page scrims and progress covers — above their page, below app chrome. */
+export const LOCAL_OVERLAY_Z = 'z-40'
+/** Anchored dropdown panels (the Menu, the task centre, custom selects). */
 export const MENU_Z = 'z-[60]'
 /** The toast stack under the title bar. */
 export const TOAST_Z = 'z-[70]'

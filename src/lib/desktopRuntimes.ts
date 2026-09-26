@@ -12,7 +12,7 @@ import { isDesktop } from './desktopCore'
  * unchanged.
  */
 
-/** Mirrors the Rust `NodeRuntimeMeta` — one line per Node major. */
+/** Mirrors the Rust `NodeRuntimeMeta` — rows carry precise install ids. */
 export interface RemoteRuntimeMeta {
   id: string
   major: number
@@ -25,6 +25,11 @@ export interface InstalledRuntimeInfo {
   name: string
   installedAt: string
   version: string
+  /** Recorded by precise installs; legacy markers carry none. */
+  platform?: string | null
+  arch?: string | null
+  /** True when the directory name is a legacy major id (`node-<major>`). */
+  legacy?: boolean
 }
 
 /**
@@ -93,4 +98,70 @@ export async function removeRuntimeDir(runtimeName: string): Promise<void> {
 export async function runtimesDiskUsage(): Promise<Record<string, number>> {
   if (!isDesktop) return {}
   return invoke('runtimes_disk_usage', {})
+}
+
+/* ------------------- precise bindings (R1 · M1) ------------------- */
+
+/** Mirrors the Rust `NodeRuntimeMeta` rows for one major line, newest first. */
+export async function listNodeRuntimeVersions(
+  distBase: string,
+  major: number,
+): Promise<RemoteRuntimeMeta[]> {
+  if (!isDesktop) return []
+  return invoke('list_node_runtime_versions', { distBase, major })
+}
+
+export interface RuntimeConversionPreview {
+  instanceId: string
+  legacyId: string
+  legacyMajor: number
+  recordedVersion: string | null
+  binaryVersion: string | null
+  targetId: string
+  targetInstalled: boolean
+  blockedReason: string | null
+}
+
+export interface RuntimeConversionOutcome {
+  instanceId: string
+  runtimeId: string
+}
+
+/** Read-only: what converting this instance's legacy binding would do. */
+export async function previewRuntimeConversion(
+  instanceId: string,
+): Promise<RuntimeConversionPreview | null> {
+  if (!isDesktop) return null
+  return invoke('preview_runtime_conversion', { instanceId })
+}
+
+export interface ConvertRuntimeBindingArgs {
+  transferId: string
+  instanceId: string
+  distBase: string
+  keepArchive: boolean
+  onProgress: (event: {
+    stage: 'downloading' | 'extracting' | 'verifying' | 'checking' | 'committing'
+    progress?: number
+    bytesDone?: number
+    bytesPerSec?: number
+  }) => void
+}
+
+/**
+ * Converts one instance's legacy `node-<major>` binding into a precise one.
+ * Cancellable through the shared transfer registry; the manifest flip is the
+ * commit point, so a cancel before it leaves the old binding intact.
+ */
+export async function convertRuntimeBinding(args: ConvertRuntimeBindingArgs): Promise<RuntimeConversionOutcome> {
+  if (!isDesktop) throw new Error('Runtime 绑定转换仅在桌面端可用')
+  const channel = new Channel<Parameters<ConvertRuntimeBindingArgs['onProgress']>[0]>()
+  channel.onmessage = args.onProgress
+  return invoke('convert_runtime_binding', {
+    transferId: args.transferId,
+    instanceId: args.instanceId,
+    distBase: args.distBase,
+    keepArchive: args.keepArchive,
+    onProgress: channel,
+  })
 }

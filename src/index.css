@@ -37,11 +37,23 @@
     --c-info: 212 78% 50%;
 
     --c-accent-on: 0 0% 100%;
+    /* text/icons sitting on a solid danger fill (close hover, danger pill) */
+    --c-danger-on: 0 0% 100%;
+    /* the travelling highlight on buttons/progress: white glint on light,
+       ink-level glint on dark so it stays visible instead of washing out */
+    --c-sheen: 0 0% 100%;
+    /* the switch thumb — a physical knob, so it stays light in both themes
+       (it rides a coloured/accent track, never the page surface) */
+    --c-knob: 0 0% 100%;
 
     /* motion */
     --motion: 1;
     --e-out: cubic-bezier(0.22, 0.61, 0.36, 1);
     --e-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    /* Durations that CSS owns (the sheen sweep). JS-driven motion reads the
+       mirrored scale in lib/motion.ts `D`; keeping the one CSS value here
+       stops the number being retyped as a Tailwind arbitrary value. */
+    --d-sheen: 650ms;
 
     /* layout metrics — tuned for information density: this is a developer
        tool that lives on screen all day, not a marketing page. */
@@ -76,6 +88,12 @@
     --c-warn: 36 90% 56%;
     --c-danger: 356 72% 60%;
     --c-info: 210 84% 62%;
+
+    /* Dark accents are pastel-light, so a white glint washes out: the sheen
+       and the "on-danger" ink both flip to near-black here. */
+    --c-danger-on: 356 60% 8%;
+    --c-sheen: 224 40% 6%;
+    --c-knob: 224 20% 96%;
 
     color-scheme: dark;
   }
@@ -324,6 +342,24 @@
       transparent 6px 12px
     );
   }
+
+  /* The travelling glint on primary buttons and active progress bars. Moved
+     off `via-white/*` so dark themes get a visible ink-toned sweep instead of
+     a wash, and so the duration has one home. */
+  .sheen {
+    background-image: linear-gradient(
+      to right,
+      transparent,
+      hsl(var(--c-sheen) / var(--sheen-alpha, 0.22)),
+      transparent
+    );
+  }
+}
+
+/* The in-app animation level scales CSS-owned motion too, so 「精简」 trims the
+   sheen as well as the JS tweens (lib/motion.ts MOTION_SCALE). */
+[data-motion='reduced'] {
+  --d-sheen: 358ms;
 }
 
 /* The in-app "动画：关闭" (uiStore.setMotion → data-motion="off") neutralises

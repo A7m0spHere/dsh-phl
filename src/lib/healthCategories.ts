@@ -36,6 +36,8 @@ export const REPAIR_ACTION_LABEL: Record<string, string> = {
   'install-version': '安装 DSH 版本',
   'reinstall-version': '重装 DSH 版本',
   'install-runtime': '安装 Runtime',
+  'prepare-pack-dependencies': '重试整合包依赖安装',
+  'reimport-pack': '重新导入整合包',
   'reinstall-runtime': '重装 Runtime',
 }
 

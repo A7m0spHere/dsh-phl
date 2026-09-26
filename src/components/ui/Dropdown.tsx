@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Check, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { MENU_Z, useMotion } from '@/lib/motion'
 
 export interface DropdownOption<T extends string = string> {
   value: T
@@ -139,7 +139,8 @@ export function Dropdown<T extends string>({
             transition={t(0.14)}
             style={{ transformOrigin: dropUp ? 'bottom left' : 'top left' }}
             className={cn(
-              'absolute z-50 max-h-72 min-w-full overflow-y-auto overscroll-contain rounded-lg bg-surface-raised p-1 shadow-pop ring-1 ring-inset ring-line',
+              MENU_Z,
+              'absolute max-h-72 min-w-full overflow-y-auto overscroll-contain rounded-lg bg-surface-raised p-1 shadow-pop ring-1 ring-inset ring-line',
               dropUp ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
               align === 'end' ? 'right-0' : 'left-0',
               listClassName,

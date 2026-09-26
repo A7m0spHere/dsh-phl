@@ -40,7 +40,7 @@ pub(crate) use registry::{
 
 pub(crate) use process::{
     allocate_port, build_command, kill_tree, log_tail, node_binary, read_web_url_once,
-    resolve_node, CREATE_NO_WINDOW,
+    resolve_node, runtime_bin_dir, CREATE_NO_WINDOW,
 };
 #[cfg(test)]
 pub(crate) use process::{
@@ -746,6 +746,12 @@ pub(crate) async fn run_launch(
         Some(m) => crate::instances::home_of(&instance_dir, m),
         None => instance_dir.join("dsh-home"),
     };
+    // Launch gate for community imports (CR-06/D17, R3-03): a pending
+    // dependency install AND a damaged/missing import record both refuse the
+    // boot — the retry lives in the instance detail, not in a degraded launch.
+    if let Some(m) = &manifest {
+        import_launch_gate(&instance_dir, m).await?;
+    }
     let workspace = instance_dir.join("workspace");
     for dir in [dsh_home.join("profiles").join(&profile), workspace.clone()] {
         tokio::fs::create_dir_all(&dir)
@@ -1078,6 +1084,25 @@ fn watch_child_process<R: tauri::Runtime>(
         );
     }));
 }
+
+/// The community-import launch gate (CR-06/D17, R3-03), factored out so the
+/// refusal is testable without spawning anything: it reads the same
+/// `ImportState` the instance list, the detail record, verify and the
+/// dependency retry read, and refuses for a pending install *and* for a
+/// record that is missing, unreadable or unrecognisable.
+pub(crate) async fn import_launch_gate(
+    instance_dir: &Path,
+    manifest: &crate::instances::InstanceManifest,
+) -> Result<(), String> {
+    let state = crate::instances::read_import_state(instance_dir, Some(manifest)).await;
+    match state.launch_refusal(&manifest.name) {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod import_gate_tests;
 
 /// Scan a launch log for the `dsh web:` line and lift the URL out of it.
 #[cfg(test)]

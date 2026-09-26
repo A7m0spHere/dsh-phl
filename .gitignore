@@ -28,6 +28,12 @@ src-tauri/gen/schemas/
 # Local scratch: throwaway scripts & screenshots
 .scratch/
 
+# Acceptance evidence keeps its documents, hashes, screenshots and tooling in
+# git, but not the installers beside them: they are copies of published,
+# re-downloadable artifacts and would add ~36 MB to a history that is never
+# published. `git add -f` one if a run ever needs the exact bytes in the tree.
+internal/**/*.exe
+
 # Third-party icon references downloaded for visual comparison only —
 # never commit or ship these (see AGENTS.md "代码来源边界").
 tmp-refs/
@@ -36,13 +42,11 @@ tmp-refs/
 # of it with scripts/icon-lab.mjs; only the master and the snapshots are kept.
 src-tauri/icons/candidates/
 
-# ── Publication boundary (2026-09-12) ─────────────────────────────────────
-# This copy is the PUBLIC tree: code, build config and tests only. All local
-# planning, review, acceptance and ops notes live in the workspace's
-# internal/ directory (D:\AI项目\dsh-phl\internal) and must never be tracked
-# here — the 2026-09-12 reconciliation fast-forwarded this copy to the
-# workspace line and published them silently. The single rule below mirrors
-# BOUNDARY in scripts/check-public-boundary.mjs; change both together.
+# ── Publication boundary (2026-09-12, kept 2026-09-27) ────────────────
+# This copy is the PUBLIC tree: code, build config and tests only. Local
+# planning, review, acceptance and ops notes live in the workspace internal/
+# tree and must never be tracked here. Single rule mirrors BOUNDARY in
+# scripts/check-public-boundary.mjs; change both together.
 internal/
 # Root compat pointer to AGENTS.md — local workspace only.
 CLAUDE.md

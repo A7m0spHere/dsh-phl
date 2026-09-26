@@ -126,6 +126,34 @@ pub(crate) async fn verify_instance_inner(root: &Path, id: &str) -> Result<Verif
 
     checks.extend(check_dsh(root, &manifest).await);
     checks.extend(check_runtime(root, &manifest).await);
+    // Community-import readiness (CR-06, R3-03): pending dependencies are a
+    // real, repairable broken state. A MISSING or DAMAGED record is broken for
+    // the same reason (the instance cannot prove its dependencies are
+    // installed) but is NOT repairable in place: the plan the record carried
+    // is exactly what is gone, so the honest next step is a re-import (R4-01).
+    match crate::instances::read_import_state(&dir, Some(&manifest)).await {
+        crate::instances::ImportState::Pending => checks.push(VerifyCheck::fail(
+            "pack-dependencies",
+            "runtime",
+            "整合包依赖尚未安装完成，实例处于待补依赖状态".into(),
+            true,
+            Some("prepare-pack-dependencies"),
+        )),
+        crate::instances::ImportState::Corrupt(reason) => checks.push(VerifyCheck::fail(
+            "pack-dependencies",
+            "runtime",
+            format!(
+                "社区整合包导入记录不可用（{reason}）：无法确认依赖是否装好，启动会被拒绝；\
+                 该记录无法在本地重建，请重新导入原整合包"
+            ),
+            // `repairable` here means "the health card may offer a next step".
+            // The step is a navigation, never an in-place repair — promising
+            // the latter is what R4-01 caught.
+            true,
+            Some("reimport-pack"),
+        )),
+        _ => {}
+    }
     checks.extend(check_config(&dir, &manifest).await);
     checks.extend(check_plugins(&dir, &manifest).await);
     checks.extend(check_api(root, &manifest).await);
@@ -248,6 +276,32 @@ async fn check_runtime(
         "runtime",
         format!("Runtime {} 已安装（v{recorded}）", manifest.runtime_id),
     ));
+
+    // A marker recorded on another machine (or by a moved tree) must not read
+    // as healthy: the binary may not even be runnable on this host. Legacy
+    // markers carry no platform fields — "cannot verify", not "mismatch".
+    if let Some(marker) = crate::runtimes::runtime_marker(&dir) {
+        let (host_os, host_arch) = crate::runtimes::host_platform_arch();
+        let mismatch = marker
+            .platform
+            .as_deref()
+            .zip(marker.arch.as_deref())
+            .is_some_and(|(p, a)| p != host_os || a != host_arch);
+        if mismatch {
+            let (p, a) = (
+                marker.platform.unwrap_or_default(),
+                marker.arch.unwrap_or_default(),
+            );
+            out.push(VerifyCheck::fail(
+                "runtime-platform",
+                "runtime",
+                format!("Runtime 标记的平台 {p}-{a} 与本机 {host_os}-{host_arch} 不符"),
+                true,
+                Some("reinstall-runtime"),
+            ));
+            return out;
+        }
+    }
 
     // The binary must exist *and* run, and report exactly the recorded
     // version — the same gate the runtime installer enforces before a swap.
@@ -622,6 +676,51 @@ mod tests {
         assert_eq!(dsh.status, "fail");
         assert!(dsh.repairable);
         assert_eq!(dsh.repair_action.as_deref(), Some("install-version"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R3-03: a damaged community-import record is a failing, repairable check
+    /// — verify reads the same state the launch gate refuses on, so the detail
+    /// page can never call an instance healthy while a boot would be refused.
+    #[tokio::test]
+    async fn a_damaged_import_record_fails_the_pack_check() {
+        let root = temp_root("import-record");
+        let id = "import-01";
+        let mut m = manifest(id, "Imported");
+        m.port = 34474;
+        m.runtime_id = "node-system".into();
+        m.management_mode = crate::instances::ManagementMode::PackInstalled;
+        m.source = crate::instances::InstanceSource::Phlpack;
+        m.adopted_from = Some(crate::instances::AdoptedFrom {
+            dsh_home: "dspack:review@1".into(),
+            detected_version: Some("0.1.0".into()),
+            adopted_at: crate::versions::now_iso(),
+            mode: "community-import".into(),
+        });
+        create_instance_inner(&root, m).await.unwrap();
+        let dir = crate::instances::instance_dir(&root, id).unwrap();
+        std::fs::write(dir.join("phl-import.json"), "{broken").unwrap();
+
+        let result = verify_instance_inner(&root, id).await.unwrap();
+        let pack = check(&result, "pack-dependencies");
+        assert_eq!(pack.status, "fail");
+        assert_eq!(
+            pack.repair_action.as_deref(),
+            Some("reimport-pack"),
+            "a damaged record cannot be rebuilt in place: the next step is a re-import (R4-01)"
+        );
+        assert!(pack.message.contains("导入记录"), "{}", pack.message);
+        assert!(
+            pack.message.contains("重新导入"),
+            "the message must name the real next step: {}",
+            pack.message
+        );
+
+        // Deleting the record must not turn the same instance healthy either.
+        std::fs::remove_file(dir.join("phl-import.json")).unwrap();
+        let result = verify_instance_inner(&root, id).await.unwrap();
+        assert_eq!(check(&result, "pack-dependencies").status, "fail");
 
         let _ = std::fs::remove_dir_all(&root);
     }

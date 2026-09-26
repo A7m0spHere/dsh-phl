@@ -31,7 +31,9 @@ pub(crate) struct MajorLine {
 }
 
 /// Collapses the per-release index into one entry per major: the newest
-/// release in the line, its LTS status, and its codename.
+/// release in the line, its LTS status, and its codename. The id is the
+/// *precise* install id (`node-<full semver>`) so installing a catalog row
+/// binds the exact object — major-grouped display is the frontend's job.
 pub(crate) fn group_catalog(entries: Vec<DistEntry>) -> Vec<NodeRuntimeMeta> {
     let mut lines: Vec<MajorLine> = Vec::new();
     for entry in entries {
@@ -59,7 +61,40 @@ pub(crate) fn group_catalog(entries: Vec<DistEntry>) -> Vec<NodeRuntimeMeta> {
         .enumerate()
         .filter(|(rank, l)| l.codename.is_some() || *rank < 2)
         .map(|(_, l)| NodeRuntimeMeta {
-            id: format!("node-{}", l.major),
+            id: format!("node-{}", l.version),
+            major: l.major,
+            version: l.version,
+            lts: l.codename.is_some(),
+            codename: l.codename,
+        })
+        .collect()
+}
+
+/// Every release of one major line, newest first — the "other patch versions"
+/// expander. Unlike the collapsed catalog this is not filtered to LTS lines:
+/// a user pinning an older patch of an installed major needs the full list.
+pub(crate) fn collect_major_versions(entries: Vec<DistEntry>, major: u64) -> Vec<NodeRuntimeMeta> {
+    let mut lines: Vec<MajorLine> = Vec::new();
+    for entry in entries {
+        let version = entry.version.trim_start_matches('v').to_string();
+        let Some(semver) = parse_semver(&version) else {
+            continue;
+        };
+        if semver.major != major {
+            continue;
+        }
+        lines.push(MajorLine {
+            major,
+            version,
+            codename: entry.lts,
+            semver,
+        });
+    }
+    lines.sort_by(|a, b| b.semver.cmp(&a.semver));
+    lines
+        .into_iter()
+        .map(|l| NodeRuntimeMeta {
+            id: format!("node-{}", l.version),
             major: l.major,
             version: l.version,
             lts: l.codename.is_some(),

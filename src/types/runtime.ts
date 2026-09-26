@@ -35,6 +35,13 @@ export const isRuntimeBusyKind = (kind: RuntimeInstallState['kind']) =>
 
 export const isRuntimeBusy = (r: Runtime) => isRuntimeBusyKind(r.state.kind)
 
+/**
+ * A legacy install/binding id: `node-<digits>` only. Precise ids
+ * (`node-22.12.0`) and `node-system` are not legacy. Mirrors the Rust
+ * `legacy_major_id` so UI affordances and backend rules agree.
+ */
+export const isLegacyRuntimeId = (id: string) => /^node-\d+$/.test(id)
+
 /** See `isVersionInstallable` — the wizard's mirrored rule for runtimes. */
 export const isRuntimeInstallable = (r: Runtime) =>
   r.state.kind === 'available' || r.state.kind === 'failed'
@@ -56,5 +63,14 @@ export interface Runtime {
   size: number
   /** Discovered on PATH rather than installed by PHL. */
   system?: boolean
+  /**
+   * True for legacy install directories named `node-<major>`: they predate
+   * precise bindings. Such rows still launch, and an instance bound to one
+   * can convert to a precise runtime (see `previewRuntimeConversion`).
+   */
+  legacy?: boolean
+  /** Recorded by precise installs; legacy rows carry none. */
+  platform?: string | null
+  arch?: string | null
   state: RuntimeInstallState
 }

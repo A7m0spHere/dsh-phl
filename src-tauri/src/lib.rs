@@ -3,12 +3,15 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, WindowEvent};
 
 mod api_config;
+mod community_pack;
 mod credentials;
 mod diagnostics;
 mod discovery;
+mod environment;
 mod errors;
 mod instances;
 mod launch;
+mod operations;
 mod pack;
 mod paths;
 mod plugins;
@@ -32,6 +35,12 @@ mod ipc_contract;
 /// release_e2e`; the scenario map lives in maintainer-local gate docs.
 #[cfg(all(test, windows))]
 mod release_e2e;
+
+/// Opt-in acceptance against the real upstream (npm registry + real DSH
+/// servers). Outside the gate on purpose: see the module docs for the
+///  switch.
+#[cfg(all(test, windows))]
+mod acceptance;
 
 /// Emitted when the OS (or the custom title bar) asks the window to close.
 /// The frontend answers with its own confirmation dialog instead of letting
@@ -279,8 +288,20 @@ macro_rules! phl_command_handler {
             pack::export::export_instance_pack,
             pack::install::preview_pack,
             pack::install::install_pack,
+            operations::list_operations,
+            operations::export_operation_report,
+            community_pack::install::preview_community_pack,
+            community_pack::install::install_community_pack,
+            community_pack::install::prepare_pack_dependencies,
+            instances::trial::preview_trial,
+            instances::trial::create_trial,
+            environment::inspect_environment,
+            environment::compare_environments,
             runtimes::list_node_runtimes,
+            runtimes::list_node_runtime_versions,
             runtimes::list_installed_runtimes,
+            runtimes::convert::preview_runtime_conversion,
+            runtimes::convert::convert_runtime_binding,
             runtimes::system_node_version,
             runtimes::download_node_runtime,
             runtimes::remove_runtime_dir,
@@ -358,6 +379,18 @@ pub fn run() {
                 if let Some(path) = state.sibling_file("processes.json") {
                     registry.bind(path);
                 }
+            }
+            // Boot-time operation reconciliation: `running` rows from a
+            // crashed session become `interrupted`, never fake success.
+            {
+                let state = app.state::<paths::PhlState>();
+                let root = state.root().to_path_buf();
+                std::thread::spawn(move || {
+                    let recovered = operations::recover_interrupted(&root);
+                    let _ = operations::prune_journal(&root);
+                    let _ = recovered; // best-effort reconciliation; the
+                                       // journal itself is the user-visible evidence.
+                });
             }
             // The main window's taskbar icon: hand it the frame that matches
             // this display's scaling instead of letting Tauri's 16px one be

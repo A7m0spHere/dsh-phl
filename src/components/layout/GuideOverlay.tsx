@@ -319,17 +319,23 @@ export function GuideOverlay() {
             </div>
 
             <footer className="flex items-center gap-2 border-t border-line bg-surface-sunken/60 px-4 py-2.5">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center">
                 {STEPS.map((s, i) => (
+                  // The dot reads 6px but the button's real hit area is 16px —
+                  // the visual is the pip, the target is its padding.
                   <button
                     key={s.id}
                     aria-label={s.title}
                     onClick={() => setIndex(i)}
-                    className={cn(
-                      'h-1.5 rounded-full transition-all duration-200',
-                      i === index ? 'w-4 bg-accent' : 'w-1.5 bg-ink/15 hover:bg-ink/30',
-                    )}
-                  />
+                    className="flex h-4 w-4 items-center justify-center"
+                  >
+                    <span
+                      className={cn(
+                        'h-1.5 rounded-full transition-all duration-200',
+                        i === index ? 'w-4 bg-accent' : 'w-1.5 bg-ink/15 hover:bg-ink/30',
+                      )}
+                    />
+                  </button>
                 ))}
               </div>
 

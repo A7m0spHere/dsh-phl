@@ -31,8 +31,8 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:":5180 .*LISTENING" 2^>
   taskkill /F /PID %%p >nul 2>nul
 )
 
-echo   [1/3] Installing / syncing dependencies...
-call npm install
+echo   [1/3] Installing locked dependencies...
+call npm ci
 if errorlevel 1 goto :failed
 
 if exist "src-tauri\icons\icon.ico" goto :icon_ok

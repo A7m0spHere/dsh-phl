@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { AlertTriangle, CircleAlert, CircleCheck, ListTodo, Loader2, X } from 'lucide-react'
+import { AlertTriangle, CircleAlert, CircleCheck, ListTodo, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { cancelTransfer, desktop, type TaskInfo } from '@/lib/desktop'
 import { parseThrownError } from '@/lib/errorCodes'
-import { useMotion } from '@/lib/motion'
-import { ProgressBar } from '@/components/ui'
+import { MENU_Z, useMotion } from '@/lib/motion'
+import { ProgressBar, Spinner } from '@/components/ui'
 import { useTaskStore } from '@/stores/taskStore'
 import { useUIStore } from '@/stores/uiStore'
 import { kindLabel, phaseText } from './taskLabels'
@@ -64,7 +64,7 @@ export function TaskCenter() {
           open ? 'bg-surface-hover text-ink' : 'text-ink-faint hover:bg-surface-hover hover:text-ink',
         )}
       >
-        {running.length > 0 ? <Loader2 size={12} className="animate-spin text-accent" /> : failedCount > 0 ? <AlertTriangle size={12} className="text-danger" /> : <ListTodo size={12} />}
+        {running.length > 0 ? <Spinner size={12} weight={2.6} className="text-accent" /> : failedCount > 0 ? <AlertTriangle size={12} className="text-danger" /> : <ListTodo size={12} />}
         任务
         {running.length > 0 ? (
           <span className="flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-accent-soft px-1 font-semibold text-accent-ink">
@@ -87,7 +87,7 @@ export function TaskCenter() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={t(0.16)}
-            className="absolute right-0 top-[calc(100%+6px)] z-50 w-[380px] overflow-hidden rounded-lg bg-surface shadow-pop ring-1 ring-line-strong/40"
+            className={cn(MENU_Z, 'absolute right-0 top-[calc(100%+6px)] w-[380px] overflow-hidden rounded-lg bg-surface shadow-pop ring-1 ring-line-strong/40')}
           >
             <div className="flex items-center justify-between border-b border-line px-3.5 py-2.5">
               <span className="text-sm font-semibold text-ink">任务中心</span>
@@ -141,7 +141,7 @@ function TaskRow({
     <div className="flex items-start gap-2.5 px-3.5 py-2">
       <span className="mt-0.5 shrink-0">
         {running ? (
-          <Loader2 size={13} className="animate-spin text-accent" />
+          <Spinner size={13} weight={2.6} className="text-accent" />
         ) : task.state === 'failed' ? (
           <CircleAlert size={13} className="text-danger" />
         ) : (

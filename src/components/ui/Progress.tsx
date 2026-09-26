@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import { motion } from 'motion/react'
 import { cn } from '@/lib/cn'
 import { useMotion } from '@/lib/motion'
@@ -56,7 +57,7 @@ export function ProgressBar({
           className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden rounded-full"
           style={{ width: `${pct}%` }}
         >
-          <div className="absolute inset-y-0 w-1/3 animate-shimmer bg-gradient-to-r from-transparent via-white/45 to-transparent" />
+          <div className="sheen absolute inset-y-0 w-1/3 animate-shimmer" style={{ '--sheen-alpha': '0.45' } as CSSProperties} />
         </div>
       )}
     </div>

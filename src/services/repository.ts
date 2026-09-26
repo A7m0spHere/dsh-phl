@@ -9,6 +9,9 @@ import type {
   Runtime,
   Snapshot,
 } from '@/types'
+import type { RuntimeConversionOutcome, RuntimeConversionPreview } from '@/lib/desktopRuntimes'
+import type { EnvironmentDiff, EnvironmentFacts } from '@/lib/desktopEnvironment'
+import type { TrialOutcome, TrialPreview, TrialRequest } from '@/lib/desktopTrial'
 /**
  * Everything the UI is allowed to know about where data comes from.
  *
@@ -277,6 +280,42 @@ export interface PhlRepository {
   ): Promise<void>
 
   removeRuntime(id: string): Promise<void>
+
+  /** Every release of one Node major line, newest first (patch expander). */
+  listRuntimeVersions(major: number): Promise<Runtime[]>
+
+  /** Read-only preview of converting a legacy `node-<major>` binding. */
+  previewRuntimeConversion(instanceId: string): Promise<RuntimeConversionPreview | null>
+
+  /** Converts one instance's legacy binding to a precise runtime object. */
+  convertRuntimeBinding(
+    instanceId: string,
+    onProgress: (p: TransferProgress) => void,
+    signal: AbortSignal,
+  ): Promise<RuntimeConversionOutcome>
+
+  /** Read-only environment snapshot of one instance. */
+  inspectEnvironment(instanceId: string): Promise<EnvironmentFacts | null>
+
+  /** Read-only diff of two instances' environments. */
+  compareEnvironments(leftId: string, rightId: string): Promise<EnvironmentDiff | null>
+
+  /** Retriable phase B for a community-pack instance stuck at needsDependencies. */
+  preparePackDependencies(
+    instanceId: string,
+    onProgress: (p: TransferProgress) => void,
+    signal: AbortSignal,
+  ): Promise<{ readiness: string; dependenciesInstalled: number; dependencyFailures: string[] } | null>
+
+  /** Read-only trial-upgrade plan: what a copy would carry and need. */
+  previewTrial(req: TrialRequest): Promise<TrialPreview | null>
+
+  /** Creates the trial copy; cancellable, commit = staging rename. */
+  createTrial(
+    req: TrialRequest,
+    onProgress: (p: { progress: number; bytesDone: number; bytesTotal: number }) => void,
+    signal: AbortSignal,
+  ): Promise<TrialOutcome | null>
 
   /**
    * Downloads and installs a plugin into the instance's profile: resolve the
