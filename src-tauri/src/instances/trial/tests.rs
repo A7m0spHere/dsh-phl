@@ -341,6 +341,91 @@ async fn missing_new_version_content_is_reported_not_hidden() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The retarget must recognise its own version links even when the link
+/// target and the data-root string disagree on case (a canonicalized
+/// drive label on a CI runner, a subst drive). `Path::starts_with` is
+/// byte-exact, which silently skipped the redirect and left the copy
+/// pointing at the OLD version tree — caught by CI, not locally, because
+/// the local TEMP spelling already agreed. The regression here retargets
+/// through a prefix whose case is flipped.
+#[tokio::test]
+async fn case_flipped_version_link_is_still_redirected() {
+    let root = scratch("linkcase");
+    seed_versions(&root);
+    seed_source(&root, "daily").await;
+
+    // Flip the case of the junction's stored target: re-create the same
+    // link with the drive letter and one segment upper-cased. This is the
+    // exact shape a canonicalize-vs-env-var spelling difference produces.
+    let profile = profile_root(&instance_dir(&root, "daily").unwrap(), "web");
+    let link = profile.join("node_modules").join("dsh-core");
+    let old_tree = root
+        .join("versions")
+        .join("0.1.5-rc.3")
+        .join("node_modules");
+    let flipped = case_flip(&old_tree);
+    std::fs::remove_dir(&link).unwrap();
+    super::super::copy::recreate_link(&link, &flipped, true).unwrap();
+
+    let (req, allocated, auto) = plan_via_preview(&root, &processes(), "daily").await;
+    let outcome = run_trial(
+        &Arc::new(AtomicBool::new(false)),
+        &root,
+        &task(),
+        &processes(),
+        &req,
+        &req.target_id,
+        "副本",
+        "0.1.7-rc.2",
+        "dsh-0.1.7-rc.2",
+        "node-system",
+        allocated,
+        auto,
+        &tauri::ipc::Channel::new(|_| Ok(())),
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.committed);
+    assert_eq!(
+        outcome.link_redirects, 1,
+        "a case-flipped version link is still PHL's own and must be retargeted"
+    );
+    assert!(outcome.link_failures.is_empty());
+    let dest = instance_dir(&root, &req.target_id).unwrap();
+    let body = std::fs::read_to_string(
+        dest.join("dsh-home")
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join("dsh-core")
+            .join("core.js"),
+    )
+    .unwrap();
+    assert!(
+        body.contains("new core"),
+        "the retargeted link must resolve into the NEW version even when the \
+         original spelling disagreed on case: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Upper-cases the drive letter and the first path segment — enough to break
+/// a byte-exact prefix match, still the same path to the file system.
+fn case_flip(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    let (drive, rest) = text.split_at(2);
+    let mut flipped = drive.to_uppercase();
+    if let Some(slash) = rest.find('\\') {
+        let (head, tail) = rest.split_at(slash);
+        flipped.push_str(&head.to_uppercase());
+        flipped.push_str(tail);
+    } else {
+        flipped.push_str(&rest.to_uppercase());
+    }
+    PathBuf::from(flipped)
+}
+
 #[tokio::test]
 async fn running_source_is_refused_and_staging_never_leaks() {
     let root = scratch("running");

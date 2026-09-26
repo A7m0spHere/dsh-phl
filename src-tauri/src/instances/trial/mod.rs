@@ -826,12 +826,8 @@ async fn retarget_version_links(
                 // Candidate: read where it points.
                 if let Some(target) = read_link_target(&path) {
                     let versions_prefix = root.join("versions").join(old_bare);
-                    if target.starts_with(&versions_prefix) {
-                        let new_target = root.join("versions").join(new_bare).join(
-                            target
-                                .strip_prefix(&versions_prefix)
-                                .unwrap_or(Path::new("")),
-                        );
+                    if let Some(rel) = strip_prefix_ci(&target, &versions_prefix) {
+                        let new_target = root.join("versions").join(new_bare).join(rel);
                         if new_target.exists() {
                             // A junction is a directory reparse point:
                             // remove_dir drops the link, not the target.
@@ -878,6 +874,58 @@ fn read_link_target(path: &Path) -> Option<PathBuf> {
     // A Windows junction is a directory reparse point; read_link covers it,
     // but canonicalize is the fallback that resolves the true location.
     std::fs::canonicalize(path).ok()
+}
+
+/// `path.strip_prefix(base)`, but case-insensitive.
+///
+/// The junctions npm/PHL lay down carry the target spelling `mklink` got,
+/// which on Windows goes through the reparse buffer verbatim — while the
+/// versions prefix is built from the data-root string the caller holds.
+/// Those two spellings can disagree on case (a canonicalized `D:\` volume
+/// label versus a `d:\` TEMP value on a CI runner; a subst/mapped drive).
+/// `Path::starts_with` compares byte-for-byte, so the retarget would
+/// silently skip a link it owns and leave the copy pointing at the OLD
+/// version tree. The FS itself is case-insensitive here, so matching it is
+/// not a loosening: the prefix is still the exact same path.
+#[cfg(windows)]
+fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
+    fn is_prefix_ci(path: &Path, base: &Path) -> bool {
+        let mut pc = path.components();
+        let mut bc = base.components();
+        loop {
+            match (bc.next(), pc.next()) {
+                (Some(b), Some(p)) => {
+                    let same = p == b
+                        || p.as_os_str()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy());
+                    if !same {
+                        return false;
+                    }
+                }
+                // Base exhausted, path still has components: that IS the
+                // prefix match. The other exhaustion (path shorter) falls
+                // through to the arm below.
+                (None, _) => return true,
+                (Some(_), None) => return false,
+            }
+        }
+    }
+
+    let p = crate::paths::strip_verbatim(path);
+    let b = crate::paths::strip_verbatim(base);
+    if !is_prefix_ci(&p, &b) {
+        return None;
+    }
+    // The remainder borrows from `p`; return an owned slice of it instead.
+    let remainder: PathBuf = p.components().skip(b.components().count()).collect();
+    Some(remainder)
+}
+
+/// Case matters on this platform: keep the exact-prefix contract.
+#[cfg(not(windows))]
+fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
+    path.strip_prefix(base).ok().map(PathBuf::from)
 }
 
 /// Keep `ensure_under_root` imported for future staging sweeps; the trial's
