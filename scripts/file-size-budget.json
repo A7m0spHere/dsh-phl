@@ -11,7 +11,7 @@
     "src-tauri/src/runtimes/mod.rs": 41735,
     "src/pages/SettingsPage.tsx": 39462,
     "src-tauri/src/versions/mod.rs": 38995,
-    "src-tauri/src/instances/trial/mod.rs": 38703,
+    "src-tauri/src/instances/trial/mod.rs": 39500,
     "src-tauri/src/api_config/tests.rs": 35111,
     "src/features/create/sections.tsx": 35089,
     "src-tauri/src/release_e2e/journeys.rs": 34631,
