@@ -193,8 +193,8 @@ async fn preview_names_mismatched_real_packages_before_commit() {
         preview.mismatched_packages[0]
     );
     assert!(
-        preview.mismatched_packages[0].contains("重装"),
-        "the note says what to do about it: {}",
+        preview.mismatched_packages[0].contains("创建时将替换为目标版本"),
+        "the preview states the promise create keeps: {}",
         preview.mismatched_packages[0]
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -277,7 +277,9 @@ async fn config_scope_copies_config_and_drops_sessions() {
         outcome.readiness
     );
     // The version-mismatched real package is named on the outcome (exactly
-    // one: the same-build package must NOT be listed), with both versions.
+    // one: the same-build package must NOT be listed) — and REPAIRED: the
+    // old directory was replaced by a junction into the target tree, which
+    // is the acceptance fix (0.1.5 agent-team → 0.1.7 copy) made automatic.
     assert_eq!(outcome.mismatched_packages.len(), 1);
     assert!(
         outcome.mismatched_packages[0].contains("@deepseek-ai/old-tool"),
@@ -285,10 +287,20 @@ async fn config_scope_copies_config_and_drops_sessions() {
         outcome.mismatched_packages[0]
     );
     assert!(
-        outcome.mismatched_packages[0].contains("0.1.5-alpha.2")
-            && outcome.mismatched_packages[0].contains("0.1.7-rc.2"),
-        "names both versions: {}",
+        outcome.mismatched_packages[0].contains("已替换为目标版本 0.1.7-rc.2"),
+        "the outcome states the repair it performed: {}",
         outcome.mismatched_packages[0]
+    );
+    let copy_pkg = dest_pkg_path(&root, &req.target_id);
+    assert!(
+        std::fs::symlink_metadata(&copy_pkg)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "the old real directory is now a link into the version tree"
+    );
+    assert!(
+        copy_pkg.join("package.json").exists(),
+        "the junction resolves into the target tree's package"
     );
     let dest = instance_dir(&root, &req.target_id).unwrap();
     let record = outcome.record;
@@ -570,6 +582,17 @@ async fn retarget_with_alternate_spelling(root: &Path, alt: fn(&Path) -> PathBuf
          original spelling disagreed: {body}"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn dest_pkg_path(root: &Path, target_id: &str) -> std::path::PathBuf {
+    instance_dir(root, target_id)
+        .unwrap()
+        .join("dsh-home")
+        .join("profiles")
+        .join("web")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("old-tool")
 }
 
 /// Upper-cases the drive letter and the first path segment — enough to break

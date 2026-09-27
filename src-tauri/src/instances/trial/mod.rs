@@ -242,15 +242,16 @@ async fn preview_shell(
 
     // Real packages pinned to versions the TARGET tree does not ship: the
     // copy would carry them verbatim and the new DSH may refuse them at boot.
-    // Detected here (before the user commits) and again on the outcome. When
-    // the target is not installed yet the tree cannot be compared against —
-    // the create path re-runs the scan on the staging copy AFTER the
-    // version-installed guard, so the outcome still names everything; the
-    // preview just cannot pre-warn (the knob already carries
-    // `pending_downloads` for the missing version itself).
+    // The PREVIEW names them read-only (the repair itself happens on staging
+    // at create time, so the source is never touched). When the target is
+    // not installed yet the tree cannot be compared against — the create
+    // path runs the repair on the staging copy AFTER the version-installed
+    // guard, so the outcome still reports everything; the preview just
+    // cannot pre-warn (the knob already carries `pending_downloads` for the
+    // missing version itself).
     let mismatched_packages = if target_installed {
         let source_profile = profile_root(&instance_dir(root, &req.source_id)?, &manifest.profile);
-        mismatched_profile_packages(&source_profile, root, &target_version).await
+        read_mismatched_packages(&source_profile, root, &target_version).await
     } else {
         Vec::new()
     };
@@ -670,11 +671,24 @@ async fn run_trial(
     let staging_home = staging.join("dsh-home");
     let (redirects, link_failures) =
         retarget_version_links(&staging_home, root, &source_version_bare, target_version).await;
-    // Real packages the target tree ships at a different version: named on
-    // the outcome so the result page lists them (the preview already warned).
+    // Real packages the target tree ships at a different version: the copy
+    // would carry the old build verbatim, and the new DSH's stricter plugin
+    // contracts can reject it at boot (acceptance: an 0.1.5 agent-team rode
+    // into an 0.1.7 copy and typert-loader refused it — found only in DSH's
+    // own startup log). The copy is STAGING still, so PHL can fix it here:
+    // swap every mismatched real package for a junction into the target
+    // tree — the same immutable-share discipline the copy engine already
+    // uses for version packages — and report each swap honestly. This is a
+    // trial-copy decision only: the SOURCE keeps its working old tree, and
+    // a plain clone (no version change) never passes through here.
     let staging_profile = staging_home.join("profiles").join(&source_manifest.profile);
-    let mismatched_packages =
-        mismatched_profile_packages(&staging_profile, root, target_version).await;
+    let (repaired, irreparable) =
+        repair_mismatched_profile_packages(&staging_profile, root, target_version).await;
+    let mismatched_packages = repaired
+        .iter()
+        .map(|r| r.0.clone())
+        .chain(irreparable.iter().cloned())
+        .collect::<Vec<_>>();
 
     // The copy's manifest: source environment, new bindings.
     let mut manifest = source_manifest.clone();
@@ -798,10 +812,16 @@ async fn run_trial(
             link_failures.len()
         ));
     }
-    if !mismatched_packages.is_empty() {
+    if !repaired.is_empty() {
         notes.push(format!(
-            "{} 个 profile 内实体插件与目标版本自带的版本不一致，见结果详情",
-            mismatched_packages.len()
+            "{} 个 profile 内实体插件与目标版本不一致，已替换为目标版本（见结果详情）",
+            repaired.len()
+        ));
+    }
+    if !irreparable.is_empty() {
+        notes.push(format!(
+            "{} 个 profile 内实体插件在目标版本下无对应包，已按 profile 原样携带（见结果详情）",
+            irreparable.len()
         ));
     }
     if scope_wants_sessions(&req.scope) && !preview_cwds_warned(&source_dir).await {
@@ -1021,25 +1041,127 @@ fn strip_prefix_link(target: &Path, prefix: &Path) -> Option<PathBuf> {
     target.strip_prefix(prefix).ok().map(PathBuf::from)
 }
 
-/// Real (non-link) packages under the profile's `node_modules` whose version
-/// differs from the one the TARGET version tree ships.
-///
-/// A copy carries them verbatim — correct as a copy — but DSH version
-/// boundaries can invalidate plugin contracts (0.1.7's typert-loader demands
-/// a `create()` factory the 0.1.5 agent-team manifest lacks), so the mismatch
-/// must be named BEFORE the user commits. Scoped package names
-/// (`@scope/name`) are supported; nested node_modules are not descended into
-/// (only the loader-visible top level matters).
-async fn mismatched_profile_packages(
-    profile: &Path,
-    root: &Path,
-    target_bare: &str,
-) -> Vec<String> {
+/// READ-ONLY variant for the preview: the same mismatch classification as
+/// `repair_mismatched_profile_packages` without touching anything — the
+/// preview must never mutate the source. The wording matches what create
+/// will DO ("已替换为目标版本" for repairables) so the promise made here is
+/// the one the outcome keeps.
+async fn read_mismatched_packages(profile: &Path, root: &Path, target_bare: &str) -> Vec<String> {
     let target_modules = root.join("versions").join(target_bare).join("node_modules");
     let Ok(mut entries) = tokio::fs::read_dir(profile.join("node_modules")).await else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let mut scopes = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if tokio::fs::symlink_metadata(&path)
+            .await
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+            || !path.is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.starts_with('@') {
+            scopes.push(path);
+            continue;
+        }
+        if let Some(note) = classify_package(&path, &target_modules.join(&name)).await {
+            out.push(note);
+        }
+    }
+    for scope in scopes {
+        let scope_name = scope
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Ok(mut scope_entries) = tokio::fs::read_dir(&scope).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = scope_entries.next_entry().await {
+            let path = entry.path();
+            if tokio::fs::symlink_metadata(&path)
+                .await
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(true)
+                || !path.is_dir()
+            {
+                continue;
+            }
+            let pkg_dir = target_modules.join(&scope_name).join(entry.file_name());
+            if let Some(note) = classify_package(&path, &pkg_dir).await {
+                out.push(note);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One package's PREVIEW note (read-only): what create will do with it.
+async fn classify_package(profile_pkg: &Path, target_pkg: &Path) -> Option<String> {
+    async fn read_version(dir: &Path) -> Option<String> {
+        let raw = tokio::fs::read_to_string(dir.join("package.json"))
+            .await
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        value.get("version")?.as_str().map(str::to_string)
+    }
+    let profile_version = read_version(profile_pkg).await?;
+    let name = profile_pkg
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let scope = profile_pkg
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('@'));
+    let full_name = scope.map(|s| format!("{s}/{name}")).unwrap_or(name);
+    match read_version(target_pkg).await {
+        Some(target_version) if target_version != profile_version => Some(format!(
+            "{full_name}: profile 内为 {profile_version}，创建时将替换为目标版本 {target_version}"
+        )),
+        Some(_) => None,
+        None => Some(format!(
+            "{full_name}: profile 内为 {profile_version}，目标版本不再携带该包（可能已改名或移除），\
+             将按 profile 版本保留；若启动报插件错误请在副本内卸载或重装"
+        )),
+    }
+}
+
+/// Real (non-link) packages under the profile's `node_modules` whose version
+/// differs from the one the TARGET version tree ships — REPAIRED, not just
+/// reported.
+///
+/// A copy carries real directories verbatim — correct as a copy — but DSH
+/// version boundaries can invalidate plugin contracts (0.1.7's typert-loader
+/// demands a `create()` factory the 0.1.5 agent-team manifest lacks), and the
+/// failure only surfaced inside DSH's own startup log. Because this runs on
+/// STAGING (before the commit rename), PHL can fix the copy in place:
+///
+/// - mismatch with a target-tree counterpart → remove the old directory and
+///   lay a junction into the target tree, the same immutable-share discipline
+///   the copy engine uses for version packages. Returned as
+///   (note, repaired = true).
+/// - no counterpart in the target tree (upstream renamed/removed) → keep the
+///   profile's directory and report it as carried. Returned as a plain note.
+///
+/// Scoped package names (`@scope/name`) are supported; nested node_modules
+/// are not descended into (only the loader-visible top level matters).
+async fn repair_mismatched_profile_packages(
+    profile: &Path,
+    root: &Path,
+    target_bare: &str,
+) -> (Vec<(String, bool)>, Vec<String>) {
+    let target_modules = root.join("versions").join(target_bare).join("node_modules");
+    let Ok(mut entries) = tokio::fs::read_dir(profile.join("node_modules")).await else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut repaired: Vec<(String, bool)> = Vec::new();
+    let mut irreparable: Vec<String> = Vec::new();
     let mut scopes = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
@@ -1059,8 +1181,12 @@ async fn mismatched_profile_packages(
             scopes.push(path);
             continue;
         }
-        if let Some(note) = version_mismatch_note(&path, &target_modules.join(&name)).await {
-            out.push(note);
+        if let Some((note, was_repaired)) = repair_one(&path, &target_modules.join(&name)).await {
+            if was_repaired {
+                repaired.push((note, true));
+            } else {
+                irreparable.push(note);
+            }
         }
     }
     // One level of @scope dirs.
@@ -1083,25 +1209,27 @@ async fn mismatched_profile_packages(
                 continue;
             }
             let pkg_dir = target_modules.join(&scope_name).join(entry.file_name());
-            if let Some(note) = version_mismatch_note(&path, &pkg_dir).await {
-                out.push(note);
+            if let Some((note, was_repaired)) = repair_one(&path, &pkg_dir).await {
+                if was_repaired {
+                    repaired.push((note, true));
+                } else {
+                    irreparable.push(note);
+                }
             }
         }
     }
-    out.sort();
-    out
+    repaired.sort();
+    irreparable.sort();
+    (repaired, irreparable)
 }
 
-/// One package's mismatch note, or `None` when the profile copy agrees with
-/// the target tree.
+/// One package's repair, or `None` when the profile copy agrees with the
+/// target tree.
 ///
-/// A REAL (non-link) package the target tree does not ship at all is ALSO a
-/// note — "missing" only belongs to the LINK failures when a link cannot be
-/// retargeted. A real directory carries no such report, so this path is the
-/// only place the user learns the old build rides into the copy with nothing
-/// to replace it (the acceptance case had upstream-renamed packages: no link
-/// failure, no version pair, just an old directory nobody named).
-async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<String> {
+/// The swap is remove-then-junction on STAGING — a failure after the remove
+/// but before the junction fails the whole create (staging is discarded), so
+/// no half-repaired copy can ever commit.
+async fn repair_one(profile_pkg: &Path, target_pkg: &Path) -> Option<(String, bool)> {
     async fn read_version(dir: &Path) -> Option<String> {
         let raw = tokio::fs::read_to_string(dir.join("package.json"))
             .await
@@ -1121,20 +1249,45 @@ async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<
         .filter(|n| n.starts_with('@'));
     let full_name = scope.map(|s| format!("{s}/{name}")).unwrap_or(name);
     match read_version(target_pkg).await {
-        // The target ships a different build: both versions, with guidance.
-        Some(target_version) if target_version != profile_version => Some(format!(
-            "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
-             副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内重装该插件"
-        )),
+        Some(target_version) if target_version != profile_version => {
+            // Swap: the target tree owns the files, the copy points at them.
+            if tokio::fs::remove_dir_all(profile_pkg).await.is_err() {
+                return Some((
+                    format!(
+                        "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
+                         替换失败（无法移除旧目录），已按 profile 版本携带"
+                    ),
+                    false,
+                ));
+            }
+            match super::copy::recreate_link(profile_pkg, target_pkg, true) {
+                Ok(()) => Some((
+                    format!(
+                        "{full_name}: profile 内为 {profile_version}，已替换为目标版本 {target_version}"
+                    ),
+                    true,
+                )),
+                Err(e) => Some((
+                    format!(
+                        "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
+                         替换失败（{e}），旧目录已移除，请在副本内重装"
+                    ),
+                    false,
+                )),
+            }
+        }
         // Same build on both sides — not a finding.
         Some(_) => None,
         // The target no longer ships this package (renamed or removed): the
         // profile's old build rides into the copy with no replacement. Named
         // here rather than silently skipped — the boot failure it can cause
-        // is exactly the one this detector exists for.
-        None => Some(format!(
-            "{full_name}: profile 内为 {profile_version}，目标版本不再携带该包（可能已改名或移除）；\
-             副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内卸载或重装该插件"
+        // is exactly the one this repair exists to prevent.
+        None => Some((
+            format!(
+                "{full_name}: profile 内为 {profile_version}，目标版本不再携带该包（可能已改名或移除）；\
+                 已按 profile 版本保留，若启动报插件错误请在副本内卸载或重装"
+            ),
+            false,
         )),
     }
 }

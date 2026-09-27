@@ -411,13 +411,13 @@ export function TrialDialog() {
                       <Notice tone="warn">已知插件冲突：{preview.conflicts.join('；')}</Notice>
                     )}
                     {preview.mismatchedPackages?.length > 0 && (
-                      <Notice tone="warn">
+                      <Notice tone="info">
                         <p className="font-medium">
-                          {preview.mismatchedPackages.length} 个 profile 内实体插件与目标版本自带的版本不一致：
+                          {preview.mismatchedPackages.length} 个 profile 内实体插件与目标版本不一致：
                         </p>
                         <p className="mt-1">
-                          副本会原样携带这些旧版本包，新版 DSH 启动时可能拒绝加载（例如插件接口契约变化）。
-                          如需使用对应功能，请在副本中重装这些插件。
+                          创建时会自动处理：目标版本自带的包替换为目标版本，目标版本不再携带的包按
+                          profile 原样保留（见各条说明）。源实例不受影响。
                         </p>
                         <ul className="mt-1 list-disc pl-5">
                           {preview.mismatchedPackages.slice(0, 4).map((m) => (
@@ -503,7 +503,7 @@ export function TrialDialog() {
                   )}
                   {outcome.mismatchedPackages?.length > 0 && (
                     <li className="text-warn">
-                      {outcome.mismatchedPackages.length} 个 profile 内实体插件与目标版本自带的版本不一致（按 profile 旧版携带；若启动报插件错误请在副本内重装）：
+                      {outcome.mismatchedPackages.length} 个 profile 内实体插件与目标版本不一致的处理（已在副本内替换或保留，见各条说明；启动报错时按指引重装）：
                       <ul className="mt-1 list-disc pl-5">
                         {outcome.mismatchedPackages.slice(0, 5).map((m) => (
                           <li key={m} className="break-all">{m}</li>
