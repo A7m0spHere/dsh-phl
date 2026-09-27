@@ -60,7 +60,7 @@ Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 4. **配置 API**：需要由 PHL 管理模型时，在「API」页配置供应商与模型，再在实例中选择配置来源并同步。
 5. **启动使用**：在实例页点击「启动」，等待就绪后打开 WebUI。需要插件时，在「插件」页选定目标实例后安装。
 
-已经有本机 DSH？从[本机发现与接入](./docs/p0-local-dsh-adoption.md)开始，按向导选择接入方式和需要迁移的对话。
+已经有本机 DSH？从[本机发现与接入](./docs/adoption-and-migration.md)开始，按向导选择接入方式和需要迁移的对话。
 
 常用快捷键：`Ctrl+K` 快速跳转 · `Ctrl+,` 打开设置 · `Esc` 返回。完整清单见「设置 → 快捷键」。
 
@@ -91,7 +91,7 @@ Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 
 - **快照**：保存实例的 `dsh-home`，不包含 workspace、日志或版本绑定。
 - **Bundle**：JSON 配置清单，记录实例配置与插件信息；不含插件文件、凭据值和机器本地环境变量，导入后需重新安装插件并配置凭据。
-- **`.phlpack`**：整合包，可按导出选项携带插件文件与对话；具体内容和迁移范围见[对话与环境迁移](./docs/p1-session-pack.md)。
+- **`.phlpack`**：整合包，可按导出选项携带插件文件与对话；具体内容和迁移范围见[接入与迁移](./docs/adoption-and-migration.md)。
 
 </details>
 
@@ -151,8 +151,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --workspace
 | 你想了解 | 对应文档 |
 |---|---|
 | 安装、版本与更新 | [安装说明](./docs/install-note.md) · [发布记录](https://github.com/A7m0spHere/dsh-phl/releases) · [应用内更新](./docs/auto-update.md) |
-| 接入已有环境、迁移对话 | [本机 DSH 接入](./docs/p0-local-dsh-adoption.md) · [对话与环境迁移](./docs/p1-session-pack.md) |
-| 集成整合包能力 | [Pack Core、CLI 与导出 Skill](./docs/p2-pack-core-skill.md) |
+| 接入已有环境、迁移对话 | [本机 DSH 接入与会话/整合包迁移](./docs/adoption-and-migration.md) |
+| 集成整合包能力 | [Pack Core、CLI 与导出 Skill](./docs/adoption-and-migration.md#4-pack-corecli-与导出-skill原-p2) |
 | 安全与数据处理 | [安全说明](./SECURITY.md) · [隐私说明](./docs/privacy.md) |
 
 遇到问题或有建议，请[提交 Issue](https://github.com/A7m0spHere/dsh-phl/issues)，附上 PHL 版本、复现步骤与相关日志（移除凭据后）。

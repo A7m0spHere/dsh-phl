@@ -93,6 +93,12 @@ TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确�
   `internal/planning/`（路线图与计划）、`internal/reviews/`（评审快照，含 `2026-09-09-preview-release/`）、
   `internal/acceptance/`（各版本发布验收）、`internal/gates/`（E2E 门禁说明与真机报告）、
   `internal/checklists/`（手测清单）、`internal/ops/`（发布副本规程）；`internal/README.md` 是索引。
-- 本仓库只保留与代码同生的文档：`README.md`、`docs/release-notes.md`、`docs/install-note.md`、
-  `docs/auto-update.md` 与本文件。`scripts/check-public-boundary.mjs` 以单条 `internal/**` 规则
+- 本仓库只保留与代码同生的文档（2026-09-27 整理后 docs/ 收敛为 7 篇 + research/skills 两目录）：
+  `README.md`、`docs/release-notes.md`（发布说明）、`docs/install-note.md`（下载与 SmartScreen 处置）、
+  `docs/auto-update.md`（更新器原理与密钥）、`docs/code-signing.md`（签名现状/政策/SignPath 申请，
+  三篇合一）、`docs/adoption-and-migration.md`（本机 DSH 接入、会话迁移、`.phlpack` 与 Pack Core/CLI，
+  四篇合一）、`docs/model-metadata-enrichment.md`（模型信息补全）、`docs/privacy.md`、
+  `docs/research/dsh-session-integration.md`（DSH 会话格式 spike，仍是事实源）、
+  `docs/skills/phl-export/SKILL.md`（面向 DSH 用户的导出 Skill）与本文件。
+  `scripts/check-public-boundary.mjs` 以单条 `internal/**` 规则
   在发布副本与 CI 上拦住误入库的内部文档。
