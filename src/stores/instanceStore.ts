@@ -180,11 +180,27 @@ export const useInstanceStore = create<InstanceState>()((set, get) => {
    * which also made it a one-shot for the whole session — after the data root
    * changed, the list kept describing the old root while every write went to
    * the new one. Changing the root has to be able to force a re-read.
+   *
+   * Runtime states MERGE, not reset: callers after a trial create or a
+   * dependency retry have no guard against siblings that are running, and a
+   * from-scratch rebuild would flip a live instance's row to 已停止 while its
+   * process still holds the port — desyncing the ports-in-use map and
+   * inviting a double launch. States survive for every id that is still
+   * listed; only new ids (the fresh copy) and vanished ids reset. A data-root
+   * switch keeps the same merge: `rootSwitchBlocked()` already refuses that
+   * path while anything runs.
    */
   async reload() {
     loadStarted = false
     set({ loaded: false })
+    const previous = get().states
     await get().load()
+    const instances = get().instances
+    const merged: Record<string, InstanceRuntimeState> = {}
+    for (const i of instances) {
+      merged[i.id] = previous[i.id] ?? { status: 'stopped' }
+    }
+    set({ states: merged })
   },
 
   async adoptPreviousSession() {

@@ -349,8 +349,10 @@ pub struct TrialOutcome {
     /// a cancel/interrupt leaves a *created* copy behind, and the UI must say
     /// so instead of reporting a pure cancel.
     pub committed: bool,
-    /// `needsDependencies | needsCredentials | readyToLaunch` — registration
-    /// alone is not "the environment works".
+    /// `needsDependencies | readyToLaunch` — registration alone is not "the
+    /// environment works". (needsCredentials is kept in the union for old
+    /// markers, but no new outcome reports it: credentials are a launch-time
+    /// concern, and a `none`-inheritance copy owns its config by definition.)
     pub readiness: String,
     /// Link retargets into `versions/<new>` that verified.
     pub link_redirects: usize,
@@ -727,28 +729,47 @@ async fn run_trial(
     // Record the plan identity + the true commit-time outcome: the idempotent
     // retry reports THIS, not a fabricated ready (R2-03), and re-verifies the
     // copy against the same version/runtime/port the plan asked for (R3-02).
-    if let Err(e) = write_trial_marker(
-        &dest,
-        &TrialMarker {
-            plan_id: req.plan_id.clone(),
-            target_version: target_version.to_string(),
-            target_runtime_id: target_runtime_id.to_string(),
-            scope: req.scope.clone(),
-            workspace: req.workspace.clone(),
-            allocated_port,
-            readiness: readiness.clone(),
-            link_failures: link_failures.clone(),
-            mismatched_packages: mismatched_packages.clone(),
-        },
-    )
-    .await
-    {
+    // A missing marker is not cosmetic: `committed_copy_of_plan` matches on
+    // `marker.plan_id`, so a copy without one is refused as a foreign plan on
+    // every future retry of THIS plan. The write is atomic (tmp+rename) and
+    // milliseconds old — retry once, and if it still fails say so in the
+    // outcome notes instead of reporting a clean success the copy cannot
+    // deliver on retry.
+    let marker = TrialMarker {
+        plan_id: req.plan_id.clone(),
+        target_version: target_version.to_string(),
+        target_runtime_id: target_runtime_id.to_string(),
+        scope: req.scope.clone(),
+        workspace: req.workspace.clone(),
+        allocated_port,
+        readiness: readiness.clone(),
+        link_failures: link_failures.clone(),
+        mismatched_packages: mismatched_packages.clone(),
+    };
+    let marker_err = match write_trial_marker(&dest, &marker).await {
+        Ok(()) => None,
+        Err(first) => {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            write_trial_marker(&dest, &marker)
+                .await
+                .err()
+                .or(Some(first))
+        }
+    };
+    let mut marker_note = None;
+    if let Some(e) = &marker_err {
         #[cfg(test)]
         eprintln!("MARKER-WRITE-FAILED {e}");
-        let _ = e;
+        marker_note = Some(format!(
+            "副本已创建，但提交记录写入失败（{e}）；同一计划的重复提交会被拒绝，\
+             如需重试请重新预览生成新计划"
+        ));
     }
     if crate::versions::cancelled(flag) {
-        let notes = vec!["副本已创建，后续检查已取消".to_string()];
+        let mut notes = vec!["副本已创建，后续检查已取消".to_string()];
+        if let Some(n) = marker_note {
+            notes.push(n);
+        }
         return Ok(TrialOutcome {
             record: build_record(&dest, manifest).await,
             committed: true,
@@ -763,6 +784,9 @@ async fn run_trial(
 
     super::invalidate_disk_usage(&dest);
     let mut notes = Vec::new();
+    if let Some(n) = marker_note {
+        notes.push(n);
+    }
     if !link_failures.is_empty() {
         notes.push(format!(
             "{} 个内部链接在新版本下无法解析，见结果详情；这些插件可能需要重新安装依赖",
@@ -794,13 +818,15 @@ fn readiness_of(manifest: &InstanceManifest, link_failures: &[String]) -> String
     if !link_failures.is_empty() {
         return "needsDependencies".into();
     }
-    // A `none`-inheritance binding means the user owns credentials; nothing
-    // to verify without launching — reported as needsCredentials only when
-    // PHL manages credentials and none are bound.
-    match &manifest.api {
-        Some(api) if api.inheritance == "none" => "needsCredentials".into(),
-        _ => "readyToLaunch".into(),
-    }
+    // A `none`-inheritance binding means the user fully owns the instance's
+    // API config (sync refuses; the copied settings.yaml IS the working
+    // config). `check_api` in verify reports the same state as a pass, so
+    // labeling it needsCredentials here was a false alarm on self-managed
+    // sources — and the label persisted into the marker, so retries replayed
+    // it forever. Every copy without link failures is ready to launch:
+    // credentials are a launch-time concern, not a copy-time defect.
+    let _ = manifest;
+    "readyToLaunch".into()
 }
 
 async fn preview_cwds_warned(_source_dir: &Path) -> bool {

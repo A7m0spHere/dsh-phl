@@ -227,6 +227,14 @@ async fn config_scope_copies_config_and_drops_sessions() {
 
     assert!(outcome.committed);
     assert_eq!(outcome.sessions_imported, 0);
+    // The seed source carries a `default`-inheritance binding with an empty
+    // provider list, the exact shape the old code mislabeled. Credentials
+    // are a launch-time concern, never a copy defect — the copy is ready.
+    assert_eq!(
+        outcome.readiness, "readyToLaunch",
+        "an empty managed binding is not needsCredentials: {}",
+        outcome.readiness
+    );
     // The version-mismatched real package is named on the outcome (exactly
     // one: the same-build package must NOT be listed), with both versions.
     assert_eq!(outcome.mismatched_packages.len(), 1);
@@ -828,6 +836,27 @@ async fn create_without_a_plan_refuses() {
     let req = request("daily");
     let err = validate_plan(&root, &processes(), &req).await.unwrap_err();
     assert!(err.contains("缺少试升级计划"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The marker doc promises "every field except the plan id defaults", but
+/// `readiness` lacked a serde default — a marker from before the field
+/// existed failed to parse, `read_trial_marker` returned None, and the
+/// idempotent retry refused the copy as a foreign plan. The parse must
+/// succeed and default to the honest ready.
+#[tokio::test]
+async fn an_old_marker_without_readiness_still_parses_and_reports_ready() {
+    let root = scratch("oldmarker");
+    std::fs::create_dir_all(&root).unwrap();
+    // Minimal pre-field marker: identity + the fields that always existed.
+    std::fs::write(
+        root.join("phl-trial.json"),
+        format!(r#"{{ "planId": "{}" }}"#, "a".repeat(64)),
+    )
+    .unwrap();
+    let marker = super::read_trial_marker(&root).await;
+    let marker = marker.expect("an old marker without readiness must still parse");
+    assert_eq!(marker.readiness, "readyToLaunch");
     let _ = std::fs::remove_dir_all(&root);
 }
 

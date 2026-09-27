@@ -15,6 +15,13 @@ use std::path::Path;
 use super::TrialOutcome;
 use crate::instances::{build_record, load_manifest, InstanceManifest};
 
+/// `readiness` for a marker that predates the field: the honest fallback —
+/// the copy's own link failures were recorded, and credentials were never a
+/// copy-time concern.
+fn default_readiness() -> String {
+    "readyToLaunch".into()
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrialMarker {
@@ -29,6 +36,11 @@ pub(crate) struct TrialMarker {
     pub workspace: String,
     #[serde(default)]
     pub allocated_port: u16,
+    /// Defaults like every non-identity field: a marker written before this
+    /// shape must still parse, or `read_trial_marker` returns None and the
+    /// idempotent retry refuses the copy as a foreign plan — the exact
+    /// scenario the module doc promises cannot happen.
+    #[serde(default = "default_readiness")]
     pub readiness: String,
     #[serde(default)]
     pub link_failures: Vec<String>,

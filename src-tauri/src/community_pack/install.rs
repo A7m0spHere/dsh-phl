@@ -644,39 +644,52 @@ pub(crate) async fn prepare_dependencies_for_test_with(
 /// Resolves a short commit SHA to the unique full commit via the GitHub
 /// API. `None` = network failure, unknown SHA or ambiguity — the caller
 /// blocks rather than floats (brief §10.4).
+///
+/// Bounded by a TOTAL request timeout, not just the client's connect
+/// timeout: a server that accepts the connection and then stalls the body
+/// would otherwise hold the dependency-prepare task — and its instance
+/// resource lock — forever, with the cancel flag never consulted inside
+/// this await.
 async fn resolve_short_commit_via_api(repo: &str, short: &str) -> Option<String> {
-    let client = crate::versions::http_client();
-    let url = format!("https://api.github.com/repos/{repo}/commits/{short}");
-    let value: serde_json::Value = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
+    let request = async {
+        let client = crate::versions::http_client();
+        let url = format!("https://api.github.com/repos/{repo}/commits/{short}");
+        let value: serde_json::Value = client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        value.get("sha")?.as_str().map(str::to_string)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(20), request)
         .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    value.get("sha")?.as_str().map(str::to_string)
+        .ok()
+        .flatten()
 }
 
 /// Atomically rewrites the import marker's stage/failure fields.
-fn update_stage(instance_dir: &Path, failures: Vec<String>, ready: bool) -> Result<(), String> {
+///
+/// Strictly read-modify-write: an unreadable or unparsable marker is an
+/// ERROR, never a default. Phase B treats the same file as a hard failure
+/// precisely so corruption can never become an empty plan (R2-02/R4-01);
+/// fabricating a fresh marker here would destroy the evidence the launch
+/// gate and retry card depend on and re-arm the exact hole R3-03 closed.
+pub(super) fn update_stage(
+    instance_dir: &Path,
+    failures: Vec<String>,
+    ready: bool,
+) -> Result<(), String> {
     let marker_path = instance_dir.join("phl-import.json");
-    let mut marker: ImportMarker = std::fs::read_to_string(&marker_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(ImportMarker {
-            format: "dspack".into(),
-            pack_sha256: String::new(),
-            container_version: 0,
-            manifest_version: 0,
-            bundles: Vec::new(),
-            planned_dependencies: Default::default(),
-            dependencies_failed: Vec::new(),
-            stage: "needsDependencies".into(),
-        });
+    let raw = std::fs::read_to_string(&marker_path)
+        .map_err(|e| format!("导入记录不可读取，拒绝改写状态: {e}"))?;
+    let mut marker: ImportMarker =
+        serde_json::from_str(&raw).map_err(|e| format!("导入记录损坏，拒绝改写状态: {e}"))?;
     marker.dependencies_failed = failures;
     marker.stage = if ready { "ready" } else { "needsDependencies" }.into();
     // Atomic replace (R2-02): a crash mid-write can never truncate the

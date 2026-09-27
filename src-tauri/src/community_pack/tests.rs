@@ -1160,3 +1160,38 @@ async fn stopped_import_target_passes_the_gate() {
     assert!(!outcome.dependency_failures.is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// R2-02/R4-01 posture held on the write side too: `update_stage` refuses to
+/// rewrite a phl-import.json it cannot read or parse, instead of fabricating
+/// a default marker over the corruption — which would destroy the evidence
+/// the launch gate and the retry card depend on.
+#[test]
+fn update_stage_refuses_to_write_over_a_corrupt_marker() {
+    let root = scratch("stage-corrupt");
+    std::fs::create_dir_all(&root).unwrap();
+    // A corrupt marker: unparseable bytes, the exact shape a torn write or an
+    // outside editor leaves behind.
+    std::fs::write(root.join("phl-import.json"), "{broken").unwrap();
+    let err = super::install::update_stage(&root, Vec::new(), true).unwrap_err();
+    assert!(
+        err.contains("拒绝改写状态"),
+        "the refusal names the refusal: {err}"
+    );
+    // The corrupt bytes survive untouched — no fabricated marker replaced them.
+    assert_eq!(
+        std::fs::read_to_string(root.join("phl-import.json")).unwrap(),
+        "{broken"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// And a missing marker is a refusal too, not a fresh default.
+#[test]
+fn update_stage_refuses_without_a_marker() {
+    let root = scratch("stage-missing");
+    std::fs::create_dir_all(&root).unwrap();
+    let err = super::install::update_stage(&root, Vec::new(), true).unwrap_err();
+    assert!(err.contains("不可读取"), "{err}");
+    assert!(!root.join("phl-import.json").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}

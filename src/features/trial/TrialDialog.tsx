@@ -71,6 +71,27 @@ export function TrialDialog() {
   /** Kept alive so the progress step's 取消 button can actually abort. */
   const createControllerRef = useRef<AbortController | null>(null)
 
+  /**
+   * The dialog stays MOUNTED at App level (only `sourceId` gates the render),
+   * so a reopen for a different instance would otherwise inherit the previous
+   * run's result page, error, typed name and progress. Every transition
+   * null → id resets the whole local state; the preview/default effects that
+   * key on `sourceId` then start from a clean slate. A same-source reopen
+   * resets too — landing back on the configure step is the honest restart.
+   */
+  useEffect(() => {
+    if (!sourceId) return
+    setStep('configure')
+    setPreview(null)
+    setPreviewError(null)
+    setPlan(null)
+    setName('')
+    setProgress(null)
+    setOutcome(null)
+    setError(null)
+    setStopping(false)
+  }, [sourceId])
+
   const source = instances.find((i) => i.id === sourceId)
   const runtimeStatus = sourceId ? stateOf(sourceId).status : 'stopped'
   /** Knobs the plan must cover; the source's own runtime is the default. */
