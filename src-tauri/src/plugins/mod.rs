@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod catalog;
 pub(crate) mod conflicts;
 pub(crate) mod cordis;
+pub(crate) mod deps;
 pub(crate) mod install;
 pub(crate) mod resolve;
 pub(crate) mod security;

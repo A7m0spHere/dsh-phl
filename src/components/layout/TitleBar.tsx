@@ -57,7 +57,7 @@ export function TitleBar() {
   const runningCount = useInstanceStore((s) =>
     s.instances.filter((i) => s.states[i.id]?.status === 'running').length,
   )
-  const { t, spring, scale } = useMotion()
+  const { t, spring } = useMotion()
   const indicatorId = useId()
   const maximized = useMaximized()
 
@@ -79,7 +79,7 @@ export function TitleBar() {
     // app's own overflow-hidden, which clipped 最小化/最大化/关闭 off the screen.
     <header
       data-tauri-drag-region
-      className={cn('drag relative flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl', CHROME_Z)}
+      className={cn('relative flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl', CHROME_Z)}
       style={{ height: 'var(--titlebar-h)' }}
     >
       <div data-tauri-drag-region className="flex shrink-0 items-center gap-1.5 pl-1 pr-1.5">
@@ -99,7 +99,7 @@ export function TitleBar() {
               </span>
             }
           >
-            <span className="no-drag rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
+            <span className="rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
               浏览器模拟模式
             </span>
           </Tooltip>
@@ -110,7 +110,7 @@ export function TitleBar() {
           page history, not to the app. Fixed placeholders — greyed when there
           is nowhere to go — so the chevrons never jump and the hit target is
           always in the same spot. */}
-      <div className="no-drag flex shrink-0 items-center">
+      <div className="flex shrink-0 items-center">
         <Tooltip content={<span className="flex items-center gap-1">返回 <Kbd>Alt</Kbd><Kbd>←</Kbd></span>} side="bottom">
           <IconButton label="返回" size="sm" variant="ghost" disabled={!canGoBack} onClick={back}>
             <ArrowLeft size={14} />
@@ -123,7 +123,7 @@ export function TitleBar() {
         </Tooltip>
       </div>
 
-      <nav className="no-drag flex min-w-0 items-center gap-0.5">
+      <nav className="flex min-w-0 items-center gap-0.5">
         {TABS.map((tab) => {
           const active = tab.id === activeTab
           const Icon = tab.icon
@@ -139,7 +139,7 @@ export function TitleBar() {
               {active && (
                 <motion.span
                   layoutId={indicatorId}
-                  transition={scale === 0 ? { duration: 0 } : spring}
+                  transition={spring}
                   className="absolute inset-0 rounded-sm bg-surface-hover"
                 />
               )}
@@ -170,7 +170,6 @@ export function TitleBar() {
             label="快速跳转"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setPaletteOpen(true)}
           >
             <Search size={14} />
@@ -182,7 +181,6 @@ export function TitleBar() {
             label="入门指引"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setGuideOpen(true)}
           >
             <CircleHelp size={13} />
@@ -194,7 +192,6 @@ export function TitleBar() {
             label="切换主题"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           >
             <AnimatePresence mode="wait" initial={false}>
@@ -212,7 +209,7 @@ export function TitleBar() {
           </IconButton>
         </Tooltip>
 
-        <div className="no-drag ml-1 flex shrink-0 items-center self-stretch">
+        <div className="ml-1 flex shrink-0 items-center self-stretch">
           <button
             aria-label="最小化"
             onClick={() => (desktop.isDesktop ? void desktop.minimize() : unavailable())}

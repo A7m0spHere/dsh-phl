@@ -66,7 +66,7 @@ PHL 是 DeepSeek Harness 的**实例与运行时管理器**，不是普通 Launc
   新增颜色请加 token，不要写死色值。
 - 动效统一从 `src/lib/motion.ts` 的 `useMotion()` 取，不要在组件里另写 duration / easing。
   用户可在设置里把动画强度调成「精简 / 关闭」，所有动效必须尊重该设置（`scale === 0` 时降级为无位移）。
-- 圆角克制：卡片 `rounded-lg`(10px)，按钮 `rounded`(8px)，标签 `rounded-xs`(4px)。
+- 圆角克制：卡片 `rounded-lg`(8px)，按钮 `rounded`(6px)，标签 `rounded-xs`(3px)。
 - 状态必须可读：运行中用光晕呼吸点，启动中用阶段文案 + 进度，失败给出原因 + 修复建议 + 可执行按钮。
 
 ## 命令

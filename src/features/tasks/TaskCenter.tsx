@@ -51,7 +51,7 @@ export function TaskCenter() {
   }, [open, setOpen])
 
   return (
-    <div ref={rootRef} className="no-drag relative">
+    <div ref={rootRef} className="relative">
       <button
         aria-label="任务中心"
         aria-expanded={open}

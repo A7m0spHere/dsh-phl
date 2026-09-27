@@ -12,7 +12,6 @@ export type Cubic = [number, number, number, number]
  * hovering a card, opening a page and expanding a panel all feel related.
  */
 export const EASE: Cubic = [0.22, 0.61, 0.36, 1]
-export const EASE_IN_OUT: Cubic = [0.65, 0, 0.35, 1]
 /** For things that should overshoot a hair — pills, toggles, sliding markers. */
 export const SPRING: Transition = { type: 'spring', stiffness: 520, damping: 38, mass: 0.9 }
 export const SPRING_SOFT: Transition = { type: 'spring', stiffness: 320, damping: 34, mass: 1 }

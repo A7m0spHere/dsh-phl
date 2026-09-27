@@ -27,16 +27,96 @@
 //! prefers it; that keeps 「打开 WebUI」 working when the frontend's copy of the
 //! URL is missing or stale (an older record, a launch that raced the print, a
 //! PHL restart) instead of trading the fix for a mystery page.
+//!
+//! # Page-failure probe (报错日志)
+//!
+//! A plugin that never activates — e.g. one injecting a Cordis service the
+//! installed DSH version no longer provides — fails **in the browser**: the
+//! web frontend's own boot code throws `web boot: N entr(y|ies) did not
+//! activate` and renders it as the failure card. Nothing reaches `dsh web`'s
+//! stderr, so the instance's launch log records only the `dsh web:` line and
+//! PHL has no trace of what the user is staring at (2026-09-27, `dsh-bonk-pet`
+//! on 0.1.7-rc.2 vs. its 0.1.6-era `settingsScope` inject).
+//!
+//! The probe keeps that failure observable without giving the page an IPC
+//! surface: `initialization_script` injects a read-only observer that watches
+//! the `[data-dsh-boot]` failure card, and reports once by navigating to
+//! `phl-webui-error:report#<percent-encoded card text>`. `on_navigation`
+//! intercepts that scheme on the Rust side, appends the text to
+//! `<instance>/logs/webui-errors.log` (size-capped, next to the launch logs),
+//! emits `phl://webui-page-error`, and returns false so the navigation never
+//! leaves the window. The channel is one-way page→Rust text; the page can
+//! only write into its own instance's log, which is strictly less than what
+//! rendering a fake UI in that window already allows.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 use crate::paths::{sanitize_segment, PhlState};
+use crate::versions::now_iso;
 
 /// Window-label prefix. Every `dsh-web-*` window belongs to this module.
 pub(crate) const WEBUI_PREFIX: &str = "dsh-web-";
+
+/// Scheme the injected probe navigates to in order to hand its report over.
+const PROBE_SCHEME: &str = "phl-webui-error";
+
+/// Per-instance page-error log, living beside the launch logs it complements.
+const PAGE_ERROR_LOG: &str = "webui-errors.log";
+
+/// Event name the frontend may subscribe to when a WebUI page reports failure.
+pub(crate) const WEBUI_PAGE_ERROR: &str = "phl://webui-page-error";
+
+/// Char cap on one reported card: boot failures are a few hundred chars; the
+/// bound only exists so a hostile page cannot stream megabytes per report.
+const MAX_REPORT_CHARS: usize = 16_000;
+
+/// Rotation ceiling for `webui-errors.log` — over this, the oldest half of
+/// the file is dropped (at a line boundary) on the next append.
+const MAX_LOG_BYTES: u64 = 256 * 1024;
+
+/// The probe, injected into every `dsh-web-*` window's documents. It is
+/// defensive by construction: any throw inside it is swallowed, because
+/// breaking the user's DSH page to capture a diagnostic would be the worst
+/// possible outcome. It reports at most once per distinct card text per
+/// document, and never mutates the page.
+const BOOT_PROBE_JS: &str = r##"
+(function () {
+  try {
+    if (!/^https?:$/.test(location.protocol)) return;
+    if (window.__phlWebuiProbe) return;
+    window.__phlWebuiProbe = 1;
+    var last = '';
+    function cardText() {
+      var card = document.querySelector('[data-dsh-boot]');
+      if (!card) return null;
+      var t = (card.innerText || card.textContent || '').trim();
+      if (/did not activate|Failed to load plugins|startup failed/i.test(t)) return t;
+      return null;
+    }
+    function check() {
+      var t = cardText();
+      if (!t || t === last) return;
+      last = t;
+      try {
+        location.assign('phl-webui-error:report#' + encodeURIComponent(t.slice(0, 16000)));
+      } catch (e) {}
+    }
+    function watch() {
+      check();
+      try {
+        new MutationObserver(check).observe(document.documentElement,
+          { childList: true, subtree: true, characterData: true });
+      } catch (e) {}
+      setInterval(check, 3000);
+    }
+    if (document.documentElement) watch();
+    else document.addEventListener('DOMContentLoaded', watch);
+  } catch (e) {}
+})();
+"##;
 
 fn label_of(instance_id: &str) -> String {
     format!("{WEBUI_PREFIX}{instance_id}")
@@ -124,6 +204,98 @@ async fn recovered_url_from_log(logs_dir: &Path, requested: &Url) -> Option<Url>
     ensure_loopback(url.as_str()).ok()
 }
 
+/* ------------------------------ probe ------------------------------- */
+
+/// Minimal percent-decoder for what `encodeURIComponent` emits: `%XX` triples
+/// over UTF-8 bytes; everything else passes through (`+` stays a `+`, because
+/// the fragment never went through form encoding).
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Keep readable text only: newlines and tabs survive, every other control
+/// character (ANSI, NUL, bidi overrides …) is dropped, then the report cap.
+fn sanitize_report(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+        .take(MAX_REPORT_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// The report carried by a probe navigation, or `None` for a URL that is not
+/// one (normal navigations keep going) or whose payload is empty after
+/// sanitising.
+fn probe_report(url: &Url) -> Option<String> {
+    if url.scheme() != PROBE_SCHEME {
+        return None;
+    }
+    let text = sanitize_report(&percent_decode(url.fragment().unwrap_or("")));
+    (!text.is_empty()).then_some(text)
+}
+
+/// Append one report to the instance's page-error log, then keep the file
+/// bounded. Log trouble never surfaces as an error to the user: the window
+/// is already showing the failure — the log is post-mortem material.
+fn write_page_error(logs_dir: &Path, instance_id: &str, report: &str) {
+    let path = logs_dir.join(PAGE_ERROR_LOG);
+    let entry = format!(
+        "[{ts}] 实例「{instance_id}」的 WebUI 页面报告启动失败（页面原文）:\n{report}\n\n",
+        ts = now_iso(),
+    );
+    if std::fs::create_dir_all(logs_dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        if file.write_all(entry.as_bytes()).is_ok() {
+            rotate_page_log(&path);
+        }
+    }
+}
+
+/// Over the ceiling, keep only the newest half (cut at a line boundary).
+fn rotate_page_log(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= MAX_LOG_BYTES {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let keep_from = bytes.len() / 2;
+    let start = bytes[keep_from..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map(|p| keep_from + p + 1)
+        .unwrap_or(keep_from);
+    let _ = std::fs::write(path, &bytes[start..]);
+}
+
 /* ------------------------------ commands ------------------------------- */
 
 /// Open (or focus) the embedded WebUI window for one instance. Idempotent by
@@ -166,6 +338,15 @@ pub async fn open_or_focus_webui(
     let fallback = format!("DSH · {host}");
     let name = title.unwrap_or_default();
     let name: String = name.chars().take(60).collect();
+
+    // Probe plumbing (see the module docs): the closure owns everything it
+    // needs because `on_navigation` demands `'static`. The log directory is
+    // resolved at open time from the live root — a root switch while a window
+    // stays open is rare and the old path is still where the launch logs are.
+    let logs_dir: PathBuf = phl.root().join("instances").join(&id).join("logs");
+    let probe_id = id.clone();
+    let probe_app = app.clone();
+
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
         .title(if name.trim().is_empty() {
             &fallback
@@ -176,6 +357,22 @@ pub async fn open_or_focus_webui(
         .min_inner_size(480.0, 360.0)
         .center()
         .resizable(true)
+        .initialization_script(BOOT_PROBE_JS)
+        .on_navigation(move |url| match probe_report(url) {
+            None => true,
+            Some(report) => {
+                write_page_error(&logs_dir, &probe_id, &report);
+                let _ = probe_app.emit(
+                    WEBUI_PAGE_ERROR,
+                    serde_json::json!({
+                        "instanceId": probe_id.clone(),
+                        "logPath": logs_dir.join(PAGE_ERROR_LOG),
+                        "detail": report,
+                    }),
+                );
+                false
+            }
+        })
         .build()
         .map_err(|e| format!("无法打开 WebUI 窗口: {e}"))?;
     // Same taskbar-icon treatment as the main window (see lib.rs).
@@ -343,5 +540,117 @@ mod tests {
         let requested = ensure_loopback("http://localhost:3081/").unwrap();
         let unchanged = authenticated_url(&phl, "dsh-p5ig", requested).await;
         assert_eq!(unchanged.as_str(), "http://localhost:3081/");
+    }
+
+    /* ------------------------------ probe ------------------------------ */
+
+    #[test]
+    fn normal_navigations_keep_going_and_probe_navigations_are_intercepted() {
+        assert_eq!(
+            probe_report(&Url::parse("http://127.0.0.1:3080/").unwrap()),
+            None
+        );
+        assert_eq!(
+            probe_report(&Url::parse("https://example.com/x").unwrap()),
+            None
+        );
+        let report =
+            Url::parse("phl-webui-error:report#web%20boot%3A%201%20entry%20did%20not%20activate")
+                .unwrap();
+        assert_eq!(
+            probe_report(&report).as_deref(),
+            Some("web boot: 1 entry did not activate")
+        );
+    }
+
+    #[test]
+    fn a_real_bonk_pet_failure_survives_the_round_trip() {
+        // The exact card the user saw on 2026-09-27, encoded the way
+        // `encodeURIComponent` encodes it (newlines become %0A).
+        let card = "HARNESS\nFailed to load plugins\nweb boot: 1 entry did not activate\ndsh-bonk-pet: pending (waiting for service: settingsScope)";
+        let encoded = "HARNESS%0AFailed%20to%20load%20plugins%0Aweb%20boot%3A%201%20entry%20did%20not%20activate%0Adsh-bonk-pet%3A%20pending%20(waiting%20for%20service%3A%20settingsScope)";
+        let url = Url::parse(&format!("phl-webui-error:report#{encoded}")).unwrap();
+        assert_eq!(probe_report(&url).as_deref(), Some(card));
+    }
+
+    #[test]
+    fn empty_or_control_only_payloads_are_refused() {
+        let empty = Url::parse("phl-webui-error:report#").unwrap();
+        assert_eq!(probe_report(&empty), None);
+        let nul = Url::parse("phl-webui-error:report#%00%01%02").unwrap();
+        assert_eq!(probe_report(&nul), None);
+    }
+
+    #[test]
+    fn percent_decoding_passes_through_what_the_encoder_leaves_alone() {
+        assert_eq!(percent_decode("a%20b!c'd(e)h_i~j"), "a b!c'd(e)h_i~j");
+        // A truncated escape stays literal rather than eating bytes.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%e2%9c%93"), "✓");
+        // Invalid UTF-8 after decoding is lossy, not a panic.
+        assert!(percent_decode("%ff").contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn reports_are_capped_before_hitting_disk() {
+        let huge = "x".repeat(MAX_REPORT_CHARS * 3);
+        let kept = sanitize_report(&huge);
+        assert_eq!(kept.chars().count(), MAX_REPORT_CHARS);
+    }
+
+    #[test]
+    fn tabs_and_newlines_survive_sanitising_but_ansi_does_not() {
+        assert_eq!(sanitize_report("a\u{1b}[31mb\nc\td"), "a[31mb\nc\td");
+    }
+
+    /// A temp `logs/` dir unique to the running test process.
+    fn temp_logs_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("phl-probe-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn one_instance_writes_one_bounded_log_beside_its_launch_logs() {
+        let logs = temp_logs_dir("append");
+        write_page_error(&logs, "3-xfji", "first failure");
+        write_page_error(&logs, "3-xfji", "second failure");
+        let text = std::fs::read_to_string(logs.join(PAGE_ERROR_LOG)).unwrap();
+        assert!(text.contains("first failure") && text.contains("second failure"));
+        assert!(text.contains("实例「3-xfji」"));
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    #[test]
+    fn an_oversized_page_log_keeps_its_newest_half_at_line_boundaries() {
+        let logs = temp_logs_dir("rotate");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join(PAGE_ERROR_LOG);
+        // Pre-fill past the ceiling with line-numbered noise, then append one
+        // real report: the file must come back under the cap, still contain
+        // the new entry, and start at a whole line.
+        let mut filler = String::new();
+        while (filler.len() as u64) < MAX_LOG_BYTES + 1024 {
+            filler.push_str("old noise line\n");
+        }
+        std::fs::write(&path, filler).unwrap();
+        write_page_error(&logs, "i", "the newest report");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!((after.len() as u64) <= MAX_LOG_BYTES, "log stayed too big");
+        assert!(after.contains("the newest report"), "new entry was lost");
+        assert!(after.starts_with(['[', 'o']), "cut landed mid-line");
+        assert!(
+            !after.contains("old noise line\nold noise line\nol\n"),
+            "garbage head"
+        );
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    #[test]
+    fn the_probe_finds_the_failure_card_by_its_stable_marker() {
+        // The selector, not the copy, is the contract with dsh-web-frontend;
+        // a typo here silently unships the whole log.
+        assert!(BOOT_PROBE_JS.contains("[data-dsh-boot]"));
+        assert!(BOOT_PROBE_JS.contains("phl-webui-error:report#"));
     }
 }

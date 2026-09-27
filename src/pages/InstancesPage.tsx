@@ -79,7 +79,7 @@ export function InstancesPanel() {
           prefix={<Search size={13} />}
           suffix={
             query ? (
-              <button onClick={() => setQuery('')} aria-label="清除" className="hover:text-ink">
+              <button onClick={() => setQuery('')} aria-label="清除" className="transition-colors hover:text-ink">
                 <X size={12} />
               </button>
             ) : undefined

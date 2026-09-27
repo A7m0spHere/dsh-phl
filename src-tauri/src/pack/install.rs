@@ -41,6 +41,7 @@ use crate::instances::{
     InstanceRecord, InstanceSource, ManagementMode,
 };
 use crate::paths::{sanitize_segment, PhlState};
+use crate::plugins::deps::DependencyEnv;
 use crate::plugins::install::commit_install;
 use crate::plugins::resolve::sanitize_pkg_path;
 use crate::versions::{now_iso, Transfers};
@@ -416,7 +417,10 @@ pub(crate) async fn install_inner(
             // into the existing `remove_dir_all(&staging)` cleanup — no half-
             // committed instance ever lands.
             mark(&task, on_progress, "登记内置插件", 0.75);
-            register_embedded_plugins(&pack.manifest.plugins, &profile, &task).await?;
+            // Embedded plugins resolve their installer against the runtime this
+            // pack itself binds — the same isolation rule as plugin installs.
+            let deps = DependencyEnv::new(root, &manifest.runtime_id, None);
+            register_embedded_plugins(&pack.manifest.plugins, &profile, &task, &deps).await?;
 
             mark(&task, on_progress, "应用环境", 0.85);
             let mut credential_names = Vec::new();
@@ -559,6 +563,7 @@ async fn register_embedded_plugins(
     plugins: &[PackPlugin],
     profile: &Path,
     task: &crate::resources::Task,
+    deps: &DependencyEnv,
 ) -> Result<usize, String> {
     let plugins_root = profile.join("node_modules");
     // Two manifest ids can share one unpacked folder; register each folder once.
@@ -631,7 +636,7 @@ async fn register_embedded_plugins(
             "trust": "unverified",
             "source": { "type": "pack-embedded" },
         });
-        commit_install(&dir, &marker, profile, &registry_id, task, None)
+        commit_install(&dir, &marker, profile, &registry_id, task, None, deps)
             .await
             .map_err(|e| format!("登记内置插件 {registry_id} 失败：{e}"))?;
         count += 1;

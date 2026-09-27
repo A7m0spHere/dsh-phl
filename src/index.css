@@ -47,9 +47,7 @@
     --c-knob: 0 0% 100%;
 
     /* motion */
-    --motion: 1;
     --e-out: cubic-bezier(0.22, 0.61, 0.36, 1);
-    --e-in-out: cubic-bezier(0.65, 0, 0.35, 1);
     /* Durations that CSS owns (the sheen sweep). JS-driven motion reads the
        mirrored scale in lib/motion.ts `D`; keeping the one CSS value here
        stops the number being retyped as a Tailwind arbitrary value. */
@@ -300,22 +298,8 @@
 
 @layer components {
   /* A hairline that reads as a division rather than a border. */
-  .hairline-b {
-    box-shadow: inset 0 -1px 0 hsl(var(--c-line));
-  }
-  .hairline-t {
-    box-shadow: inset 0 1px 0 hsl(var(--c-line));
-  }
   .hairline-r {
     box-shadow: inset -1px 0 0 hsl(var(--c-line));
-  }
-
-  /* Drag region for a future frameless Tauri window. */
-  .drag {
-    -webkit-app-region: drag;
-  }
-  .no-drag {
-    -webkit-app-region: no-drag;
   }
 
   .num {

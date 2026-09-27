@@ -228,6 +228,30 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             </Tooltip>
           )}
 
+          {/* Same lifetime as `lastExit`, different failure: the process is
+              alive but its WebUI page did not boot (a plugin never
+              activated). Without this the pill would read 运行中 over a UI
+              that shows only a failure card. */}
+          {state.lastWebuiError && (
+            <Tooltip
+              content={
+                <div className="max-w-[320px] space-y-1 text-left">
+                  <div className="font-medium">{state.lastWebuiError.headline}（进程仍在运行）</div>
+                  {state.lastWebuiError.causes.map((c, i) => (
+                    <div key={i} className="text-ink-muted">
+                      {c}
+                    </div>
+                  ))}
+                  <div className="text-ink-faint">{state.lastWebuiError.hint}</div>
+                </div>
+              }
+            >
+              <span className="num shrink-0 rounded-xs border border-danger/40 px-1.5 py-0.5 text-2xs text-danger">
+                页面未加载
+              </span>
+            </Tooltip>
+          )}
+
           <Button
             size="sm"
             variant={running ? 'secondary' : failed ? 'secondary' : 'primary'}

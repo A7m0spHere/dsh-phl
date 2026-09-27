@@ -10,6 +10,12 @@ fn root(tag: &str) -> PathBuf {
     dir
 }
 
+/// Fixtures stage dependency-free plugins: the system-binding env never
+/// reaches the tool chain, it only satisfies the commit signature.
+fn system_deps() -> DependencyEnv {
+    DependencyEnv::new(std::path::Path::new(""), "node-system", None)
+}
+
 /// A pack with one embedded plugin (with package.json + a source file) and one
 /// session, plus an environment section, built exactly as the exporter would.
 fn build_sample_pack(dest: &Path) {
@@ -154,6 +160,7 @@ async fn embedded_plugin_gets_a_marker_and_cordis_registration() {
         ])),
         &profile,
         &test_task(),
+        &system_deps(),
     )
     .await
     .unwrap();
@@ -204,6 +211,7 @@ async fn scoped_embedded_plugin_registers_under_its_true_npm_name() {
         ])),
         &profile,
         &test_task(),
+        &system_deps(),
     )
     .await
     .unwrap();
@@ -240,6 +248,7 @@ async fn an_embedded_plugin_without_a_manifest_is_a_hard_error() {
         ])),
         &profile,
         &test_task(),
+        &system_deps(),
     )
     .await;
     assert!(
@@ -276,6 +285,7 @@ async fn a_stale_carried_marker_is_overwritten_not_trusted() {
         ])),
         &profile,
         &test_task(),
+        &system_deps(),
     )
     .await
     .unwrap();

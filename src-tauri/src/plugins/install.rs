@@ -3,7 +3,6 @@
 //! cordis.patch.yml. Plus the enable/uninstall lifecycle commands.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -17,6 +16,7 @@ use super::cordis::{
     plugin_registration_state, register_cordis_patch, restore_plugin_registration_state,
     set_plugin_disabled,
 };
+use super::deps::{install_plugin_dependencies, DependencyEnv};
 use super::resolve::{registry_id_of, resolve_source, sanitize_pkg_path};
 use super::{
     cancelled, compute_trust, sanitize_cache_name, source_kind, PluginInstallOutcome,
@@ -49,6 +49,14 @@ pub async fn install_plugin(
     // plugins into a DSH_HOME the user keeps owning (spec §3.4).
     let profile =
         crate::instances::writable_profile_dir(&phl.root(), &instance_id, "安装插件到").await?;
+    // Dependency installation resolves its toolchain through the instance's
+    // bound runtime (see `deps`), so the manifest is read for that binding.
+    // `writable_profile_dir` already proved the manifest loads.
+    let instance_dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
+    let runtime_id = crate::instances::manifest::load_manifest(&instance_dir, &instance_id)
+        .await?
+        .runtime_id;
+    let deps = DependencyEnv::new(&phl.root(), &runtime_id, Some(&registry_base));
     // A committed install changes the tree the disk-usage cache measured.
     let profile_for_cache = profile.clone();
     let flag = transfers.take(&transfer_id);
@@ -72,6 +80,7 @@ pub async fn install_plugin(
                 version.as_deref(),
                 &registry_base,
                 &profile,
+                &deps,
                 &on_progress,
             )
             .await
@@ -94,6 +103,7 @@ async fn run_plugin_install(
     requested_version: Option<&str>,
     registry_base: &str,
     instance_root: &Path,
+    deps: &DependencyEnv,
     on_progress: &Channel<PluginProgressEvent>,
 ) -> Result<PluginInstallOutcome, String> {
     if instance_root.as_os_str().is_empty() {
@@ -253,6 +263,7 @@ async fn run_plugin_install(
             &registry_id,
             task,
             Some(on_progress),
+            deps,
         )
         .await?;
         mark_transaction_committed(instance_root).await
@@ -297,6 +308,7 @@ pub(crate) async fn commit_install(
     registry_id: &str,
     task: &crate::resources::Task,
     on_event: Option<&Channel<PluginProgressEvent>>,
+    deps: &DependencyEnv,
 ) -> Result<(), String> {
     tokio::fs::write(dest.join("phl-plugin.json"), marker.to_string())
         .await
@@ -309,7 +321,7 @@ pub(crate) async fn commit_install(
     if let Some(ch) = on_event {
         let _ = ch.send(PluginProgressEvent::InstallingDeps);
     }
-    install_plugin_dependencies(dest)
+    install_plugin_dependencies(dest, deps)
         .await
         .map_err(|e| format!("安装插件依赖失败: {e}"))?;
     task.set_phase("committing");
@@ -330,96 +342,6 @@ pub(crate) async fn commit_install(
         .map_err(|e| format!("更新 cordis.patch.yml 失败: {e}"))?;
 
     Ok(())
-}
-
-/// A dependency install must complete before the package swap can commit.
-const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Keep the dependency closure inside the package being committed. A profile-
-/// level `pnpm add` rewrites shared dependencies and package.json outside the
-/// install rollback boundary. Ignoring the enclosing workspace also prevents
-/// pnpm from mutating sibling plugins. Lifecycle scripts follow the same
-/// disabled-by-default policy as the DSH version installer.
-async fn install_plugin_dependencies(dest: &Path) -> Result<(), String> {
-    if dependency_specs(dest).await?.is_empty() {
-        return Ok(());
-    }
-    let bin = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
-    let mut command = tokio::process::Command::new(bin);
-    command
-        .current_dir(dest)
-        .args([
-            "install",
-            "--ignore-workspace",
-            "--prod",
-            "--ignore-scripts",
-            "--no-lockfile",
-        ])
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let child = command
-        .spawn()
-        .map_err(|e| format!("无法运行 pnpm 安装依赖，请先安装 pnpm 或 corepack：{e}"))?;
-    let pid = child.id();
-    let output = child.wait_with_output();
-    tokio::pin!(output);
-    let output = match tokio::time::timeout(DEPENDENCY_INSTALL_TIMEOUT, &mut output).await {
-        Ok(result) => result.map_err(|e| format!("读取 pnpm 结果失败：{e}"))?,
-        Err(_) => {
-            if let Some(pid) = pid {
-                crate::launch::kill_tree(pid).await?;
-            }
-            // Reap the stopped child before callers restore or delete its files.
-            let _ = output.await;
-            return Err("安装依赖超时（pnpm）".into());
-        }
-    };
-    if !output.status.success() {
-        return Err(format!(
-            "pnpm 安装依赖失败: {}",
-            stderr_tail(&output.stderr)
-        ));
-    }
-    Ok(())
-}
-
-/// `name@range` specs for the plugin's own `dependencies`, read from its
-/// extracted `package.json`. Empty for a dependency-free plugin.
-async fn dependency_specs(dest: &Path) -> Result<Vec<String>, String> {
-    let text = match tokio::fs::read_to_string(dest.join("package.json")).await {
-        Ok(t) => t,
-        Err(e) => return Err(format!("无法读取插件 package.json: {e}")),
-    };
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("插件 package.json 解析失败: {e}"))?;
-    let mut specs = value
-        .get("dependencies")
-        .and_then(|d| d.as_object())
-        .map(|deps| {
-            deps.iter()
-                .filter_map(|(name, range)| range.as_str().map(|r| format!("{name}@{r}")))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    specs.sort();
-    Ok(specs)
-}
-
-/// The last few lines of pnpm's stderr, for a failure the user can act on.
-fn stderr_tail(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    text.lines()
-        .rev()
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Undo the swap and the patch file after a failed commit, so the previous
@@ -760,6 +682,12 @@ mod tests {
         dir
     }
 
+    /// Commit-path tests carry dependency-free fixtures, so the env is never
+    /// consulted — a system-binding one is enough to satisfy the pipeline.
+    fn system_deps() -> DependencyEnv {
+        DependencyEnv::new(std::path::Path::new(""), "node-system", None)
+    }
+
     fn fixture(tag: &str, with_previous: bool) -> HashMap<&'static str, std::path::PathBuf> {
         let instance = temp_root(tag);
         let node_modules = instance.join("node_modules");
@@ -800,6 +728,7 @@ mod tests {
             "dsh-foo",
             &test_task(),
             None,
+            &system_deps(),
         )
         .await
         .unwrap();
@@ -826,6 +755,7 @@ mod tests {
             "dsh-foo",
             &test_task(),
             None,
+            &system_deps(),
         )
         .await
         .expect_err("commit must fail");
@@ -1004,6 +934,7 @@ mod tests {
             "dsh-foo",
             &test_task(),
             None,
+            &system_deps(),
         )
         .await
         .unwrap();
@@ -1256,126 +1187,5 @@ mod tests {
         // dest holds the new copy again (rename aside -> rename backup fails
         // -> rename aside back), nothing is silently deleted.
         assert!(f["dest"].join("new.js").exists());
-    }
-
-    #[tokio::test]
-    async fn dependency_specs_are_sorted_and_ranged() {
-        let dir = temp_root("dep-specs");
-        let dest = dir.join("node_modules").join("dsh-foo");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(
-            dest.join("package.json"),
-            r#"{"dependencies":{"ws":"^8.0.0","schemastery":"^3.0.0","react":"18.3.1"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            dependency_specs(&dest).await.unwrap(),
-            vec!["react@18.3.1", "schemastery@^3.0.0", "ws@^8.0.0"],
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires pnpm and Node on PATH; uses only a local fixture dependency"]
-    async fn dependencies_stay_inside_the_plugin_and_scripts_do_not_run() {
-        let root = temp_root("dep-isolation");
-        let profile = root.join("profile");
-        let dest = profile.join("node_modules/dsh-local");
-        let dependency = root.join("local-dep");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::create_dir_all(&dependency).unwrap();
-        std::fs::write(
-            dependency.join("package.json"),
-            r#"{"name":"phl-fixture-dep","version":"1.0.0","main":"index.js"}"#,
-        )
-        .unwrap();
-        std::fs::write(dependency.join("index.js"), "module.exports = 42").unwrap();
-        let package = serde_json::json!({
-            "name": "dsh-local", "version": "1.0.0",
-            "dependencies": {"phl-fixture-dep": format!("file:{}", dependency.to_string_lossy().replace('\\', "/"))},
-            "scripts": {"postinstall": "node -e \"require('fs').writeFileSync('script-ran', 'bad')\""}
-        });
-        std::fs::write(dest.join("package.json"), package.to_string()).unwrap();
-        std::fs::write(
-            profile.join("package.json"),
-            "{\"name\":\"profile\",\"private\":true}",
-        )
-        .unwrap();
-        std::fs::write(
-            profile.join("pnpm-workspace.yaml"),
-            "packages:\n  - node_modules/*\n",
-        )
-        .unwrap();
-        let before = std::fs::read(profile.join("package.json")).unwrap();
-        install_plugin_dependencies(&dest).await.unwrap();
-        assert_eq!(std::fs::read(profile.join("package.json")).unwrap(), before);
-        assert!(!profile.join("pnpm-lock.yaml").exists());
-        assert!(!profile.join("node_modules/phl-fixture-dep").exists());
-        assert!(!dest.join("script-ran").exists());
-        // The dependency must be *closed within the plugin*: reachable from
-        // the plugin directory, and only there. pnpm's layout of `file:`
-        // links is environment-dependent — on Windows without symlink
-        // privileges (no Developer Mode), pnpm 12 resolves registry links
-        // fine but omits the top-level `file:` link, leaving the package
-        // only under the plugin's own `.pnpm` store. Both outcomes satisfy
-        // the product promise; only *resolution outside the plugin* or a
-        // script run would violate it — hence the store-level fallback.
-        let output = tokio::process::Command::new("node")
-            .current_dir(&dest)
-            .args([
-                "-e",
-                "if (require('phl-fixture-dep') !== 42) process.exit(1)",
-            ])
-            .output()
-            .await
-            .unwrap();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            assert!(
-                stderr.contains("Cannot find module"),
-                "dependency resolved to the wrong value, not a layout miss: {stderr}"
-            );
-            let vstore = dest.join("node_modules").join(".pnpm");
-            let closed = vstore.exists() && contains_named_dir(&vstore, "phl-fixture-dep", 4);
-            assert!(
-                closed,
-                "the dependency must still live inside the plugin's own subtree"
-            );
-            eprintln!("note: pnpm laid `file:` dep into the virtual store only (no symlink privilege); closure verified");
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Bounded search for a directory entry named `needle` below `dir`.
-    fn contains_named_dir(dir: &std::path::Path, needle: &str, depth: u32) -> bool {
-        if depth == 0 {
-            return false;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            if entry.file_name() == needle {
-                return true;
-            }
-            if entry.path().is_dir() && contains_named_dir(&entry.path(), needle, depth - 1) {
-                return true;
-            }
-        }
-        false
-    }
-
-    #[tokio::test]
-    async fn self_contained_plugin_has_no_dependency_specs() {
-        let dir = temp_root("dep-none");
-        let dest = dir.join("node_modules").join("dsh-bar");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(dest.join("package.json"), r#"{"name":"dsh-bar"}"#).unwrap();
-        assert!(dependency_specs(&dest).await.unwrap().is_empty());
-    }
-
-    #[test]
-    fn stderr_tail_keeps_the_last_few_lines_in_order() {
-        let bytes = b"line1\nline2\nline3\n".to_vec();
-        assert_eq!(stderr_tail(&bytes), "line1\nline2\nline3");
     }
 }

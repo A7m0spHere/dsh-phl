@@ -207,6 +207,7 @@ export {
   stopInstance,
   cancelLaunch,
   onInstanceExited,
+  onWebuiPageError,
   openDshWebUi,
 } from './desktopLaunch'
 export type {
@@ -216,6 +217,7 @@ export type {
   AdoptedProcess,
   DroppedProcess,
   AdoptReport,
+  WebuiPageError,
 } from './desktopLaunch'
 
 /* ------------------------------ task centre ------------------------------ */

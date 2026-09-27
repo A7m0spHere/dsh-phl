@@ -66,7 +66,7 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
               by its overflow-hidden (2026-09-12 review). */}
           <div className="break-words text-sm font-medium leading-[17px] text-ink">{toast.title}</div>
           {toast.message && (
-            <div className="mt-0.5 break-words text-xs leading-[15px] text-ink-muted">{toast.message}</div>
+            <div className="mt-0.5 break-words whitespace-pre-line text-xs leading-[15px] text-ink-muted">{toast.message}</div>
           )}
         </div>
         <div className="flex shrink-0 items-start gap-1">
