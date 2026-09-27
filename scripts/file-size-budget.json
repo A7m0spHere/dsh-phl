@@ -1,5 +1,5 @@
 {
-  "note": "Ratchet size budget (rule from the maintainer-local structural review). Each entry is the maximum bytes the file may occupy; growth beyond it fails the gate. When a file legitimately shrinks, run `node scripts/check-file-size.mjs --update` to lower the ceiling (ratchet: rooms freed by a split must not be re-filled silently). Files NOT listed may grow to UNBUDGETED_MAX (40 KB) before the gate asks for an explicit, justified registration. New entries are added by hand, never by --update: splitting adds files, growth needs a decision. 2026-09-25: src-tauri/src/runtimes/mod.rs 登记 — R1·M1 精确 Runtime 绑定与旧绑定转换 (preview/convert/legacy id 规则) 使其超过 40KB；转换后续拆分时按 brief 下调。 2026-09-25: instances/trial.rs 登记 — R1·M3 试升级核心（预览/复制策略/链接重定向）。 2026-09-25(round2): instances/trial/mod.rs 登记 — 计划绑定/指纹/静默检查。 2026-09-26(round3): trial 拆分落地 — 计划身份/持久化/校验移入 instances/trial/plan.rs，提交记录移入 instances/trial/marker.rs；mod.rs 按 ratchet 下调至 38703，此后新增代码请放进对应子模块或新文件。 2026-09-26(round4): instances/mod.rs 导入状态（ImportState/读取器/失败原因）移入 instances/import_state.rs；R4-01 新增代码放子模块，父文件按 ratchet 下调。 2026-09-26(round4): instances/mod.rs 手工下调至 111681（拆分后现值+5%）——拆分腾出的空间不允许被回填。",
+  "note": "Ratchet size budget (rule from the maintainer-local structural review). Each entry is the maximum bytes the file may occupy; growth beyond it fails the gate. When a file legitimately shrinks, run `node scripts/check-file-size.mjs --update` to lower the ceiling (ratchet: rooms freed by a split must not be re-filled silently). Files NOT listed may grow to UNBUDGETED_MAX (40 KB) before the gate asks for an explicit, justified registration. New entries are added by hand, never by --update: splitting adds files, growth needs a decision. 2026-09-25: src-tauri/src/runtimes/mod.rs 登记 — R1·M1 精确 Runtime 绑定与旧绑定转换 (preview/convert/legacy id 规则) 使其超过 40KB；转换后续拆分时按 brief 下调。 2026-09-25: instances/trial.rs 登记 — R1·M3 试升级核心（预览/复制策略/链接重定向）。 2026-09-25(round2): instances/trial/mod.rs 登记 — 计划绑定/指纹/静默检查。 2026-09-26(round3): trial 拆分落地 — 计划身份/持久化/校验移入 instances/trial/plan.rs，提交记录移入 instances/trial/marker.rs；mod.rs 按 ratchet 下调至 38703，此后新增代码请放进对应子模块或新文件。 2026-09-26(round4): instances/mod.rs 导入状态（ImportState/读取器/失败原因）移入 instances/import_state.rs；R4-01 新增代码放子模块，父文件按 ratchet 下调。 2026-09-26(round4): instances/mod.rs 手工下调至 111681（拆分后现值+5%）——拆分腾出的空间不允许被回填。 2026-09-27: trial/mod.rs 上调至 39125 — retarget 的前缀匹配改为 8.3 短名/大小写不敏感（strip_prefix_link，CI 短名路径修复），属有意识的预算决策。",
   "budgets": {
     "src-tauri/src/instances/mod.rs": 111681,
     "src-tauri/src/storage.rs": 88054,
@@ -11,7 +11,7 @@
     "src-tauri/src/runtimes/mod.rs": 41735,
     "src/pages/SettingsPage.tsx": 39462,
     "src-tauri/src/versions/mod.rs": 38995,
-    "src-tauri/src/instances/trial/mod.rs": 39500,
+    "src-tauri/src/instances/trial/mod.rs": 39125,
     "src-tauri/src/api_config/tests.rs": 35111,
     "src/features/create/sections.tsx": 35089,
     "src-tauri/src/release_e2e/journeys.rs": 34631,

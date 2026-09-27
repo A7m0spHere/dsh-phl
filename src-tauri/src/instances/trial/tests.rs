@@ -342,35 +342,62 @@ async fn missing_new_version_content_is_reported_not_hidden() {
 }
 
 /// The retarget must recognise its own version links even when the link
-/// target and the data-root string disagree on case (a canonicalized
-/// drive label on a CI runner, a subst drive). `Path::starts_with` is
-/// byte-exact, which silently skipped the redirect and left the copy
-/// pointing at the OLD version tree — caught by CI, not locally, because
-/// the local TEMP spelling already agreed. The regression here retargets
-/// through a prefix whose case is flipped.
+/// target and the data-root string are two different spellings of the SAME
+/// directory. `Path::starts_with` is byte-exact, which silently skipped the
+/// redirect and left the copy pointing at the OLD version tree — caught by
+/// CI, not locally, because the local TEMP spelling already agreed.
+///
+/// Two spellings matter on Windows: case (a canonicalized drive label vs.
+/// the env var's) and 8.3 short names — a GitHub runner's TEMP is
+/// `C:\Users\RUNNER~1\...` while canonicalize expands it to
+/// `C:\Users\runneradmin\...`, which is exactly what the junction target
+/// carries (the copy engine derives targets from canonicalize). The
+/// regressions here retarget through both shapes.
 #[tokio::test]
 async fn case_flipped_version_link_is_still_redirected() {
     let root = scratch("linkcase");
     seed_versions(&root);
     seed_source(&root, "daily").await;
+    retarget_with_alternate_spelling(&root, case_flip).await;
+}
 
-    // Flip the case of the junction's stored target: re-create the same
-    // link with the drive letter and one segment upper-cased. This is the
-    // exact shape a canonicalize-vs-env-var spelling difference produces.
-    let profile = profile_root(&instance_dir(&root, "daily").unwrap(), "web");
+/// The CI-proven shape: the junction target carries the expanded/canonical
+/// spelling while the data-root string is the 8.3-short-name form. Built by
+/// re-creating the link with the canonicalized target, then running the
+/// trial against the short-named root — what the runner actually did.
+#[tokio::test]
+async fn short_name_spelled_version_link_is_still_redirected() {
+    let root = scratch("link83");
+    seed_versions(&root);
+    seed_source(&root, "daily").await;
+    // On a machine whose TEMP has no short-name component this must still
+    // exercise the canonical-vs-raw comparison: seed the link with the
+    // canonicalized target (what copy.rs would store), and let the match
+    // go through the raw spelling when canonicalize of the prefix agrees.
+    retarget_with_alternate_spelling(&root, |p| {
+        crate::paths::strip_verbatim(&std::fs::canonicalize(p).unwrap())
+    })
+    .await;
+}
+
+/// Shared body: re-create the source's version junction with an alternate
+/// spelling of the SAME path, then run the trial and assert the retarget
+/// still lands in the NEW version tree.
+async fn retarget_with_alternate_spelling(root: &Path, alt: fn(&Path) -> PathBuf) {
+    let profile = profile_root(&instance_dir(root, "daily").unwrap(), "web");
     let link = profile.join("node_modules").join("dsh-core");
     let old_tree = root
         .join("versions")
         .join("0.1.5-rc.3")
         .join("node_modules");
-    let flipped = case_flip(&old_tree);
+    let alternate = alt(&old_tree);
     std::fs::remove_dir(&link).unwrap();
-    super::super::copy::recreate_link(&link, &flipped, true).unwrap();
+    super::super::copy::recreate_link(&link, &alternate, true).unwrap();
 
-    let (req, allocated, auto) = plan_via_preview(&root, &processes(), "daily").await;
+    let (req, allocated, auto) = plan_via_preview(root, &processes(), "daily").await;
     let outcome = run_trial(
         &Arc::new(AtomicBool::new(false)),
-        &root,
+        root,
         &task(),
         &processes(),
         &req,
@@ -389,10 +416,10 @@ async fn case_flipped_version_link_is_still_redirected() {
     assert!(outcome.committed);
     assert_eq!(
         outcome.link_redirects, 1,
-        "a case-flipped version link is still PHL's own and must be retargeted"
+        "an alternatively-spelled version link is still PHL's own and must be retargeted"
     );
     assert!(outcome.link_failures.is_empty());
-    let dest = instance_dir(&root, &req.target_id).unwrap();
+    let dest = instance_dir(root, &req.target_id).unwrap();
     let body = std::fs::read_to_string(
         dest.join("dsh-home")
             .join("profiles")
@@ -405,9 +432,9 @@ async fn case_flipped_version_link_is_still_redirected() {
     assert!(
         body.contains("new core"),
         "the retargeted link must resolve into the NEW version even when the \
-         original spelling disagreed on case: {body}"
+         original spelling disagreed: {body}"
     );
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Upper-cases the drive letter and the first path segment — enough to break

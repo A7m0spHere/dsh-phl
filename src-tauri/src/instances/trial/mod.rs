@@ -803,16 +803,6 @@ async fn retarget_version_links(
     }
     let mut redirects = 0usize;
     let mut failures = Vec::new();
-    // TEMP-PROBE (remove after CI diagnosis): dump the environment facts the
-    // retarget decision depends on, once per call.
-    #[cfg(test)]
-    eprintln!(
-        "PHL-PROBE retarget home={:?} root={:?} old={old_bare} new={new_bare} temp={:?} canon_home={:?}",
-        home,
-        root,
-        std::env::temp_dir(),
-        std::fs::canonicalize(home).ok()
-    );
     let mut stack = vec![home.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
@@ -835,20 +825,8 @@ async fn retarget_version_links(
             if is_reparse {
                 // Candidate: read where it points.
                 if let Some(target) = read_link_target(&path) {
-                    // TEMP-PROBE (remove after CI diagnosis)
-                    #[cfg(test)]
-                    eprintln!(
-                        "PHL-PROBE link={:?} read_link_target={:?} raw_read_link={:?} canon={:?}",
-                        path,
-                        target,
-                        std::fs::read_link(&path).ok(),
-                        std::fs::canonicalize(&path).ok()
-                    );
                     let versions_prefix = root.join("versions").join(old_bare);
-                    if let Some(rel) = strip_prefix_ci(&target, &versions_prefix) {
-                        // TEMP-PROBE (remove after CI diagnosis)
-                        #[cfg(test)]
-                        eprintln!("PHL-PROBE matched prefix, rel={rel:?}");
+                    if let Some(rel) = strip_prefix_link(&target, &versions_prefix) {
                         let new_target = root.join("versions").join(new_bare).join(rel);
                         if new_target.exists() {
                             // A junction is a directory reparse point:
@@ -898,19 +876,26 @@ fn read_link_target(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// `path.strip_prefix(base)`, but case-insensitive.
+/// `path.strip_prefix(base)` for a link target against a versions prefix,
+/// tolerating the two spellings Windows gives the SAME directory.
 ///
-/// The junctions npm/PHL lay down carry the target spelling `mklink` got,
-/// which on Windows goes through the reparse buffer verbatim — while the
-/// versions prefix is built from the data-root string the caller holds.
-/// Those two spellings can disagree on case (a canonicalized `D:\` volume
-/// label versus a `d:\` TEMP value on a CI runner; a subst/mapped drive).
-/// `Path::starts_with` compares byte-for-byte, so the retarget would
-/// silently skip a link it owns and leave the copy pointing at the OLD
-/// version tree. The FS itself is case-insensitive here, so matching it is
-/// not a loosening: the prefix is still the exact same path.
+/// The junctions npm/PHL lay down carry the target spelling `mklink` got —
+/// and PHL's copy engine derives that target from `canonicalize`, which
+/// expands 8.3 short names (`RUNNER~1` → `runneradmin`) and normalizes
+/// case to what the volume reports. The versions prefix, however, is built
+/// from the data-root string the caller holds, which can be the short-name
+/// or differently-cased spelling (a CI runner's TEMP is
+/// `C:\Users\RUNNER~1\AppData\...`). `Path::starts_with` compares
+/// byte-for-byte, so the retarget would silently skip a link it owns and
+/// leave the copy pointing at the OLD version tree.
+///
+/// Resolution: compare against the canonical spelling of the prefix when it
+/// exists on disk (same expansion, same case), plus the raw spelling
+/// case-insensitively for a target that names an already-deleted tree (the
+/// missing-content failure path must still classify and report the link).
 #[cfg(windows)]
-fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
+fn strip_prefix_link(target: &Path, prefix: &Path) -> Option<PathBuf> {
+    /// Case-insensitive component-wise prefix test on verbatim-stripped paths.
     fn is_prefix_ci(path: &Path, base: &Path) -> bool {
         let mut pc = path.components();
         let mut bc = base.components();
@@ -934,20 +919,36 @@ fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
         }
     }
 
-    let p = crate::paths::strip_verbatim(path);
-    let b = crate::paths::strip_verbatim(base);
-    if !is_prefix_ci(&p, &b) {
-        return None;
+    fn strip_ci(path: &Path, base: &Path) -> Option<PathBuf> {
+        let p = crate::paths::strip_verbatim(path);
+        let b = crate::paths::strip_verbatim(base);
+        if !is_prefix_ci(&p, &b) {
+            return None;
+        }
+        // The remainder borrows from `p`; return an owned slice of it instead.
+        Some(p.components().skip(b.components().count()).collect())
     }
-    // The remainder borrows from `p`; return an owned slice of it instead.
-    let remainder: PathBuf = p.components().skip(b.components().count()).collect();
-    Some(remainder)
+
+    // The raw spelling first: it is what the target text actually says, and
+    // the only option when the prefix tree no longer exists (the failure
+    // path — canonicalize of a deleted dir errors).
+    if let Some(rel) = strip_ci(target, prefix) {
+        return Some(rel);
+    }
+    // Otherwise the same directory may be spelled differently on each side;
+    // canonicalize both (existing) sides and compare the canonical forms.
+    let canon_target = std::fs::canonicalize(target).ok()?;
+    let canon_prefix = std::fs::canonicalize(prefix).ok()?;
+    strip_ci(
+        &crate::paths::strip_verbatim(&canon_target),
+        &crate::paths::strip_verbatim(&canon_prefix),
+    )
 }
 
 /// Case matters on this platform: keep the exact-prefix contract.
 #[cfg(not(windows))]
-fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
-    path.strip_prefix(base).ok().map(PathBuf::from)
+fn strip_prefix_link(target: &Path, prefix: &Path) -> Option<PathBuf> {
+    target.strip_prefix(prefix).ok().map(PathBuf::from)
 }
 
 /// Keep `ensure_under_root` imported for future staging sweeps; the trial's
