@@ -283,6 +283,18 @@ interface UIState {
   paletteOpen: boolean
   setPaletteOpen: (open: boolean) => void
 
+  /**
+   * How many overlay surfaces (dropdown menus, non-DialogHost modals like
+   * the trial wizard and the env-compare dialog) are currently open. The
+   * go-back hotkey's gate reads this: every one of those surfaces closes on
+   * Escape through its OWN listener, and without this counter one keypress
+   * both closed the overlay AND navigated the page behind it.
+   * A counter (not a boolean) so nested surfaces unwind one per press.
+   */
+  overlayDepth: number
+  pushOverlay: () => void
+  popOverlay: () => void
+
   /* first-run guide */
   guideOpen: boolean
   setGuideOpen: (open: boolean) => void
@@ -449,6 +461,11 @@ export const useUIStore = create<UIState>()(
       /* ---------------- palette ---------------- */
       paletteOpen: false,
       setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+
+      /* ---------------- overlay depth ---------------- */
+      overlayDepth: 0,
+      pushOverlay: () => set({ overlayDepth: Math.min(get().overlayDepth + 1, 8) }),
+      popOverlay: () => set({ overlayDepth: Math.max(get().overlayDepth - 1, 0) }),
 
       /* ---------------- guide ---------------- */
       guideOpen: false,

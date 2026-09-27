@@ -242,7 +242,12 @@ async fn preview_shell(
 
     // Real packages pinned to versions the TARGET tree does not ship: the
     // copy would carry them verbatim and the new DSH may refuse them at boot.
-    // Detected here (before the user commits) and again on the outcome.
+    // Detected here (before the user commits) and again on the outcome. When
+    // the target is not installed yet the tree cannot be compared against —
+    // the create path re-runs the scan on the staging copy AFTER the
+    // version-installed guard, so the outcome still names everything; the
+    // preview just cannot pre-warn (the knob already carries
+    // `pending_downloads` for the missing version itself).
     let mismatched_packages = if target_installed {
         let source_profile = profile_root(&instance_dir(root, &req.source_id)?, &manifest.profile);
         mismatched_profile_packages(&source_profile, root, &target_version).await
@@ -1088,8 +1093,14 @@ async fn mismatched_profile_packages(
 }
 
 /// One package's mismatch note, or `None` when the profile copy agrees with
-/// the target tree (or the target does not ship the package at all — the
-/// missing case is the LINK failures' business, not this one).
+/// the target tree.
+///
+/// A REAL (non-link) package the target tree does not ship at all is ALSO a
+/// note — "missing" only belongs to the LINK failures when a link cannot be
+/// retargeted. A real directory carries no such report, so this path is the
+/// only place the user learns the old build rides into the copy with nothing
+/// to replace it (the acceptance case had upstream-renamed packages: no link
+/// failure, no version pair, just an old directory nobody named).
 async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<String> {
     async fn read_version(dir: &Path) -> Option<String> {
         let raw = tokio::fs::read_to_string(dir.join("package.json"))
@@ -1099,10 +1110,6 @@ async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<
         value.get("version")?.as_str().map(str::to_string)
     }
     let profile_version = read_version(profile_pkg).await?;
-    let target_version = read_version(target_pkg).await?;
-    if profile_version == target_version {
-        return None;
-    }
     let name = profile_pkg
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -1113,10 +1120,23 @@ async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| n.starts_with('@'));
     let full_name = scope.map(|s| format!("{s}/{name}")).unwrap_or(name);
-    Some(format!(
-        "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
-         副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内重装该插件"
-    ))
+    match read_version(target_pkg).await {
+        // The target ships a different build: both versions, with guidance.
+        Some(target_version) if target_version != profile_version => Some(format!(
+            "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
+             副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内重装该插件"
+        )),
+        // Same build on both sides — not a finding.
+        Some(_) => None,
+        // The target no longer ships this package (renamed or removed): the
+        // profile's old build rides into the copy with no replacement. Named
+        // here rather than silently skipped — the boot failure it can cause
+        // is exactly the one this detector exists for.
+        None => Some(format!(
+            "{full_name}: profile 内为 {profile_version}，目标版本不再携带该包（可能已改名或移除）；\
+             副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内卸载或重装该插件"
+        )),
+    }
 }
 
 /// Keep `ensure_under_root` imported for future staging sweeps; the trial's

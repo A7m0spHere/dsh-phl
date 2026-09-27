@@ -92,6 +92,20 @@ export function TrialDialog() {
     setStopping(false)
   }, [sourceId])
 
+  /**
+   * While open, the wizard owns Escape (it closes itself on Escape except
+   * mid-copy) — mirrored into the shared overlay depth so the global go-back
+   * hotkey does not ALSO navigate the page behind the dialog on the same
+   * keypress.
+   */
+  const pushOverlay = useUIStore((s) => s.pushOverlay)
+  const popOverlay = useUIStore((s) => s.popOverlay)
+  useEffect(() => {
+    if (!sourceId) return
+    pushOverlay()
+    return popOverlay
+  }, [sourceId, pushOverlay, popOverlay])
+
   const source = instances.find((i) => i.id === sourceId)
   const runtimeStatus = sourceId ? stateOf(sourceId).status : 'stopped'
   /** Knobs the plan must cover; the source's own runtime is the default. */
@@ -122,13 +136,20 @@ export function TrialDialog() {
   // source's binding — that is what "试用新版" means. `defaultTargetVersion`
   // keeps this in bare-name space (see its doc: the id spelling broke the
   // whole flow).
+  //
+  // Runs on OPEN only (sourceId/presetVersion), deliberately NOT on catalog
+  // churn: the App's periodic version sync changes `versions.length`, and
+  // re-running there silently reset the user's picked target version and
+  // runtime mid-edit — dropping the plan and disabling create until a fresh
+  // preview landed. The options list itself re-renders from `versionOptions`
+  // either way; a user holding a knob keeps it.
   useEffect(() => {
     if (!source) return
     const current = resolveBoundVersion(versions, source.versionId)
     setTargetVersion(defaultTargetVersion(versionOptions, current?.id, presetVersion))
     setTargetRuntimeId(source.runtimeId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, presetVersion, versions.length])
+  }, [sourceId, presetVersion])
 
   // Re-preview whenever a plan-relevant knob changes. The generation guard
   // keeps a slow older preview from overwriting the newest request, and the
@@ -229,8 +250,17 @@ export function TrialDialog() {
       setStep('result')
       // The copy is a new instance and the store has never seen it: without
       // this refresh the result panel's 打开副本 / 比较环境 land on
-      // 「实例不存在」 (found by the CDP lane, 2026-09-26).
-      void reload()
+      // 「实例不存在」 (found by the CDP lane, 2026-09-26). A failed re-read
+      // is the same failure mode — surfaced, not left as an unhandled
+      // rejection with the copy invisible.
+      reload().catch((err) => {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '刷新实例列表失败',
+          message: `副本已创建，但列表未能刷新：${parseThrownError(err).message}`,
+          duration: 8000,
+        })
+      })
     } catch (err) {
       setStep('configure')
       if (err instanceof Cancelled) {

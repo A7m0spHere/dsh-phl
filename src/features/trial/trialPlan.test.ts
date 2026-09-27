@@ -199,6 +199,11 @@ describe('TrialDialog wiring (R3-01)', () => {
   })
 
   it('refreshes the instance list after a create, so 打开副本 finds the copy', () => {
-    expect(dialog).toContain('void reload()')
+    // The refresh must run AND its rejection must be handled: a failed
+    // re-read leaves the new copy invisible, which is the very bug the
+    // refresh exists to prevent — it may not surface as an unhandled
+    // rejection with no toast (round-2 review).
+    expect(dialog).toContain('reload().catch(')
+    expect(dialog).not.toContain('void reload()')
   })
 })

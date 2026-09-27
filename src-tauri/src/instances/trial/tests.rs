@@ -200,6 +200,47 @@ async fn preview_names_mismatched_real_packages_before_commit() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A REAL package the target tree does not carry AT ALL is also named: there
+/// is no link failure for a real directory, so this path is the only thing
+/// that tells the user the old build rides into the copy with no replacement
+/// (the acceptance case: upstream renamed the packages).
+#[tokio::test]
+async fn preview_names_real_packages_the_target_no_longer_ships() {
+    let root = scratch("dropped");
+    seed_versions(&root);
+    seed_source(&root, "daily").await;
+    // A real package with a version, that the target tree simply does not
+    // have (not even under another name PHL can know about).
+    let pkg = profile_root(&instance_dir(&root, "daily").unwrap(), "web")
+        .join("node_modules")
+        .join("legacy-tool");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{ "name": "legacy-tool", "version": "0.9.0" }"#,
+    )
+    .unwrap();
+
+    let preview = build_preview(&root, &processes(), &request("daily"))
+        .await
+        .unwrap();
+    let dropped = preview
+        .mismatched_packages
+        .iter()
+        .find(|m| m.contains("legacy-tool"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a dropped real package must be named: {:?}",
+                preview.mismatched_packages
+            )
+        });
+    assert!(
+        dropped.contains("不再携带") && dropped.contains("0.9.0"),
+        "the note names the drop and the carried version: {dropped}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn config_scope_copies_config_and_drops_sessions() {
     let root = scratch("scope");

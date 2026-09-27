@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Check, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { useUIStore } from '@/stores'
 import { MENU_Z, useMotion } from '@/lib/motion'
 
 export interface DropdownOption<T extends string = string> {
@@ -39,6 +40,16 @@ export function Dropdown<T extends string>({
 }) {
   const [open, setOpen] = useState(false)
   const [dropUp, setDropUp] = useState(false)
+  // Mirror `open` into the shared overlay depth: the go-back hotkey's gate
+  // must know an overlay owns Escape here, or one press both closes this
+  // list AND navigates the page behind it.
+  const pushOverlay = useUIStore((s) => s.pushOverlay)
+  const popOverlay = useUIStore((s) => s.popOverlay)
+  useEffect(() => {
+    if (!open) return
+    pushOverlay()
+    return popOverlay
+  }, [open, pushOverlay, popOverlay])
   const [active, setActive] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)

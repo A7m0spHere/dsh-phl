@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { GitCompare, X } from 'lucide-react'
 import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { Badge, Button, Spinner } from '@/components/ui'
-import { useInstanceStore } from '@/stores'
+import { useInstanceStore, useUIStore } from '@/stores'
 import { isDesktop } from '@/lib/desktopCore'
 import { repository } from '@/services'
 import { formatDateTime } from '@/lib/format'
@@ -71,14 +71,23 @@ export function EnvironmentCompareDialog() {
       })
   }, [leftId, rightId])
 
+  // While open, this dialog owns Escape — mirrored into the shared overlay
+  // depth so the global go-back hotkey does not also navigate the page
+  // behind it on the same keypress.
+  const pushOverlay = useUIStore((s) => s.pushOverlay)
+  const popOverlay = useUIStore((s) => s.popOverlay)
   useEffect(() => {
     if (!leftId) return
+    pushOverlay()
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close()
     }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [leftId, close])
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      popOverlay()
+    }
+  }, [leftId, close, pushOverlay, popOverlay])
 
   const others = useMemo(() => instances.filter((i) => i.id !== leftId), [instances, leftId])
 
