@@ -32,6 +32,11 @@ pub(crate) struct TrialMarker {
     pub readiness: String,
     #[serde(default)]
     pub link_failures: Vec<String>,
+    /// Real profile packages that differed from the target tree at commit
+    /// time (see `mismatched_profile_packages`); defaults for markers written
+    /// before the field existed.
+    #[serde(default)]
+    pub mismatched_packages: Vec<String>,
 }
 
 pub(crate) async fn write_trial_marker(dest: &Path, marker: &TrialMarker) -> Result<(), String> {
@@ -65,13 +70,19 @@ pub(crate) async fn recorded_outcome(dest: &Path, id: &str) -> Result<TrialOutco
 /// The same, for callers already holding the copy's manifest.
 pub(crate) async fn recorded_outcome_with(dest: &Path, manifest: InstanceManifest) -> TrialOutcome {
     let marker = read_trial_marker(dest).await;
-    let (readiness, link_failures, mut notes) = match marker {
-        Some(m) => (m.readiness, m.link_failures, Vec::new()),
+    let (readiness, link_failures, mismatched_packages, mut notes) = match marker {
+        Some(m) => (
+            m.readiness,
+            m.link_failures,
+            m.mismatched_packages,
+            Vec::new(),
+        ),
         // The copy committed but its commit-time outcome never landed (a
         // crash between the rename and the marker write). Say what the
         // manifest can support rather than reporting a clean ready.
         None => (
             super::readiness_of(&manifest, &[]),
+            Vec::new(),
             Vec::new(),
             vec!["副本的提交记录缺失，状态按当前清单判断；如需确认请重新预览".to_string()],
         ),
@@ -85,5 +96,6 @@ pub(crate) async fn recorded_outcome_with(dest: &Path, manifest: InstanceManifes
         link_failures,
         sessions_imported: 0,
         notes,
+        mismatched_packages,
     }
 }

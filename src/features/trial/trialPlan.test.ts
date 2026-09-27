@@ -71,6 +71,7 @@ function preview(overrides: Partial<TrialPreview> = {}): TrialPreview {
     pendingDownloads: [],
     conflicts: [],
     blocked: [],
+    mismatchedPackages: [],
     planId: 'a'.repeat(64),
     targetId: 'trial-daily-1',
     sourceFingerprint: 'b'.repeat(64),

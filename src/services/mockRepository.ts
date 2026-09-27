@@ -529,6 +529,7 @@ class MockRepository implements PhlRepository {
       pendingDownloads: [],
       conflicts: [],
       blocked: [],
+      mismatchedPackages: [],
       // A mock preview issues no executable plan, and it cannot: createTrial
       // refuses in browser mode. The empty identity is what disables the
       // dialog's create button instead of pretending a plan exists.

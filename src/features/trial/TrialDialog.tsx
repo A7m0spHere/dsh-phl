@@ -359,6 +359,25 @@ export function TrialDialog() {
                     {preview.conflicts.length > 0 && (
                       <Notice tone="warn">已知插件冲突：{preview.conflicts.join('；')}</Notice>
                     )}
+                    {preview.mismatchedPackages?.length > 0 && (
+                      <Notice tone="warn">
+                        <p className="font-medium">
+                          {preview.mismatchedPackages.length} 个 profile 内实体插件与目标版本自带的版本不一致：
+                        </p>
+                        <p className="mt-1">
+                          副本会原样携带这些旧版本包，新版 DSH 启动时可能拒绝加载（例如插件接口契约变化）。
+                          如需使用对应功能，请在副本中重装这些插件。
+                        </p>
+                        <ul className="mt-1 list-disc pl-5">
+                          {preview.mismatchedPackages.slice(0, 4).map((m) => (
+                            <li key={m} className="break-all">{m}</li>
+                          ))}
+                          {preview.mismatchedPackages.length > 4 && (
+                            <li>……等 {preview.mismatchedPackages.length} 项</li>
+                          )}
+                        </ul>
+                      </Notice>
+                    )}
                     {preview.sessionCount !== null && (
                       <Notice tone={preview.sessionCwds.length ? 'warn' : 'info'}>
                         将携带 {preview.sessionCount} 个会话。
@@ -428,6 +447,19 @@ export function TrialDialog() {
                         {outcome.linkFailures.slice(0, 5).map((f) => (
                           <li key={f} className="break-all">{f}</li>
                         ))}
+                      </ul>
+                    </li>
+                  )}
+                  {outcome.mismatchedPackages?.length > 0 && (
+                    <li className="text-warn">
+                      {outcome.mismatchedPackages.length} 个 profile 内实体插件与目标版本自带的版本不一致（按 profile 旧版携带；若启动报插件错误请在副本内重装）：
+                      <ul className="mt-1 list-disc pl-5">
+                        {outcome.mismatchedPackages.slice(0, 5).map((m) => (
+                          <li key={m} className="break-all">{m}</li>
+                        ))}
+                        {outcome.mismatchedPackages.length > 5 && (
+                          <li>……等 {outcome.mismatchedPackages.length} 项</li>
+                        )}
                       </ul>
                     </li>
                   )}

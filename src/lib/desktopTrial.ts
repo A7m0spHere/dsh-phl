@@ -47,6 +47,12 @@ export interface TrialPreview {
   pendingDownloads: string[]
   conflicts: string[]
   blocked: string[]
+  /**
+   * Real (non-link) profile packages whose version differs from the target
+   * version tree's — the copy would carry the OLD build, and the new DSH may
+   * refuse it at boot. Surfaced before the user commits.
+   */
+  mismatchedPackages: string[]
   /** Plan identity the create must send back verbatim. */
   planId: string
   targetId: string
@@ -62,6 +68,8 @@ export interface TrialOutcome {
   readiness: 'needsDependencies' | 'needsCredentials' | 'readyToLaunch'
   linkRedirects: number
   linkFailures: string[]
+  /** Real profile packages carried at a version the target tree doesn't ship. */
+  mismatchedPackages: string[]
   sessionsImported: number
   notes: string[]
 }

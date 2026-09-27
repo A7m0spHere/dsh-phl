@@ -125,6 +125,15 @@ pub struct TrialPreview {
     pub auto_port: bool,
     /// Non-empty → create refuses; each entry is a user-readable reason.
     pub blocked: Vec<String>,
+    /// REAL (non-link) packages in the source profile whose version differs
+    /// from the one the TARGET version tree ships — each entry names the
+    /// package, both versions and the consequence. The copy carries them
+    /// verbatim (that is what a copy does), but the new DSH may refuse or
+    /// misbehave with the old build, so the preview must say so BEFORE the
+    /// user commits (found in acceptance: an 0.1.5-alpha.2 agent-team was
+    /// copied into an 0.1.7-rc.2 trial and the new typert-loader rejected it
+    /// at boot with "codec has no create() factory").
+    pub mismatched_packages: Vec<String>,
 }
 
 /// Stable fingerprint of the source environment a plan was built from, and
@@ -231,6 +240,16 @@ async fn preview_shell(
     .map(|c| c.message)
     .collect();
 
+    // Real packages pinned to versions the TARGET tree does not ship: the
+    // copy would carry them verbatim and the new DSH may refuse them at boot.
+    // Detected here (before the user commits) and again on the outcome.
+    let mismatched_packages = if target_installed {
+        let source_profile = profile_root(&instance_dir(root, &req.source_id)?, &manifest.profile);
+        mismatched_profile_packages(&source_profile, root, &target_version).await
+    } else {
+        Vec::new()
+    };
+
     let source_version = manifest.version_id.clone();
     // CR-07: the copy gets its own port at plan time, with the SAME
     // allocation rule create uses — otherwise the recomputed plan id could
@@ -283,6 +302,7 @@ async fn preview_shell(
         allocated_port,
         auto_port,
         blocked: Vec::new(),
+        mismatched_packages,
     })
 }
 
@@ -339,6 +359,10 @@ pub struct TrialOutcome {
     pub link_failures: Vec<String>,
     pub sessions_imported: usize,
     pub notes: Vec<String>,
+    /// Real (non-link) profile packages whose version differs from the target
+    /// tree's — surfaced again on the outcome so the result page names them
+    /// even if the preview was taken minutes earlier.
+    pub mismatched_packages: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +663,11 @@ async fn run_trial(
     let staging_home = staging.join("dsh-home");
     let (redirects, link_failures) =
         retarget_version_links(&staging_home, root, &source_version_bare, target_version).await;
+    // Real packages the target tree ships at a different version: named on
+    // the outcome so the result page lists them (the preview already warned).
+    let staging_profile = staging_home.join("profiles").join(&source_manifest.profile);
+    let mismatched_packages =
+        mismatched_profile_packages(&staging_profile, root, target_version).await;
 
     // The copy's manifest: source environment, new bindings.
     let mut manifest = source_manifest.clone();
@@ -709,6 +738,7 @@ async fn run_trial(
             allocated_port,
             readiness: readiness.clone(),
             link_failures: link_failures.clone(),
+            mismatched_packages: mismatched_packages.clone(),
         },
     )
     .await
@@ -727,6 +757,7 @@ async fn run_trial(
             link_failures,
             sessions_imported,
             notes,
+            mismatched_packages,
         });
     }
 
@@ -736,6 +767,12 @@ async fn run_trial(
         notes.push(format!(
             "{} 个内部链接在新版本下无法解析，见结果详情；这些插件可能需要重新安装依赖",
             link_failures.len()
+        ));
+    }
+    if !mismatched_packages.is_empty() {
+        notes.push(format!(
+            "{} 个 profile 内实体插件与目标版本自带的版本不一致，见结果详情",
+            mismatched_packages.len()
         ));
     }
     if scope_wants_sessions(&req.scope) && !preview_cwds_warned(&source_dir).await {
@@ -749,6 +786,7 @@ async fn run_trial(
         link_failures,
         sessions_imported,
         notes,
+        mismatched_packages,
     })
 }
 
@@ -842,7 +880,8 @@ async fn retarget_version_links(
                             }
                         } else {
                             failures.push(format!(
-                                "{}: 新版本下不存在 {}",
+                                "{}: 新版本下不存在 {}（上游可能已改名或移除该包，\
+                                 可在副本内卸载后按需重装）",
                                 path.strip_prefix(home).unwrap_or(&path).display(),
                                 new_target.display()
                             ));
@@ -949,6 +988,109 @@ fn strip_prefix_link(target: &Path, prefix: &Path) -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn strip_prefix_link(target: &Path, prefix: &Path) -> Option<PathBuf> {
     target.strip_prefix(prefix).ok().map(PathBuf::from)
+}
+
+/// Real (non-link) packages under the profile's `node_modules` whose version
+/// differs from the one the TARGET version tree ships.
+///
+/// A copy carries them verbatim — correct as a copy — but DSH version
+/// boundaries can invalidate plugin contracts (0.1.7's typert-loader demands
+/// a `create()` factory the 0.1.5 agent-team manifest lacks), so the mismatch
+/// must be named BEFORE the user commits. Scoped package names
+/// (`@scope/name`) are supported; nested node_modules are not descended into
+/// (only the loader-visible top level matters).
+async fn mismatched_profile_packages(
+    profile: &Path,
+    root: &Path,
+    target_bare: &str,
+) -> Vec<String> {
+    let target_modules = root.join("versions").join(target_bare).join("node_modules");
+    let Ok(mut entries) = tokio::fs::read_dir(profile.join("node_modules")).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut scopes = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        // Only REAL packages matter: links are the retarget's business.
+        if tokio::fs::symlink_metadata(&path)
+            .await
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.starts_with('@') {
+            scopes.push(path);
+            continue;
+        }
+        if let Some(note) = version_mismatch_note(&path, &target_modules.join(&name)).await {
+            out.push(note);
+        }
+    }
+    // One level of @scope dirs.
+    for scope in scopes {
+        let scope_name = scope
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Ok(mut scope_entries) = tokio::fs::read_dir(&scope).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = scope_entries.next_entry().await {
+            let path = entry.path();
+            if tokio::fs::symlink_metadata(&path)
+                .await
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(true)
+                || !path.is_dir()
+            {
+                continue;
+            }
+            let pkg_dir = target_modules.join(&scope_name).join(entry.file_name());
+            if let Some(note) = version_mismatch_note(&path, &pkg_dir).await {
+                out.push(note);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One package's mismatch note, or `None` when the profile copy agrees with
+/// the target tree (or the target does not ship the package at all — the
+/// missing case is the LINK failures' business, not this one).
+async fn version_mismatch_note(profile_pkg: &Path, target_pkg: &Path) -> Option<String> {
+    async fn read_version(dir: &Path) -> Option<String> {
+        let raw = tokio::fs::read_to_string(dir.join("package.json"))
+            .await
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        value.get("version")?.as_str().map(str::to_string)
+    }
+    let profile_version = read_version(profile_pkg).await?;
+    let target_version = read_version(target_pkg).await?;
+    if profile_version == target_version {
+        return None;
+    }
+    let name = profile_pkg
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let scope = profile_pkg
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('@'));
+    let full_name = scope.map(|s| format!("{s}/{name}")).unwrap_or(name);
+    Some(format!(
+        "{full_name}: profile 内为 {profile_version}，目标版本自带 {target_version}；\
+         副本将按 profile 版本携带，若新版 DSH 启动报插件错误，请在副本内重装该插件"
+    ))
 }
 
 /// Keep `ensure_under_root` imported for future staging sweeps; the trial's

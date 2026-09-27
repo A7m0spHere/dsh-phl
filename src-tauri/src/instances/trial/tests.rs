@@ -95,6 +95,49 @@ pub(super) async fn seed_source(root: &Path, id: &str) -> PathBuf {
         true,
     )
     .unwrap();
+    // A REAL (non-link) plugin package pinned to an older version than the
+    // target tree ships — the shape an old `dsh plugin add` leaves behind and
+    // the acceptance bug surfaced: copied verbatim, the new DSH's stricter
+    // plugin contracts can reject it at boot. The preview must name it.
+    let scoped = profile
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("old-tool");
+    std::fs::create_dir_all(&scoped).unwrap();
+    std::fs::write(
+        scoped.join("package.json"),
+        r#"{ "name": "@deepseek-ai/old-tool", "version": "0.1.5-alpha.2" }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(new_tree.join("@deepseek-ai").join("old-tool")).unwrap();
+    std::fs::write(
+        new_tree
+            .join("@deepseek-ai")
+            .join("old-tool")
+            .join("package.json"),
+        r#"{ "name": "@deepseek-ai/old-tool", "version": "0.1.7-rc.2" }"#,
+    )
+    .unwrap();
+    // Same version on both sides: NOT a mismatch, must not be listed.
+    let matched = profile
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("same-build");
+    std::fs::create_dir_all(&matched).unwrap();
+    std::fs::write(
+        matched.join("package.json"),
+        r#"{ "name": "@deepseek-ai/same-build", "version": "1.2.3" }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(new_tree.join("@deepseek-ai").join("same-build")).unwrap();
+    std::fs::write(
+        new_tree
+            .join("@deepseek-ai")
+            .join("same-build")
+            .join("package.json"),
+        r#"{ "name": "@deepseek-ai/same-build", "version": "1.2.3" }"#,
+    )
+    .unwrap();
 
     let manifest: InstanceManifest = serde_json::from_value(serde_json::json!({
         "schemaVersion": 2,
@@ -129,6 +172,35 @@ pub(super) fn seed_versions(root: &Path) {
 }
 
 #[tokio::test]
+async fn preview_names_mismatched_real_packages_before_commit() {
+    let root = scratch("mismatch");
+    seed_versions(&root);
+    seed_source(&root, "daily").await;
+
+    let preview = build_preview(&root, &processes(), &request("daily"))
+        .await
+        .unwrap();
+    // The preview must warn BEFORE the user commits: the old real package is
+    // listed, the same-build one is not, and the note carries both versions
+    // plus the consequence (the acceptance bug: an 0.1.5 agent-team copied
+    // into an 0.1.7 trial failed at boot with no prior warning at all).
+    assert_eq!(preview.mismatched_packages.len(), 1);
+    assert!(
+        preview.mismatched_packages[0].contains("@deepseek-ai/old-tool")
+            && preview.mismatched_packages[0].contains("0.1.5-alpha.2")
+            && preview.mismatched_packages[0].contains("0.1.7-rc.2"),
+        "the preview names the package and both versions: {}",
+        preview.mismatched_packages[0]
+    );
+    assert!(
+        preview.mismatched_packages[0].contains("重装"),
+        "the note says what to do about it: {}",
+        preview.mismatched_packages[0]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn config_scope_copies_config_and_drops_sessions() {
     let root = scratch("scope");
     seed_versions(&root);
@@ -155,6 +227,20 @@ async fn config_scope_copies_config_and_drops_sessions() {
 
     assert!(outcome.committed);
     assert_eq!(outcome.sessions_imported, 0);
+    // The version-mismatched real package is named on the outcome (exactly
+    // one: the same-build package must NOT be listed), with both versions.
+    assert_eq!(outcome.mismatched_packages.len(), 1);
+    assert!(
+        outcome.mismatched_packages[0].contains("@deepseek-ai/old-tool"),
+        "names the mismatching package: {}",
+        outcome.mismatched_packages[0]
+    );
+    assert!(
+        outcome.mismatched_packages[0].contains("0.1.5-alpha.2")
+            && outcome.mismatched_packages[0].contains("0.1.7-rc.2"),
+        "names both versions: {}",
+        outcome.mismatched_packages[0]
+    );
     let dest = instance_dir(&root, &req.target_id).unwrap();
     let record = outcome.record;
     assert_eq!(record.manifest.version_id, "dsh-0.1.7-rc.2");
