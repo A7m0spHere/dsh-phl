@@ -780,12 +780,19 @@ mod tests {
     }
 
     /// Seeds `<root>/runtimes/<name>` with a marker recording `version` and a
-    /// runnable node binary copied from the system install.
+    /// runnable system Node. On Unix, keep a link to its installed location:
+    /// Homebrew's Node can depend on a sibling libnode dylib and a bare copy
+    /// would stop running even though the original binary is healthy.
     fn seed_runtime(root: &Path, name: &str, version: &str) {
         let dir = root.join("runtimes").join(name);
-        std::fs::create_dir_all(&dir).unwrap();
+        let node = crate::launch::runtime_bin_dir(root, name).join(crate::launch::node_binary());
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         let (exe, _) = system_node().expect("test requires a runnable system node");
-        std::fs::copy(&exe, dir.join(crate::launch::node_binary())).unwrap();
+        let _ = std::fs::remove_file(&node);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&exe, &node).unwrap();
+        #[cfg(windows)]
+        std::fs::copy(&exe, &node).unwrap();
         let marker = serde_json::json!({
             "installedAt": "2026-01-01T00:00:00Z",
             "version": version,

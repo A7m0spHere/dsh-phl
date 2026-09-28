@@ -2,6 +2,7 @@
 //! pattern the snapshot/version commands use for their inner bodies).
 
 use super::*;
+use std::path::PathBuf;
 
 pub(super) fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("phl-trial-{tag}-{}", std::process::id()));
@@ -500,6 +501,7 @@ async fn missing_new_version_content_is_reported_not_hidden() {
 /// `C:\Users\runneradmin\...`, which is exactly what the junction target
 /// carries (the copy engine derives targets from canonicalize). The
 /// regressions here retarget through both shapes.
+#[cfg(windows)]
 #[tokio::test]
 async fn case_flipped_version_link_is_still_redirected() {
     let root = scratch("linkcase");
@@ -508,12 +510,11 @@ async fn case_flipped_version_link_is_still_redirected() {
     retarget_with_alternate_spelling(&root, case_flip).await;
 }
 
-/// The CI-proven shape: the junction target carries the expanded/canonical
-/// spelling while the data-root string is the 8.3-short-name form. Built by
-/// re-creating the link with the canonicalized target, then running the
-/// trial against the short-named root — what the runner actually did.
+/// The link target carries a canonical path while the data-root string uses
+/// another spelling of the same directory: an 8.3 name on Windows or
+/// `/var` versus `/private/var` on macOS.
 #[tokio::test]
-async fn short_name_spelled_version_link_is_still_redirected() {
+async fn canonical_version_link_is_still_redirected() {
     let root = scratch("link83");
     seed_versions(&root);
     seed_source(&root, "daily").await;
@@ -538,7 +539,9 @@ async fn retarget_with_alternate_spelling(root: &Path, alt: fn(&Path) -> PathBuf
         .join("0.1.5-rc.3")
         .join("node_modules");
     let alternate = alt(&old_tree);
-    std::fs::remove_dir(&link).unwrap();
+    std::fs::remove_dir(&link)
+        .or_else(|_| std::fs::remove_file(&link))
+        .unwrap();
     super::super::copy::recreate_link(&link, &alternate, true).unwrap();
 
     let (req, allocated, auto) = plan_via_preview(root, &processes(), "daily").await;
@@ -597,6 +600,7 @@ fn dest_pkg_path(root: &Path, target_id: &str) -> std::path::PathBuf {
 
 /// Upper-cases the drive letter and the first path segment — enough to break
 /// a byte-exact prefix match, still the same path to the file system.
+#[cfg(windows)]
 fn case_flip(path: &Path) -> PathBuf {
     let text = path.to_string_lossy().into_owned();
     let (drive, rest) = text.split_at(2);
