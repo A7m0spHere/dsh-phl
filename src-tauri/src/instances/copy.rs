@@ -27,16 +27,45 @@ pub(crate) enum SkipRule {
     /// inside `node_modules` belongs to whatever package created it and is
     /// part of that package, not PHL's per-instance history.
     RunStateAtRoot,
+    /// Trial copy (R1 · M3): run state at the instance root *plus* content
+    /// the user opted into separately. The rule applies at depth 0 (the
+    /// instance directory) and depth 1 (`dsh-home/`, where sessions,
+    /// attachments and DSH's own logs live) — the two levels PHL and DSH
+    /// own. Everything deeper belongs to packages and copies verbatim.
+    /// `skip_sessions` is the `环境配置` vs `环境＋会话` scope switch.
+    Trial { skip_sessions: bool, depth: u8 },
 }
 
 impl SkipRule {
     pub(crate) fn skips(self, name: &str) -> bool {
-        self == SkipRule::RunStateAtRoot && skipped(name)
+        match self {
+            SkipRule::RunStateAtRoot => skipped(name),
+            SkipRule::Trial {
+                skip_sessions,
+                depth,
+            } if depth <= 1 => match (name, depth) {
+                ("sessions", _) => skip_sessions,
+                ("attachments", _) => true,
+                ("workspace", 0) => true,
+                _ => skipped(name),
+            },
+            SkipRule::Trial { .. } => false,
+            SkipRule::Nothing => false,
+        }
     }
-    /// Recursion always descends with `Nothing`: the rule only ever applies to
-    /// the entries directly under the root it was given.
+    /// Recursion descends: the clone rules only apply at the root, while the
+    /// trial rule carries its depth down (it owns two levels).
     pub(crate) fn inside(self) -> Self {
-        SkipRule::Nothing
+        match self {
+            SkipRule::Trial {
+                skip_sessions,
+                depth,
+            } => SkipRule::Trial {
+                skip_sessions,
+                depth: depth + 1,
+            },
+            _ => SkipRule::Nothing,
+        }
     }
 }
 
@@ -527,13 +556,19 @@ pub(crate) fn dir_size(dir: &Path) -> u64 {
 }
 
 pub(crate) fn dir_size_skipping(dir: &Path) -> u64 {
+    dir_size_skipping_if(dir, &skipped)
+}
+
+/// Size walk with a caller-supplied root-level skip predicate; the trial
+/// copy's denominator uses it to exclude exactly what the copy excludes.
+pub(crate) fn dir_size_skipping_if(dir: &Path, skip: &dyn Fn(&str) -> bool) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
     let mut total = 0u64;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if skipped(&name) {
+        if skip(&name) {
             continue;
         }
         if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
@@ -569,6 +604,15 @@ pub(crate) async fn copy_tree_with_progress<F: Fn(CloneProgress) + Send + Sync>(
         let total = match skip {
             SkipRule::Nothing => dir_size(&from),
             SkipRule::RunStateAtRoot => dir_size_skipping(&from),
+            // The progress denominator counts what the copy will actually
+            // carry; the same skip rule decides both.
+            SkipRule::Trial { skip_sessions, .. } => {
+                dir_size_skipping_if(&from, &|name| match name {
+                    "sessions" => skip_sessions,
+                    "attachments" | "workspace" => true,
+                    _ => skipped(name),
+                })
+            }
         };
         let mut done = 0;
         let ctx = CopyCtx {

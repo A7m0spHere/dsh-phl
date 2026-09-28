@@ -17,6 +17,15 @@ import type {
   Snapshot,
 } from '@/types'
 import { LAUNCH_PHASES } from '@/types'
+import type {
+  EnvironmentDiff,
+  EnvironmentFacts,
+  RuntimeConversionOutcome,
+  RuntimeConversionPreview,
+  TrialOutcome,
+  TrialPreview,
+  TrialRequest,
+} from '@/lib/desktop'
 import { isVersionBusy } from '@/types/version'
 import {
   Cancelled,
@@ -434,6 +443,138 @@ class MockRepository implements PhlRepository {
 
   async removeRuntime(_id: string) {
     await sleep(420)
+  }
+
+  /** Simulated patch listing: two older patch builds of the same line. */
+  async listRuntimeVersions(major: number) {
+    await sleep(120)
+    return [1, 2].map((n) => ({
+      id: `node-${major}.0.${n}`,
+      name: `Node ${major}`,
+      major,
+      version: `${major}.0.${n}`,
+      lts: false,
+      size: 0,
+      state: { kind: 'available' } as Runtime['state'],
+    }))
+  }
+
+  /** 绑定转换是桌面端流程；浏览器 Mock 无真实磁盘绑定可转，明确返回 null。 */
+  async previewRuntimeConversion(): Promise<RuntimeConversionPreview | null> {
+    return null
+  }
+
+  /** 模拟采集：返回一套「全部已知」的静态事实，仅用于浏览器 UI 开发。 */
+  async inspectEnvironment(instanceId: string) {
+    await sleep(150)
+    const inst = instanceSeed.find((i) => i.id === instanceId)
+    return {
+      schemaVersion: 1,
+      instanceId,
+      instanceName: inst?.name ?? instanceId,
+      managementMode: 'managed-copy',
+      source: 'created',
+      observedAt: new Date().toISOString(),
+      fingerprint: 'mock-stable-fingerprint',
+      dsh: {
+        declared: { state: 'known', value: inst?.versionId ?? 'dsh-0.1.5-rc.3' },
+        installed: { state: 'known', value: '0.1.5-rc.3' },
+        integrity: { state: 'known', value: 'sha512-mock' },
+      },
+      node: {
+        binding: { state: 'known', value: 'node-22.11.0' },
+        actual: { state: 'known', value: '22.11.0' },
+        platform: { state: 'known', value: 'windows' },
+        arch: { state: 'known', value: 'x86_64' },
+        system: false,
+      },
+      profile: 'web',
+      pluginsAvailable: true,
+      plugins: [],
+      api: { inheritance: 'default', providers: [], hasDefaultModel: false, pendingCredentials: false },
+      workspace: { state: 'known', value: 'C:\mock\workspace' },
+      agentsHomeShared: true,
+      conflicts: [],
+    } as EnvironmentFacts
+  }
+
+  async preparePackDependencies(
+    _instanceId: string,
+    onProgress: (p: TransferProgress) => void,
+    _signal: AbortSignal,
+  ): Promise<{ readiness: string; dependenciesInstalled: number; dependencyFailures: string[] } | null> {
+    onProgress({ stage: 'installingDeps', progress: 0 })
+    throw new Error('浏览器模式没有真实整合包依赖可安装（Mock 标明模拟）')
+  }
+
+  /** 模拟预览：静态数据标明模拟；createTrial 拒绝以避免假磁盘安装。 */
+  async previewTrial(req: TrialRequest) {
+    await sleep(160)
+    const inst = instanceSeed.find((i) => i.id === req.sourceId)
+    return {
+      sourceId: req.sourceId,
+      sourceName: inst?.name ?? req.sourceId,
+      sourceVersionId: inst?.versionId ?? 'dsh-0.1.5-rc.3',
+      sourceRuntimeId: 'node-22.11.0',
+      targetVersion: req.targetVersion,
+      targetInstalled: true,
+      targetRuntimeId: req.targetRuntimeId,
+      targetRuntimeInstalled: true,
+      suggestedName: `${inst?.name ?? '实例'} · 新版测试`,
+      scope: req.scope,
+      workspace: req.workspace,
+      estimatedBytes: 318_000_000,
+      sessionCount: req.scope === 'config+sessions' ? 3 : null,
+      sessionCwds: [],
+      pendingDownloads: [],
+      conflicts: [],
+      blocked: [],
+      mismatchedPackages: [],
+      // A mock preview issues no executable plan, and it cannot: createTrial
+      // refuses in browser mode. The empty identity is what disables the
+      // dialog's create button instead of pretending a plan exists.
+      planId: '',
+      targetId: '',
+      sourceFingerprint: '',
+      allocatedPort: 0,
+      autoPort: false,
+    } as TrialPreview
+  }
+
+  async createTrial(): Promise<TrialOutcome | null> {
+    throw new Error('浏览器模式无法复制真实环境（Mock 标明模拟）')
+  }
+
+  /** 模拟比较：同一指纹两次采集稳定；仅用于浏览器 UI 开发。 */
+  async compareEnvironments(leftId: string, rightId: string) {
+    const left = await this.inspectEnvironment(leftId)
+    const right = await this.inspectEnvironment(rightId)
+    if (!left || !right) return null
+    return {
+      leftId,
+      rightId,
+      leftName: left.instanceName,
+      rightName: right.instanceName,
+      leftObservedAt: left.observedAt,
+      rightObservedAt: right.observedAt,
+      hasUnknown: false,
+      items: [
+        { key: 'dsh.binding', category: 'DSH', state: 'same', left: left.dsh.declared.value, right: right.dsh.declared.value, note: null },
+        { key: 'node.binding', category: 'Node', state: 'same', left: left.node.binding.value, right: right.node.binding.value, note: null },
+        { key: 'api', category: 'API 配置来源', state: 'same', left: '继承全部', right: '继承全部', note: null },
+        { key: 'workspace', category: '工作目录', state: 'different', left: left.workspace.value, right: right.workspace.value, note: '模拟数据' },
+      ],
+    } as EnvironmentDiff
+  }
+
+  async convertRuntimeBinding(
+    _instanceId: string,
+    onProgress: (p: TransferProgress) => void,
+    signal: AbortSignal,
+  ): Promise<RuntimeConversionOutcome> {
+    onProgress({ stage: 'verifying' })
+    await this.transfer(31_000_000, onProgress, signal, false)
+    throw new Error('浏览器模式没有真实 Runtime 可转换（Mock 标明模拟）')
   }
 
   /* ---------------- plugin install pipeline ---------------- */

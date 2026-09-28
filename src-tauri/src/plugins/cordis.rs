@@ -130,6 +130,25 @@ pub(crate) async fn declared_plugin_ids(profile: &Path) -> std::collections::Has
     declared_plugin_ids_in(&read_patch_lines(profile).await)
 }
 
+/// Declared plugin entries **in file order** as `(registry id, disabled)`.
+/// Insert-block order is the profile's bundle-stack order — the environment
+/// comparison must preserve it instead of normalizing to a set (B03).
+pub(crate) async fn declared_plugin_entries_in_order(profile: &Path) -> Vec<(String, bool)> {
+    let lines = read_patch_lines(profile).await;
+    let mut out = Vec::new();
+    for row in mount_rows(&lines) {
+        for key in ["id", "name"] {
+            if let Some(serde_yaml::Value::String(id)) = row_value(&lines, row.range, key) {
+                let disabled =
+                    row_value(&lines, row.range, "disabled") == Some(serde_yaml::Value::Bool(true));
+                out.push((id, disabled));
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// The scan itself, over lines the caller already has. Split out for the
 /// adoption inspection, which reads the source home synchronously and must
 /// reach the same verdict as the async path.

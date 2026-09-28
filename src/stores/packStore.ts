@@ -3,7 +3,10 @@ import { create } from 'zustand'
 import {
   choosePackOpenPath,
   installPack,
+  installCommunityPack,
   previewPack,
+  previewCommunityPack,
+  type CommunityPackPreview,
   type PackInstallRequest,
   type RemotePackInstallOutcome,
   type RemotePackPreview,
@@ -31,7 +34,12 @@ type PreviewState = 'idle' | 'loading' | 'ready' | 'error'
 interface PackState {
   step: PackStep
   path: string | null
+  /** Which family the picked file is — decided by content, not extension. */
+  mode: 'phlpack' | 'community' | null
   preview: RemotePackPreview | null
+  communityPreview: CommunityPackPreview | null
+  /** Explicit DSH version choice for packs that do not pin one. */
+  communityVersion: string
   previewState: PreviewState
   previewError: string | null
   /** Instance name the user may override before install (defaults to pack name). */
@@ -43,8 +51,10 @@ interface PackState {
   canRun: () => boolean
   pickPack: () => Promise<void>
   setName: (name: string) => void
+  setCommunityVersion: (v: string) => void
   back: () => void
   install: () => Promise<void>
+  installCommunity: () => Promise<void>
   cancelInstall: () => void
   reset: () => void
 }
@@ -83,7 +93,10 @@ function requestManifest(preview: RemotePackPreview, name: string): PackInstallR
 export const usePackStore = create<PackState>((set, get) => ({
   step: 'pick',
   path: null,
+  mode: null,
   preview: null,
+  communityPreview: null,
+  communityVersion: '',
   previewState: 'idle',
   previewError: null,
   name: '',
@@ -100,14 +113,35 @@ export const usePackStore = create<PackState>((set, get) => ({
     const generation = ++previewGeneration
     const path = await choosePackOpenPath()
     if (!path || generation !== previewGeneration) return
-    set({ path, step: 'preview', previewState: 'loading', preview: null, previewError: null })
+    set({ path, step: 'preview', previewState: 'loading', preview: null, communityPreview: null, mode: null, previewError: null })
     try {
+      // Content decides, not the extension: a .phlpack names phlpack.json,
+      // a .dspack names dspack.json + manifest.json. Try ours, then theirs.
       const preview = await previewPack(path)
       if (generation !== previewGeneration) return
-      set({ preview, previewState: 'ready', name: preview.name })
-    } catch (err) {
+      set({ preview, mode: 'phlpack', previewState: 'ready', name: preview.name })
+    } catch (phlpackError) {
       if (generation !== previewGeneration) return
-      set({ previewState: 'error', previewError: parseThrownError(err).message })
+      try {
+        const community = await previewCommunityPack(path)
+        if (generation !== previewGeneration) return
+        set({
+          communityPreview: community,
+          mode: 'community',
+          previewState: 'ready',
+          name: community.displayName || community.name,
+        })
+      } catch (err2) {
+        if (generation !== previewGeneration) return
+        // Neither family parsed the file: the user deserves both reasons,
+        // with the first (their likely intent) leading.
+        const first = parseThrownError(phlpackError).message
+        const second = parseThrownError(err2).message
+        set({
+          previewState: 'error',
+          previewError: second === first ? first : `${first}（按社区包解析：${second}）`,
+        })
+      }
     }
   },
 
@@ -115,11 +149,15 @@ export const usePackStore = create<PackState>((set, get) => ({
     set({ name })
   },
 
+  setCommunityVersion(v) {
+    set({ communityVersion: v })
+  },
+
   back() {
     const s = get()
     if (s.step === 'preview') {
       previewGeneration += 1
-      set({ step: 'pick', path: null, preview: null, previewState: 'idle', previewError: null })
+      set({ step: 'pick', path: null, preview: null, communityPreview: null, mode: null, previewState: 'idle', previewError: null })
       return
     }
     // A *failed* install leaves `step` on 'progress'. "返回修改" must walk back
@@ -175,6 +213,55 @@ export const usePackStore = create<PackState>((set, get) => ({
     installController?.abort()
   },
 
+  async installCommunity() {
+    const { path, communityPreview, communityVersion, name } = get()
+    if (!path || !communityPreview || get().installing) return
+    const ui = useUIStore.getState()
+    const dshVersion = communityPreview.dshVersion ?? communityVersion
+    if (!dshVersion) return
+    const manifest = requestManifest(
+      { name: communityPreview.name, dshVersion, runtime: 'node-system' } as RemotePackPreview,
+      name,
+    )
+    set({ step: 'progress', installing: true, installError: null, progress: 0 })
+    const controller = new AbortController()
+    installController = controller
+    try {
+      const outcome = await installCommunityPack(
+        {
+          instance: manifest,
+          path,
+          packSha256: communityPreview.packSha256,
+          dshVersion,
+          installDependencies: true,
+          allowMissing: false,
+        },
+        (p) => { if (installController === controller) set({ progress: p.progress }) },
+        controller.signal,
+      )
+      useInstanceStore.getState().admitInstance(instanceFromRecord(outcome.record))
+      await useInstanceStore.getState().load()
+      if (installController !== controller) return
+      set({ installing: false })
+      const notes: string[] = []
+      if (outcome.readiness === 'needsDependencies')
+        notes.push('依赖未完成，实例保持待补依赖状态，可在实例详情重试')
+      if (outcome.dependencyFailures.length > 0)
+        notes.push(outcome.dependencyFailures.slice(0, 3).join('；'))
+      ui.toast({
+        kind: outcome.readiness === 'readyToLaunch' ? 'success' : 'warn',
+        title: `已安装「${outcome.record.name}」`,
+        message: notes.length > 0 ? notes.join(' · ') : '社区整合包已安装。',
+      })
+    } catch (err) {
+      if (installController !== controller) return
+      const message = parseThrownError(err).message
+      set({ installing: false, installError: message === 'cancelled' ? '安装已取消' : message })
+    } finally {
+      if (installController === controller) installController = null
+    }
+  },
+
   reset() {
     previewGeneration += 1
     installController?.abort()
@@ -183,6 +270,9 @@ export const usePackStore = create<PackState>((set, get) => ({
       step: 'pick',
       path: null,
       preview: null,
+      communityPreview: null,
+      mode: null,
+      communityVersion: '',
       previewState: 'idle',
       previewError: null,
       name: '',

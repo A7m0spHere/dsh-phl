@@ -1,6 +1,7 @@
 import { repository, Cancelled, KeptRunningError, LaunchError } from '@/services'
-import { isDesktop, openDshWebUi, onInstanceExited } from '@/lib/desktop'
+import { isDesktop, openDshWebUi, onInstanceExited, onWebuiPageError, revealPath } from '@/lib/desktop'
 import { parseThrownError } from '@/lib/errorCodes'
+import { interpretBootFailure } from '@/lib/webuiBootFailure'
 import type { InstanceRuntimeState } from '@/types'
 import { MIN_WEB_PORT } from '@/lib/ports'
 import { catalogState } from './storeRefs'
@@ -49,6 +50,9 @@ export function createLifecycleActions(
   const exitedDuringStop = new Set<string>()
   const exitedDuringLaunch = new Map<string, { pid: number; code: number | null }>()
   let exitListenerBound = false
+  let pageErrorListenerBound = false
+  /** Dedupe for the page-error toast: same card, same instance, 10s window. */
+  const lastPageError = new Map<string, { detail: string; at: number }>()
 
   function bindExitListener(): void {
     if (exitListenerBound || !isDesktop) return
@@ -94,9 +98,53 @@ export function createLifecycleActions(
     })
   }
 
+  /**
+   * The page said the plugins did not load while the process is still alive.
+   * Neither the launch flow (the process *did* start) nor the exit watcher
+   * (it has not exited) can see this — without this listener PHL would report
+   * 「运行中」 over a WebUI that shows nothing but a failure card. The toast
+   * names the plugins and the missing services; the state keeps the fact on
+   * the card after the toast fades; the log itself is already on disk beside
+   * the launch logs (written by the shell probe).
+   */
+  function bindPageErrorListener(): void {
+    if (pageErrorListenerBound || !isDesktop) return
+    pageErrorListenerBound = true
+    void onWebuiPageError(({ instanceId, logPath, detail }) => {
+      const reading = interpretBootFailure(detail)
+      set((s) => {
+        const prev = s.states[instanceId] ?? { status: 'stopped' as const }
+        return {
+          states: {
+            ...s.states,
+            [instanceId]: {
+              ...prev,
+              lastWebuiError: { at: Date.now(), ...reading, logPath, detail },
+            },
+          },
+        }
+      })
+      const now = Date.now()
+      const seen = lastPageError.get(instanceId)
+      if (seen && seen.detail === detail && now - seen.at < 10_000) return
+      lastPageError.set(instanceId, { detail, at: now })
+      const instance = get().byId(instanceId)
+      useUIStore.getState().toast({
+        kind: 'error',
+        duration: 12_000,
+        title: `「${instance?.name ?? instanceId}」${reading.headline}`,
+        message: [...reading.causes.slice(0, 3), reading.hint].join('\n'),
+        action: { label: '查看报错日志', run: () => void revealPath(logPath) },
+      })
+    })
+  }
+
   return {
-    /** Called from `load()`; the latch makes repeat calls no-ops. */
-    ensureExitListener: () => bindExitListener(),
+    /** Called from `load()`; the latches make repeat calls no-ops. */
+    ensureExitListener: () => {
+      bindExitListener()
+      bindPageErrorListener()
+    },
 
     async launch(id: string) {
       const instance = get().byId(id)

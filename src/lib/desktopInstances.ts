@@ -52,6 +52,8 @@ export interface RemoteInstanceRecord {
    * defaults reset an `external` instance to `managed-copy` and orphan its
    * real DSH_HOME. That is why `toManifest` carries them.
    */
+  readiness?: string | null
+  importFailures?: string[]
   managementMode?: 'managed-copy' | 'external' | 'pack-installed'
   source?: 'created' | 'adopted' | 'phlpack'
   externalHome?: string | null

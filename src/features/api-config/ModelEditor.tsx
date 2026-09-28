@@ -1,11 +1,11 @@
 /** The model-catalog editor: per-provider /models discovery + manual entries. */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CloudDownload, Download, Loader2, Plus, RefreshCw, Search, WandSparkles } from 'lucide-react'
+import { CloudDownload, Download, Plus, RefreshCw, Search, WandSparkles } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { isDesktop } from '@/lib/desktop'
 import { ApiModelRef, RemoteModel } from '@/types'
-import { Badge, Button, Input, Tooltip } from '@/components/ui'
+import { Badge, Button, Input, Spinner, Tooltip } from '@/components/ui'
 import { repository } from '@/services'
 import { probeProviderModels } from '@/services/apiModels'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -219,7 +219,7 @@ export function ModelEditor({
         </Tooltip>
         <div className="flex flex-wrap items-center gap-1">
           {models.some((m) => m.id.trim()) && <Button size="sm" variant="ghost" onClick={() => void completeModels()}>
-            {enriching ? <Loader2 size={12} className="animate-spin" /> : <WandSparkles size={12} />}补全模型信息
+            {enriching ? <Spinner size={12} weight={2.6} /> : <WandSparkles size={12} />}补全模型信息
           </Button>}
           {isDesktop &&
             (() => {
@@ -230,7 +230,7 @@ export function ModelEditor({
                   disabled={!canFetch || fetching}
                   onClick={() => void doFetch(false)}
                 >
-                  {fetching ? <Loader2 size={12} className="animate-spin" /> : <CloudDownload size={12} />}
+                  {fetching ? <Spinner size={12} weight={2.6} /> : <CloudDownload size={12} />}
                   获取可用模型
                 </Button>
               )
@@ -280,7 +280,7 @@ export function ModelEditor({
                           disabled={!tempKey.trim() || fetching}
                           onClick={() => void doFetch(true)}
                         >
-                          {fetching ? <Loader2 size={12} className="animate-spin" /> : <CloudDownload size={12} />}
+                          {fetching ? <Spinner size={12} weight={2.6} /> : <CloudDownload size={12} />}
                           使用该密钥获取
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => { closePicker(); setError(null) }}>

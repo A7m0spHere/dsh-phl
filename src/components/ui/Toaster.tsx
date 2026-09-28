@@ -26,12 +26,19 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
   const dismiss = useUIStore((s) => s.dismissToast)
   const { t, scale } = useMotion()
   const [paused, setPaused] = useState(false)
+  // Remaining time is a ref (it advances on every pause, and a ref keeps that
+  // bookkeeping off the render path), but the bar's transition duration has to
+  // be state: reading the ref during render meant a paused-then-resumed toast
+  // kept animating over its *original* span. `span` mirrors the ref whenever
+  // the timer (re)starts, and only then does the bar re-read it.
+  const [span, setSpan] = useState(toast.duration)
   const remaining = useRef(toast.duration)
   const startedAt = useRef(Date.now())
 
   useEffect(() => {
     if (!toast.duration || paused) return
     startedAt.current = Date.now()
+    setSpan(remaining.current)
     const id = window.setTimeout(() => dismiss(toast.id), remaining.current)
     return () => {
       window.clearTimeout(id)
@@ -49,7 +56,7 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
       transition={t(0.26)}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      className="pointer-events-auto relative w-[312px] overflow-hidden rounded-lg bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
+      className="pointer-events-auto relative w-[312px] max-w-[min(312px,86vw)] overflow-hidden rounded-lg bg-surface-raised shadow-pop ring-1 ring-inset ring-line"
     >
       <div className="flex gap-2 px-2.5 py-2">
         <span className={cn('mt-[1px] shrink-0', TONES[toast.kind])}>{ICONS[toast.kind]}</span>
@@ -59,7 +66,7 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
               by its overflow-hidden (2026-09-12 review). */}
           <div className="break-words text-sm font-medium leading-[17px] text-ink">{toast.title}</div>
           {toast.message && (
-            <div className="mt-0.5 break-words text-xs leading-[15px] text-ink-muted">{toast.message}</div>
+            <div className="mt-0.5 break-words whitespace-pre-line text-xs leading-[15px] text-ink-muted">{toast.message}</div>
           )}
         </div>
         <div className="flex shrink-0 items-start gap-1">
@@ -97,7 +104,7 @@ const ToastRow = forwardRef<HTMLDivElement, { toast: ToastModel }>(function Toas
           })}
           initial={{ scaleX: 1 }}
           animate={{ scaleX: paused ? undefined : 0 }}
-          transition={{ duration: remaining.current / 1000, ease: 'linear' }}
+          transition={{ duration: span / 1000, ease: 'linear' }}
         />
       )}
     </motion.div>

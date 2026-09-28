@@ -8,6 +8,8 @@ import {
   FolderSearch,
 } from 'lucide-react'
 import { usePackStore, type PackStep } from '@/stores/packStore'
+import { useCatalogStore } from '@/stores'
+import { isVersionInstalled } from '@/types/version'
 import { useUIStore } from '@/stores'
 import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
 import { Badge, Button, Card, EmptyState, Input, ProgressBar, SectionCard, Skeleton } from '@/components/ui'
@@ -106,10 +108,10 @@ function PickStep() {
     <EmptyState
       icon={<FolderSearch size={20} />}
       title="选择一个整合包"
-      description="点击右侧按钮，选择本地的 .phlpack 文件。PHL 会先完整校验它（格式、路径安全、文件校验值），再展示要安装的依赖。"
+      description="点击右侧按钮，选择本地的 .phlpack 或 .dspack 文件（按文件内容自动识别格式）。PHL 会先完整校验它，再展示要安装的依赖与支持范围。"
       action={
         <Button variant="primary" onClick={() => void pickPack()} disabled={previewState === 'loading'}>
-          {previewState === 'loading' ? '校验中…' : '选择 .phlpack 文件'}
+          {previewState === 'loading' ? '校验中…' : '选择整合包文件'}
         </Button>
       }
     />
@@ -119,6 +121,166 @@ function PickStep() {
 /* ------------------------------- preview ------------------------------ */
 
 function PreviewStep() {
+  const mode = usePackStore((s) => s.mode)
+  if (mode === 'community') return <CommunityPreviewStep />
+  return <PhlpackPreviewStep />
+}
+
+/** R1·M4: .dspack community pack preview — support scope is explicit. */
+function CommunityPreviewStep() {
+  const preview = usePackStore((s) => s.communityPreview)
+  const previewState = usePackStore((s) => s.previewState)
+  const previewError = usePackStore((s) => s.previewError)
+  const name = usePackStore((s) => s.name)
+  const setName = usePackStore((s) => s.setName)
+  const communityVersion = usePackStore((s) => s.communityVersion)
+  const setCommunityVersion = usePackStore((s) => s.setCommunityVersion)
+  const versions = useCatalogStore((s) => s.versions)
+  const back = usePackStore((s) => s.back)
+  const installCommunity = usePackStore((s) => s.installCommunity)
+
+  if (previewState === 'loading') return <Skeleton className="h-[220px]" />
+  if (previewState === 'error') {
+    return (
+      <Card tone="danger" className="p-4">
+        <p className="text-sm text-ink">整合包校验失败：{previewError}</p>
+        <Button variant="secondary" className="mt-3" onClick={back}>
+          返回重选
+        </Button>
+      </Card>
+    )
+  }
+  if (!preview) return null
+
+  const installedVersions = versions
+    .filter(isVersionInstalled)
+    .sort((a, b) => b.releasedAt.localeCompare(a.releasedAt))
+  const needsVersionChoice = !preview.dshVersion
+  const blocked = preview.blocked
+
+  return (
+    <div className="flex flex-col gap-3">
+      <SectionCard
+        title={preview.displayName || preview.name}
+        description={preview.description || undefined}
+      >
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Badge tone="accent">
+            .dspack 容器 v{preview.containerVersion} · manifest v{preview.manifestVersion}
+          </Badge>
+          <Badge tone="neutral">profile 包</Badge>
+          <span className="text-ink-muted">包版本 {preview.version}</span>
+          {preview.author && <span className="text-ink-muted">作者 {preview.author}</span>}
+          <span className="text-ink-muted">
+            包内 profile「{preview.profileName}」→ 本实例 web
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-3 text-sm text-ink-muted">
+          <span>覆盖文件 {preview.overridesCount} 个</span>
+          {preview.homeCount > 0 && <span>HOME 级内容（skills 等）{preview.homeCount} 个</span>}
+          <span>插件依赖 {preview.dependencies.length}</span>
+          <span>patch 来源：{preview.patchSource}</span>
+        </div>
+      </SectionCard>
+
+      <SectionCard title="目标 DSH 版本" description="包指定版本时按其准备；未指定时必须显式选择，PHL 不会自动用最新版。">
+        {preview.dshVersion ? (
+          <p className="text-sm text-ink">
+            包固定为 <span className="font-mono">{preview.dshVersion}</span>
+            。若本机未安装，请先在版本页安装该精确版本。
+          </p>
+        ) : (
+          <select
+            value={communityVersion}
+            onChange={(e) => setCommunityVersion(e.target.value)}
+            className="w-full rounded-md bg-surface-sunken px-2.5 py-1.5 text-ink ring-1 ring-inset ring-line-strong/60"
+          >
+            <option value="">选择一个已安装的版本…</option>
+            {installedVersions.map((v) => (
+              <option key={v.id} value={v.name}>
+                {v.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </SectionCard>
+
+      {preview.dependencies.length > 0 && (
+        <SectionCard title="插件与依赖" description="依赖按 manifest 精确钉版重建；模板 bundle 回落 DSH 版本自带目录。">
+          <ul className="flex flex-col gap-1.5 text-sm">
+            {preview.bundles.map((b) => {
+              const dep = preview.dependencies.find((d) => d.coordinate === b)
+              return (
+                <li key={b} className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-mono text-ink">{b}</span>
+                  <span className="text-ink-faint">
+                    {dep ? `${dep.kind === 'git' ? 'git' : 'npm'}@${dep.pin}` : '模板 bundle（版本自带）'}
+                  </span>
+                </li>
+              )
+            })}
+            {preview.dependencies
+              .filter((d) => !d.inBundles)
+              .map((d) => (
+                <li key={d.coordinate} className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-mono text-ink-muted">{d.coordinate}</span>
+                  <span className="text-ink-faint">{d.kind === 'git' ? 'git' : 'npm'}@{d.pin}（patch 引入）</span>
+                </li>
+              ))}
+          </ul>
+        </SectionCard>
+      )}
+
+      {blocked.length > 0 && (
+        <Card tone="danger" className="p-3">
+          <p className="text-sm font-medium text-ink">本版不支持以下内容，安装被阻止：</p>
+          <ul className="mt-1 flex flex-col gap-1 text-xs text-danger">
+            {blocked.map((b, i) => (
+              <li key={i} className="break-words">{b}</li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {preview.warnings.length > 0 && (
+        <Card className="p-3">
+          <ul className="flex flex-col gap-1 text-xs text-ink-muted">
+            {preview.warnings.map((w, i) => (
+              <li key={i} className="flex items-start gap-1.5">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0 text-warn" />
+                {w}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <SectionCard title="实例名称" description="安装后在 PHL 里显示的名字。">
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={preview.name} />
+      </SectionCard>
+
+      <div className="flex justify-between">
+        <Button variant="ghost" onClick={back}>
+          <ArrowLeft size={13} />
+          重选
+        </Button>
+        <Button
+          variant="primary"
+          disabled={
+            blocked.length > 0 ||
+            (needsVersionChoice && !communityVersion)
+          }
+          onClick={() => void installCommunity()}
+        >
+          <Check size={13} />
+          安装为实例
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function PhlpackPreviewStep() {
   const preview = usePackStore((s) => s.preview)
   const previewState = usePackStore((s) => s.previewState)
   const previewError = usePackStore((s) => s.previewError)

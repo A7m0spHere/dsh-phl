@@ -6,7 +6,9 @@ import { useMotion } from '@/lib/motion'
 import type { InstanceStatus } from '@/types'
 import { Spinner, Tooltip } from '@/components/ui'
 
-const LABEL: Record<InstanceStatus, string> = {
+/** Status wording. Exported because the instance card names it in its
+ *  accessible label ("…运行中。回车查看详情…"), and the two must not drift. */
+export const STATUS_LABEL: Record<InstanceStatus, string> = {
   stopped: '已停止',
   starting: '启动中',
   running: '运行中',
@@ -78,7 +80,7 @@ export function StatusPill({
         ) : (
           <StatusDot status={status} size={5} />
         )}
-        {LABEL[status]}
+        {STATUS_LABEL[status]}
         {showClock && status === 'running' && startedAt && (
           <span className="num text-2xs tabular-nums text-ink-faint">{formatClock(uptime)}</span>
         )}

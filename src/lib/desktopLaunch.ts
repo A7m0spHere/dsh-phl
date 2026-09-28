@@ -132,6 +132,35 @@ export async function onInstanceExited(
 /* ------------------------------ embedded WebUI ------------------------------ */
 
 /**
+ * The embedded WebUI's own boot failed: a plugin never activated (e.g. one
+ * waiting on a Cordis service the installed DSH version no longer provides).
+ * The DSH process is alive — only its page is dead — so this is the one
+ * failure the launch/exit flow cannot see. It arrives from the `webui` shell
+ * probe (`initialization_script` → intercepted `phl-webui-error:` navigation),
+ * which reads the failure card's exact text off the DOM.
+ */
+export interface WebuiPageError {
+  instanceId: string
+  /** Where the shell wrote the report: `<instance>/logs/webui-errors.log`. */
+  logPath: string
+  /** The card's verbatim text — `interpretBootFailure` turns it into causes. */
+  detail: string
+}
+
+/**
+ * Subscribe to the page-level boot failure. One latch, like `onInstanceExited`:
+ * bound once per session so a root change never double-stacks the toast.
+ */
+export async function onWebuiPageError(
+  handler: (event: WebuiPageError) => void,
+): Promise<Unlisten> {
+  if (!isDesktop) return () => {}
+  return currentWindow().listen<WebuiPageError>('phl://webui-page-error', (event) =>
+    handler(event.payload),
+  )
+}
+
+/**
  * Open (or focus) the embedded WebUI window for one instance. Windows are
  * one-per-instance and labelled by id, so a second call on a running instance
  * focuses the existing window instead of spawning another.

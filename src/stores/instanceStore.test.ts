@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   cloneInstance: vi.fn(),
   createSnapshot: vi.fn(), restoreSnapshot: vi.fn(), deleteSnapshot: vi.fn(),
   onExit: null as null | ((event: { instanceId: string; pid: number; code: number | null }) => void),
+  onPageError: null as null | ((event: { instanceId: string; logPath: string; detail: string }) => void),
+  revealPath: vi.fn(),
 }))
 vi.mock('@/services', async () => ({
   ...await import('@/services/repository'),
@@ -16,6 +18,8 @@ vi.mock('@/lib/desktop', () => ({
   isDesktop: true,
   openDshWebUi: mocks.openDshWebUi,
   onInstanceExited: async (handler: typeof mocks.onExit) => { mocks.onExit = handler; return () => {} },
+  onWebuiPageError: async (handler: typeof mocks.onPageError) => { mocks.onPageError = handler; return () => {} },
+  revealPath: mocks.revealPath,
 }))
 // The lifecycle/snapshot actions read catalog state through the storeRefs
 // seam (acyclic module graph); mocking that seam replaces the old
@@ -86,6 +90,38 @@ describe('instance lifecycle', () => {
   it('ignores a delayed exit event from an earlier process', () => {
     mocks.onExit!({ instanceId: 'test', pid: 122, code: 1 })
     expect(useInstanceStore.getState().stateOf('test')).toEqual(running)
+  })
+
+  it('surfaces a WebUI page boot failure while the process keeps running', () => {
+    const detail =
+      'HARNESS\nFailed to load plugins\nweb boot: 1 entry did not activate\n' +
+      'dsh-bonk-pet: pending (waiting for service: settingsScope)'
+    mocks.onPageError!({ instanceId: 'test', logPath: 'E:/x/logs/webui-errors.log', detail })
+    const state = useInstanceStore.getState().stateOf('test')
+    // The process is alive: the status must stay running — the failure rides along.
+    expect(state.status).toBe('running')
+    expect(state.lastWebuiError).toMatchObject({
+      headline: 'WebUI 启动失败：1 个插件未能加载',
+      logPath: 'E:/x/logs/webui-errors.log',
+      detail,
+    })
+    expect(state.lastWebuiError!.causes[0]).toContain('dsh-bonk-pet')
+    expect(state.lastWebuiError!.causes[0]).toContain('settingsScope')
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'error', action: expect.objectContaining({ label: '查看报错日志' }) }),
+    )
+    // The action button reveals the log the shell already wrote.
+    state.lastWebuiError && mocks.toast.mock.calls.at(-1)![0].action.run()
+    expect(mocks.revealPath).toHaveBeenCalledWith('E:/x/logs/webui-errors.log')
+  })
+
+  it('dedupes a re-reported identical boot failure inside the toast window', () => {
+    const detail = 'web boot: 1 entry did not activate\ndsh-bonk-pet: pending (waiting for service: settingsScope)'
+    mocks.onPageError!({ instanceId: 'test', logPath: 'p', detail })
+    mocks.onPageError!({ instanceId: 'test', logPath: 'p', detail })
+    expect(mocks.toast).toHaveBeenCalledTimes(1)
+    // The persisted fact still refreshes.
+    expect(useInstanceStore.getState().stateOf('test').lastWebuiError?.detail).toBe(detail)
   })
 
   it('does not report running when the exit event precedes the launch result', async () => {

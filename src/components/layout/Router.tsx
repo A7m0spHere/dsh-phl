@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useMotion } from '@/lib/motion'
+import { Skeleton } from '@/components/ui'
 import { routeKey, routeTab, useUIStore, type Route } from '@/stores'
 import { InstancesPage, InstancesPanel } from '@/pages/InstancesPage'
 // Keep the landing page eager; fetch other page modules only when visited.
@@ -128,5 +129,26 @@ export function Router() {
 }
 
 function LoadingPage() {
-  return <div role="status" className="p-6 text-sm text-ink-muted">加载页面…</div>
+  // A skeleton shaped like a page, not a line of text: the module chunk lands
+  // in a few frames, and a bare 「加载页面…」 flashed as a layout jump on every
+  // lazy navigation. Same header + body rhythm as PageShell so the real page
+  // settles into the placeholder's footprint.
+  return (
+    <div role="status" aria-live="polite" className="flex h-full min-h-0 flex-col">
+      <span className="sr-only">加载页面…</span>
+      <div className="shrink-0 px-[var(--page-pad)] pb-2 pt-3">
+        <div className="mx-auto w-full" style={{ maxWidth: 'min(900px, 100%)' }}>
+          <Skeleton className="h-[22px] w-40" />
+          <Skeleton className="mt-2 h-[15px] w-72" />
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 px-[var(--page-pad)] pb-6">
+        <div className="mx-auto w-full space-y-2.5" style={{ maxWidth: 'min(900px, 100%)' }}>
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-[76px]" />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }

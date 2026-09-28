@@ -174,6 +174,95 @@ export async function installPack(
   )
 }
 
+/* ----------------------- community packs (R1 · M4) ---------------------- */
+
+/** Mirrors the Rust `PackDependency` for a .dspack profile pack. */
+export interface CommunityPackDependency {
+  coordinate: string
+  pin: string
+  kind: 'npm' | 'git'
+  inBundles: boolean
+  resolvedCommit: string
+}
+
+/** Mirrors the Rust `CommunityPackPreview`. */
+export interface CommunityPackPreview {
+  format: 'dspack'
+  containerVersion: number
+  manifestVersion: number
+  packType: string
+  name: string
+  version: string
+  displayName: string | null
+  author: string | null
+  description: string | null
+  profileName: string
+  dshVersion: string | null
+  bundles: string[]
+  dependencies: CommunityPackDependency[]
+  patchSource: string
+  overridesCount: number
+  homeCount: number
+  packSha256: string
+  packSize: number
+  blocked: string[]
+  warnings: string[]
+}
+
+export interface CommunityPackInstallRequest {
+  instance: PackInstallRequest['manifest']
+  path: string
+  packSha256: string
+  dshVersion: string
+  installDependencies: boolean
+  allowMissing: boolean
+}
+
+export interface CommunityPackInstallOutcome {
+  record: import('./desktop').RemoteInstanceRecord
+  readiness: 'needsDependencies' | 'needsCredentials' | 'readyToLaunch'
+  dependenciesInstalled: number
+  dependencyFailures: string[]
+  sessionsImported: number
+}
+
+export async function previewCommunityPack(path: string): Promise<CommunityPackPreview> {
+  if (!isDesktop) throw new Error('整合包安装仅在桌面端可用')
+  return invoke<CommunityPackPreview>('preview_community_pack', { path })
+}
+
+export async function preparePackDependencies(
+  instanceId: string,
+  onProgress?: (p: { progress: number; bytesDone: number; bytesTotal: number }) => void,
+  signal?: AbortSignal,
+): Promise<CommunityPackInstallOutcome> {
+  if (!isDesktop) throw new Error('整合包依赖安装仅在桌面端可用')
+  const channel = new Channel<{ progress: number; bytesDone: number; bytesTotal: number }>()
+  if (onProgress) channel.onmessage = onProgress
+  return invokeCancellable<CommunityPackInstallOutcome>(
+    'prepare_pack_dependencies',
+    { instanceId, onProgress: channel },
+    'install',
+    signal,
+  )
+}
+
+export async function installCommunityPack(
+  req: CommunityPackInstallRequest,
+  onProgress?: (p: { progress: number; bytesDone: number; bytesTotal: number }) => void,
+  signal?: AbortSignal,
+): Promise<CommunityPackInstallOutcome> {
+  if (!isDesktop) throw new Error('整合包安装仅在桌面端可用')
+  const channel = new Channel<{ progress: number; bytesDone: number; bytesTotal: number }>()
+  if (onProgress) channel.onmessage = onProgress
+  return invokeCancellable<CommunityPackInstallOutcome>(
+    'install_community_pack',
+    { req, onProgress: channel },
+    'install',
+    signal,
+  )
+}
+
 /* -------------------------------- dialogs ----------------------------- */
 
 /** Native save dialog for a `.phlpack`. */

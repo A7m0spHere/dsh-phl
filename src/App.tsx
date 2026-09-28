@@ -18,6 +18,8 @@ import {
   bindHistorySync,
 } from '@/stores'
 import { DialogHost, Toaster } from '@/components/ui'
+import { EnvironmentCompareDialog } from '@/features/environment/EnvironmentCompareDialog'
+import { TrialDialog } from '@/features/trial/TrialDialog'
 import { TitleBar } from '@/components/layout/TitleBar'
 import { Router } from '@/components/layout/Router'
 import { QuickSwitcher } from '@/components/layout/QuickSwitcher'
@@ -32,6 +34,7 @@ export default function App() {
   const setPaletteOpen = useUIStore((s) => s.setPaletteOpen)
   const paletteOpen = useUIStore((s) => s.paletteOpen)
   const dialogOpen = useUIStore((s) => s.dialog !== null)
+  const overlayDepth = useUIStore((s) => s.overlayDepth)
   const syncSystemTheme = useUIStore((s) => s.syncSystemTheme)
   const motionLevel = useUIStore((s) => s.motion)
 
@@ -243,8 +246,11 @@ export default function App() {
       if (useUIStore.getState().navBack.length > 0) back()
       else useUIStore.getState().up()
     },
-    // A dialog or the palette owns Escape while it is open.
-    !paletteOpen && !dialogOpen,
+    // A dialog, the palette, or any overlay surface (dropdown, trial
+    // wizard, env-compare) owns Escape while it is open: each closes on its
+    // own listener, and without this gate the same keypress also navigated
+    // the page behind the overlay.
+    !paletteOpen && !dialogOpen && overlayDepth === 0,
   )
   useGlobalShortcut(shortcutById('settings'), () => navigate({ name: 'settings' }))
 
@@ -256,6 +262,8 @@ export default function App() {
       </div>
       <Toaster />
       <DialogHost />
+      <EnvironmentCompareDialog />
+      <TrialDialog />
       <QuickSwitcher />
       <GuideOverlay />
     </MotionConfig>

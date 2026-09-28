@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion, useAnimation } from 'motion/react'
-import { EASE, useMotion } from '@/lib/motion'
+import { EASE, STICKY_Z, useMotion } from '@/lib/motion'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -289,7 +289,7 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
           </motion.div>
         </motion.div>
 
-        <div className="sticky bottom-3 z-10 mt-4">
+        <div className={cn('sticky bottom-3 mt-4', STICKY_Z)}>
           <div className="flex items-center gap-3 rounded-lg bg-surface-raised px-3.5 py-2.5 shadow-pop ring-1 ring-inset ring-line">
             {missing.length ? (
               <span className="flex min-w-0 items-center gap-1.5 text-sm text-warn">

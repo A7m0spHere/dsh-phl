@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import { motion } from 'motion/react'
 import { cn } from '@/lib/cn'
 import { useMotion } from '@/lib/motion'
@@ -10,7 +11,6 @@ const TONES: Record<ProgressTone, string> = {
   warn: 'bg-warn',
   danger: 'bg-danger',
 }
-
 interface ProgressBarProps {
   /** 0..1. Ignored when `indeterminate`. */
   value?: number
@@ -56,7 +56,7 @@ export function ProgressBar({
           className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden rounded-full"
           style={{ width: `${pct}%` }}
         >
-          <div className="absolute inset-y-0 w-1/3 animate-shimmer bg-gradient-to-r from-transparent via-white/45 to-transparent" />
+          <div className="sheen absolute inset-y-0 w-1/3 animate-shimmer" style={{ '--sheen-alpha': '0.45' } as CSSProperties} />
         </div>
       )}
     </div>
@@ -87,49 +87,5 @@ export function EdgeProgress({
         />
       )}
     </div>
-  )
-}
-
-/** Circular progress used by the title-bar transfer indicator. */
-export function ProgressRing({
-  value,
-  size = 16,
-  width = 2,
-  className,
-}: {
-  value: number
-  size?: number
-  width?: number
-  className?: string
-}) {
-  const { t } = useMotion()
-  const r = (size - width) / 2
-  const c = 2 * Math.PI * r
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className={cn(className)}>
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeOpacity={0.18}
-        strokeWidth={width}
-      />
-      <motion.circle
-        cx={size / 2}
-        cy={size / 2}
-        r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={width}
-        strokeLinecap="round"
-        strokeDasharray={c}
-        initial={false}
-        animate={{ strokeDashoffset: c * (1 - Math.max(0, Math.min(1, value))) }}
-        transition={t(0.3)}
-        style={{ transformOrigin: 'center', transform: 'rotate(-90deg)' }}
-      />
-    </svg>
   )
 }

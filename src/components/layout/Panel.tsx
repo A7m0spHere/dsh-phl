@@ -65,7 +65,7 @@ export function PanelItem({
   className,
 }: PanelItemProps) {
   const fallback = useId()
-  const { spring, scale } = useMotion()
+  const { spring } = useMotion()
   return (
     <button
       onClick={onClick}
@@ -79,7 +79,7 @@ export function PanelItem({
       {active && (
         <motion.span
           layoutId={groupId ?? fallback}
-          transition={scale === 0 ? { duration: 0 } : spring}
+          transition={spring}
           className="absolute inset-0 rounded-sm bg-accent-soft"
         />
       )}

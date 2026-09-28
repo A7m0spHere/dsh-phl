@@ -4,7 +4,7 @@ import { ChevronUp, ExternalLink, Play, RotateCcw, Square, X } from 'lucide-reac
 import { cn } from '@/lib/cn'
 import { formatClock } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
-import { useMotion } from '@/lib/motion'
+import { D, DOCK_Z, useMotion } from '@/lib/motion'
 import { useCatalogStore, useInstanceStore, useUIStore } from '@/stores'
 import { LAUNCH_PHASE_LABEL, LAUNCH_PHASES } from '@/types'
 import { Button, Chip, IconButton, Menu, ProgressBar, Tooltip } from '@/components/ui'
@@ -63,8 +63,8 @@ export function LaunchDock() {
     <motion.div
       initial={{ y: scale === 0 ? 0 : 24, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
-      transition={t(0.34)}
-      className="relative z-20 shrink-0 border-t border-line bg-chrome/85 shadow-dock backdrop-blur-xl"
+      transition={t(D.slow)}
+      className={cn('relative', DOCK_Z, 'shrink-0 border-t border-line bg-chrome/85 shadow-dock backdrop-blur-xl')}
     >
       {/* launch progress runs along the very top edge of the dock */}
       <AnimatePresence>
@@ -95,7 +95,7 @@ export function LaunchDock() {
           <InstanceTile name={target.name} hue={target.hue} status={status} size={32} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="truncate text-base font-medium text-ink transition-colors group-hover:text-accent-ink">
+              <span className="truncate text-md font-medium text-ink transition-colors group-hover:text-accent-ink">
                 {target.name}
               </span>
               {running && (
@@ -204,7 +204,7 @@ export function LaunchDock() {
                   variant={running ? 'secondary' : 'primary'}
                   onClick={openMenu}
                   {...menuProps}
-                  className="h-9 w-7 rounded-l-none border-l border-black/10 dark:border-white/10"
+                  className="h-9 w-7 rounded-l-none border-l border-line-strong/60"
                 >
                   <ChevronUp size={13} />
                 </IconButton>

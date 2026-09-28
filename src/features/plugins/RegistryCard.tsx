@@ -74,7 +74,7 @@ export const RegistryCard = memo(function RegistryCard({
           <div className="min-w-0 flex-1">
             <button className="block w-full text-left" onClick={() => onSelect(plugin.id)}>
               <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-                <span className="truncate text-base font-medium text-ink transition-colors group-hover/row:text-accent-ink">
+                <span className="truncate text-md font-medium text-ink transition-colors group-hover/row:text-accent-ink">
                   {plugin.name}
                 </span>
                 {subtitle && <span className="truncate text-sm text-ink-faint">｜ {subtitle}</span>}

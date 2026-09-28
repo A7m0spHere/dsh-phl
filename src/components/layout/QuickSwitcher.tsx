@@ -41,7 +41,7 @@ export function QuickSwitcher() {
   const states = useInstanceStore((s) => s.states)
   const toggle = useInstanceStore((s) => s.toggle)
   const versions = useCatalogStore((s) => s.versions)
-  const { overlay, pop, scale } = useMotion()
+  const { overlay, pop, scale, t } = useMotion()
 
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -258,6 +258,7 @@ export function QuickSwitcher() {
                           <motion.span
                             initial={{ opacity: 0, x: -4 }}
                             animate={{ opacity: 1, x: 0 }}
+                            transition={t(0.16)}
                             className="shrink-0 text-ink-faint"
                           >
                             <CornerDownLeft size={12} />

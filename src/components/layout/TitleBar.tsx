@@ -23,7 +23,7 @@ import { cn } from '@/lib/cn'
 import { desktop, isMac } from '@/lib/desktop'
 import { useFullscreen } from '@/lib/useFullscreen'
 import { useMaximized } from '@/lib/useMaximized'
-import { useMotion } from '@/lib/motion'
+import { CHROME_Z, D, useMotion } from '@/lib/motion'
 import {
   routeTab,
   useInstanceStore,
@@ -59,7 +59,7 @@ export function TitleBar() {
   const runningCount = useInstanceStore((s) =>
     s.instances.filter((i) => s.states[i.id]?.status === 'running').length,
   )
-  const { t, spring, scale } = useMotion()
+  const { t, spring } = useMotion()
   const indicatorId = useId()
   const maximized = useMaximized()
   const fullscreen = useFullscreen()
@@ -82,7 +82,7 @@ export function TitleBar() {
     // app's own overflow-hidden, which clipped 最小化/最大化/关闭 off the screen.
     <header
       data-tauri-drag-region
-      className="drag relative z-30 flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl"
+      className={cn('relative flex shrink-0 select-none items-center gap-1 border-b border-line bg-chrome/90 px-2 backdrop-blur-xl', CHROME_Z)}
       style={{ height: 'var(--titlebar-h)' }}
     >
       {/* macOS (and browser-preview-of-macOS): the native traffic lights sit
@@ -114,7 +114,7 @@ export function TitleBar() {
               </span>
             }
           >
-            <span className="no-drag rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
+            <span className="rounded-xs bg-warn/[0.12] px-1.5 py-0.5 text-2xs font-semibold text-warn ring-1 ring-inset ring-warn/25">
               浏览器模拟模式
             </span>
           </Tooltip>
@@ -125,7 +125,7 @@ export function TitleBar() {
           page history, not to the app. Fixed placeholders — greyed when there
           is nowhere to go — so the chevrons never jump and the hit target is
           always in the same spot. */}
-      <div className="no-drag flex shrink-0 items-center">
+      <div className="flex shrink-0 items-center">
         <Tooltip content={<span className="flex items-center gap-1">返回 <Kbd>Alt</Kbd><Kbd>←</Kbd></span>} side="bottom">
           <IconButton label="返回" size="sm" variant="ghost" disabled={!canGoBack} onClick={back}>
             <ArrowLeft size={14} />
@@ -138,7 +138,7 @@ export function TitleBar() {
         </Tooltip>
       </div>
 
-      <nav className="no-drag flex min-w-0 items-center gap-0.5">
+      <nav className="flex min-w-0 items-center gap-0.5">
         {TABS.map((tab) => {
           const active = tab.id === activeTab
           const Icon = tab.icon
@@ -157,7 +157,7 @@ export function TitleBar() {
               {active && (
                 <motion.span
                   layoutId={indicatorId}
-                  transition={scale === 0 ? { duration: 0 } : spring}
+                  transition={spring}
                   className="absolute inset-0 rounded-sm bg-surface-hover"
                 />
               )}
@@ -188,7 +188,6 @@ export function TitleBar() {
             label="快速跳转"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setPaletteOpen(true)}
           >
             <Search size={14} />
@@ -200,7 +199,6 @@ export function TitleBar() {
             label="入门指引"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setGuideOpen(true)}
           >
             <CircleHelp size={13} />
@@ -212,7 +210,6 @@ export function TitleBar() {
             label="切换主题"
             size="sm"
             variant="ghost"
-            className="no-drag"
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           >
             <AnimatePresence mode="wait" initial={false}>
@@ -221,7 +218,7 @@ export function TitleBar() {
                 initial={{ opacity: 0, rotate: -60, scale: 0.7 }}
                 animate={{ opacity: 1, rotate: 0, scale: 1 }}
                 exit={{ opacity: 0, rotate: 60, scale: 0.7 }}
-                transition={t(0.2)}
+                transition={t(D.base)}
                 className="flex"
               >
                 {isDark ? <Moon size={14} /> : <Sun size={14} />}
@@ -248,7 +245,6 @@ export function TitleBar() {
               label="退出全屏"
               size="sm"
               variant="ghost"
-              className="no-drag"
               onClick={() =>
                 void desktop.exitFullscreen().catch(() =>
                   toast({
@@ -273,7 +269,7 @@ export function TitleBar() {
             close also routes through `phl://close-requested` in Rust, so the
             custom controls are Windows/Linux/browser only. */}
         {!isMac && (
-          <div className="no-drag ml-1 flex shrink-0 items-center self-stretch">
+          <div className="ml-1 flex shrink-0 items-center self-stretch">
             <button
               aria-label="最小化"
               onClick={() => (desktop.isDesktop ? void desktop.minimize() : unavailable())}
@@ -292,7 +288,7 @@ export function TitleBar() {
             <button
               aria-label="关闭"
               onClick={() => (desktop.isDesktop ? void desktop.requestClose() : unavailable())}
-              className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-white"
+              className="flex h-full w-10 items-center justify-center text-ink-faint transition-colors hover:bg-danger hover:text-danger-on"
             >
               <X size={14} />
             </button>

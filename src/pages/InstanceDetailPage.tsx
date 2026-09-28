@@ -22,6 +22,7 @@ import { instanceSessionCount } from '@/lib/desktop'
 import { resolveBoundVersion } from '@/lib/instanceVersion'
 import { formatBytes, formatDateTime, formatDuration, formatRelative } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
+import { useFirstVisit } from '@/lib/useFirstVisit'
 import { useMotion } from '@/lib/motion'
 import { linkedPluginNames } from '@/data/instances'
 import { useCatalogStore, useInstanceStore, useUIStore } from '@/stores'
@@ -49,6 +50,10 @@ import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/co
 import { InstanceTile, LaunchTimeline, StatusPill, useInstanceActions } from '@/components/instance'
 import { SessionCopyPanel } from '@/components/instance/SessionCopyPanel'
 import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
+import { RuntimeBindingConvert } from '@/features/runtime/RuntimeBindingConvert'
+import { RecentOperations } from '@/features/operations/RecentOperations'
+import { DependencyRetryCard } from '@/features/operations/DependencyRetryCard'
+import { isLegacyRuntimeId } from '@/types/runtime'
 import { EnvironmentHealthCard } from '@/components/instance/EnvironmentHealthCard'
 
 /* ------------------------------------------------------------------ *
@@ -133,6 +138,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
   const { t, stagger, riseItem, swap } = useMotion()
   const actions = useInstanceActions(instance)
   const uptime = useUptime(state.status === 'running' ? state.startedAt : undefined)
+  const firstVisit = useFirstVisit(`instance:${id}`)
 
   // Viewing an instance *is* aiming the launcher at it: the dock below the
   // list page and the cards' focus ring always agree with this route.
@@ -415,7 +421,15 @@ export function InstanceDetailPage({ id }: { id: string }) {
         )}
       </AnimatePresence>
 
-      <motion.div variants={stagger(0.04)} initial="hidden" animate="show" className="space-y-3">
+      {/* First visit: the sections rise in sequence. Every visit after that:
+          `initial={false}` skips the entrance entirely, so returning to a page
+          you already know is instant instead of a ten-beat wave. */}
+      <motion.div
+        variants={stagger(0.04)}
+        initial={firstVisit ? 'hidden' : false}
+        animate="show"
+        className="space-y-3"
+      >
         {/* ---- 环境 ---- */}
         <motion.div variants={riseItem}>
           <SectionCard
@@ -577,6 +591,21 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   }
                 />
                 <DataRow label="Profile" value={instance.profile} />
+                {isLegacyRuntimeId(instance.runtimeId) && (
+                  <div className="mt-2">
+                    <RuntimeBindingConvert instanceId={instance.id} />
+                  </div>
+                )}
+                {(instance.readiness === 'needsDependencies' ||
+                  instance.readiness === 'corruptImport') && (
+                  <div className="mt-2">
+                    <DependencyRetryCard
+                      instanceId={instance.id}
+                      variant={instance.readiness === 'corruptImport' ? 'corruptImport' : 'needsDependencies'}
+                      failures={instance.importFailures ?? []}
+                    />
+                  </div>
+                )}
                 {instance.managementMode === 'external' && (
                   <p className="mt-1 text-xs leading-relaxed text-ink-faint">
                     原地接入：源 DSH 自带的可执行程序不在 PHL 管理范围内，其版本也不会被读取；启动时由上方绑定的版本运行这份环境。
@@ -960,6 +989,8 @@ export function InstanceDetailPage({ id }: { id: string }) {
 
         {/* ---- 统计 ---- */}
         <motion.div variants={riseItem}>
+          <RecentOperations instanceId={instance.id} />
+
           <SectionCard title="统计" collapsible defaultOpen={false}>
             <div className="grid gap-x-8 md:grid-cols-2">
               <div>

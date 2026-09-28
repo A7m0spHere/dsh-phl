@@ -334,11 +334,24 @@ mod tests {
 
     /// Round-trips through the real OS store on Windows. The entry is
     /// namespaced and removed again — the test leaves nothing behind.
+    ///
+    /// The id is unique per invocation: pid names get recycled by Windows, so
+    /// a `test:<pid>` entry written by a previous run (or by a parallel cargo
+    /// test binary reusing the pid) made the "clean slate" and overwrite
+    /// assertions read stale values. Nanoseconds + pid make cross-run
+    /// collisions practically impossible.
     #[test]
     #[cfg(windows)]
     fn credential_roundtrip_through_the_os_store() {
-        let id = format!("test:{}", std::process::id());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let id = format!("test:{}-{}", std::process::id(), nanos);
         let store = Creds::platform_default();
+        // A leftover from an aborted run with the same id is deleted up
+        // front, so the "clean slate" assertion holds by construction.
+        let _ = store.delete(&id);
 
         assert_eq!(store.get(&id).unwrap(), None, "clean slate");
         store.set(&id, "sk-test-abcdef").unwrap();

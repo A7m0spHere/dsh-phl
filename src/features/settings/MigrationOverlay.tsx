@@ -2,8 +2,9 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { HardDrive } from 'lucide-react'
 import { type MoveProgress } from '@/lib/desktop'
+import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
-import { useMotion } from '@/lib/motion'
+import { LOCAL_OVERLAY_Z, useMotion } from '@/lib/motion'
 import { MOVE_KIND_LABELS } from './consts'
 import { Button, ProgressBar, Spinner } from '@/components/ui'
 
@@ -22,7 +23,7 @@ export function MigrationOverlay({
   return (
     <AnimatePresence>
       {info && (
-        <motion.div key="migration" className="absolute inset-0 z-40 flex items-center justify-center">
+        <motion.div key="migration" className={cn('absolute inset-0 flex items-center justify-center', LOCAL_OVERLAY_Z)}>
           <motion.div
             variants={overlay}
             initial="hidden"

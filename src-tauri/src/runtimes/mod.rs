@@ -1,10 +1,13 @@
 //! Node Runtime Manager: the catalog comes from the official nodejs.org dist
 //! index (npmmirror's copy for CN users), installs download the platform
 //! archive, verify it against `SHASUMS256.txt`, and unpack into
-//! `<root>/runtimes/node-<major>/`.
+//! `<root>/runtimes/node-<full semver>/`.
 //!
 //! Instances reference runtimes by id only — the tree is shared, never copied
-//! per instance (see the note in `instances.rs`).
+//! per instance (see the note in `instances.rs`). Since precise bindings,
+//! an install id is the exact semver (`node-22.12.0`); two patch releases of
+//! one major can coexist. Legacy ids (`node-22`) keep resolving to their
+//! legacy directory — see `legacy_major_id` and the conversion commands.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,12 +26,15 @@ use crate::versions::{
 use catalog::DistEntry;
 
 pub(crate) mod catalog;
+pub(crate) mod convert;
 pub(crate) mod install;
 
-pub(crate) use catalog::group_catalog;
+pub(crate) use catalog::{collect_major_versions, group_catalog};
 #[cfg(test)]
 use install::{check_shasums, dist_platform, extract_zip, parse_shasums};
-pub(crate) use install::{run_runtime_install, RuntimeMarker};
+pub(crate) use install::{
+    host_platform_arch, probe_node_version, run_runtime_install, RuntimeMarker,
+};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
@@ -47,15 +53,47 @@ const INDEX_TIMEOUT: Duration = Duration::from_secs(30);
 /// before it has an LTS codename).
 pub(crate) const MIN_MAJOR: u64 = 16;
 
+/* ------------------------------- id rules ------------------------------ */
+
+/// The install id for a precise Node object: the directory under
+/// `<root>/runtimes/` and the id an instance manifest binds.
+pub(crate) fn precise_runtime_id(version: &str) -> String {
+    format!("node-{version}")
+}
+
+/// `Some(major)` when the id is a legacy major binding (`node-22`) that only
+/// ever meant "the tree installed under that name". Precise ids
+/// (`node-22.12.0`) and the system entry do not match.
+pub(crate) fn legacy_major_id(runtime_id: &str) -> Option<u64> {
+    let rest = runtime_id.strip_prefix("node-")?;
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+/// Maps a pack/bundle `nodeVersion` declaration onto a runtime id. An empty
+/// declaration means "no requirement" → the system entry; `22.12.0` names the
+/// precise object; a bare `22` keeps the legacy major id, which still resolves
+/// to its legacy directory (never re-derived into a different binary).
+pub(crate) fn runtime_id_for_node_version(node_version: &str) -> String {
+    let version = node_version.trim();
+    if version.is_empty() {
+        return "node-system".into();
+    }
+    format!("node-{version}")
+}
+
 /* ----------------------------- wire types ----------------------------- */
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeRuntimeMeta {
-    /// `node-22` — same id the mock used, so instances keep referencing majors.
+    /// Precise install id (`node-22.12.0`) so binding a catalog row pins the
+    /// exact release. The frontend groups rows by `major` for display.
     pub id: String,
     pub major: u64,
-    /// Full version of the latest release in the line, e.g. `22.12.0`.
+    /// Full version of the release, e.g. `22.12.0`.
     pub version: String,
     pub codename: Option<String>,
     pub lts: bool,
@@ -72,10 +110,16 @@ pub struct SystemNodeInfo {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledRuntimeInfo {
-    /// Directory name under `<root>/runtimes/`, e.g. `node-22`.
+    /// Directory name under `<root>/runtimes/`, e.g. `node-22.12.0` (or a
+    /// legacy `node-22`).
     pub name: String,
     pub installed_at: String,
     pub version: String,
+    /// Recorded by precise installs; legacy markers carry none.
+    pub platform: Option<String>,
+    pub arch: Option<String>,
+    /// True when the directory name is a legacy major id.
+    pub legacy: bool,
 }
 
 /* ------------------------------ commands ------------------------------ */
@@ -98,13 +142,42 @@ pub async fn list_node_runtimes(dist_base: String) -> Result<Vec<NodeRuntimeMeta
     Ok(group_catalog(entries))
 }
 
+/// Every release of one major line, newest first — feeds the "other patch
+/// versions" expander so two patches of the same major can be installed
+/// side by side.
+#[tauri::command]
+pub async fn list_node_runtime_versions(
+    dist_base: String,
+    major: u64,
+) -> Result<Vec<NodeRuntimeMeta>, String> {
+    let client = http_client();
+    let url = format!("{}/index.json", dist_base.trim_end_matches('/'));
+    let entries: Vec<DistEntry> = client
+        .get(&url)
+        .timeout(INDEX_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("Node dist 索引请求失败: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Node dist 索引返回错误: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Node dist 索引解析失败: {e}"))?;
+    Ok(collect_major_versions(entries, major))
+}
+
+/// The full install marker of an installed runtime, or None when the
+/// directory carries no readable marker.
+pub(crate) fn runtime_marker(dir: &Path) -> Option<RuntimeMarker> {
+    let raw = std::fs::read_to_string(dir.join("phl-runtime.json")).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
 /// The full semver recorded by an installed runtime, or None when the
 /// directory carries no readable marker. Shared with the environment
 /// verifier, which compares it against what the binary actually reports.
 pub(crate) fn runtime_version(dir: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(dir.join("phl-runtime.json")).ok()?;
-    let marker: RuntimeMarker = serde_json::from_str(&raw).ok()?;
-    Some(marker.version)
+    Some(runtime_marker(dir)?.version)
 }
 
 #[tauri::command]
@@ -136,6 +209,9 @@ pub async fn list_installed_runtimes(
             continue;
         };
         out.push(InstalledRuntimeInfo {
+            legacy: legacy_major_id(&name).is_some(),
+            platform: marker.platform.clone(),
+            arch: marker.arch.clone(),
             name,
             installed_at: marker.installed_at,
             version: marker.version,
@@ -145,12 +221,18 @@ pub async fn list_installed_runtimes(
     Ok(out)
 }
 
-/// The path and version of the system Node — resolved and probed through
-/// `discovery::inspect::resolve_system_node`, the same lookup a launch uses.
-/// One resolution for both is the whole point: a bare `node` means "whatever
-/// PATH resolves", which in an app launched from Finder is nothing at all, so
-/// the page could report a version that no instance would ever run.
-/// Spawned on a blocking thread: this runs a process, not a syscall.
+/// The system Node version for environment facts (A08). Resolve the absolute
+/// executable through the same lookup used by launch, so Finder-launched apps
+/// do not report a different PATH result from the binary they can actually run.
+/// Resolution probes a process and is kept off the async executor thread.
+pub(crate) async fn probe_system_node_version() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        crate::discovery::inspect::resolve_system_node().map(|(_, version)| version)
+    })
+    .await
+    .ok()
+    .flatten()
+}
 #[tauri::command]
 pub async fn system_node_version() -> Option<SystemNodeInfo> {
     tokio::task::spawn_blocking(|| {
@@ -275,10 +357,11 @@ async fn remove_runtime_dir_body(
     Ok(())
 }
 
-/// The names of every instance whose manifest still points at `runtime_id`.
-/// An instance whose manifest this build cannot read is skipped: it is hidden
-/// from the UI anyway and cannot launch under this build, so it neither blocks
-/// nor is blocked.
+/// The names of every instance whose manifest or **snapshot** still points
+/// at `runtime_id` (CR-09). An instance whose manifest this build cannot
+/// read is treated as a live reference and blocks the delete: the spec's
+/// rule is conservative retention with an explanation, never a silent
+/// skip — a future build may read what this one cannot.
 async fn instances_referencing_runtime(root: &Path, runtime_id: &str) -> Vec<String> {
     let mut names = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(crate::instances::instances_root(root)).await else {
@@ -290,9 +373,26 @@ async fn instances_referencing_runtime(root: &Path, runtime_id: &str) -> Vec<Str
         {
             continue;
         }
-        if let Some(manifest) = crate::instances::read_manifest(&path).await {
-            if manifest.runtime_id == runtime_id {
-                names.push(format!("「{}」", manifest.name));
+        match crate::instances::read_manifest(&path).await {
+            Some(manifest) => {
+                let mut referenced = manifest.runtime_id == runtime_id;
+                // Snapshots record the runtime they were taken under; a
+                // restore must not revive a runtime the user just deleted.
+                if !referenced {
+                    referenced =
+                        crate::instances::snapshot::snapshots_reference_runtime(&path, runtime_id)
+                            .await;
+                }
+                if referenced {
+                    names.push(format!("「{}」", manifest.name));
+                }
+            }
+            None => {
+                // Unreadable manifest: conservative block with the reason.
+                names.push(format!(
+                    "「{}」（清单不可读，无法确认是否引用；请先修复或删除该实例）",
+                    entry.file_name().to_string_lossy()
+                ));
             }
         }
     }
@@ -325,6 +425,7 @@ pub async fn runtimes_disk_usage(phl: State<'_, PhlState>) -> Result<HashMap<Str
 
 #[cfg(test)]
 mod tests {
+    use super::convert::{conversion_preview, convert_runtime_binding_inner};
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -363,15 +464,54 @@ mod tests {
         // 21: neither LTS nor among the two newest lines; 14: below the floor.
         assert!(!ids.contains(&"node-21"));
         assert!(!ids.contains(&"node-14"));
-        // 22 keeps only the newest patch of the line.
-        let node22 = metas.iter().find(|m| m.id == "node-22").unwrap();
+        // 22 keeps only the newest patch of the line — under its precise id.
+        let node22 = metas.iter().find(|m| m.major == 22).unwrap();
+        assert_eq!(node22.id, "node-22.12.0");
         assert_eq!(node22.version, "22.12.0");
         assert!(node22.lts);
         // 23 is the newest major — shown even without an LTS codename.
-        let node23 = metas.iter().find(|m| m.id == "node-23").unwrap();
+        let node23 = metas.iter().find(|m| m.major == 23).unwrap();
+        assert_eq!(node23.id, "node-23.1.0");
         assert!(!node23.lts);
         // Newest line first.
         assert_eq!(metas.first().unwrap().major, 23);
+    }
+
+    #[test]
+    fn major_version_listing_keeps_every_release_of_the_line() {
+        let metas = collect_major_versions(
+            vec![
+                entry("v22.14.0", Some("Jod")),
+                entry("v22.12.0", Some("Jod")),
+                entry("v22.11.0", Some("Jod")),
+                entry("v23.1.0", None),
+                entry("v21.7.3", None),
+            ],
+            22,
+        );
+        let versions: Vec<&str> = metas.iter().map(|m| m.version.as_str()).collect();
+        assert_eq!(versions, vec!["22.14.0", "22.12.0", "22.11.0"]);
+        assert!(metas.iter().all(|m| m.id.starts_with("node-22.")));
+    }
+
+    #[test]
+    fn id_rules_distinguish_precise_legacy_and_system() {
+        assert_eq!(legacy_major_id("node-22"), Some(22));
+        assert_eq!(legacy_major_id("node-16"), Some(16));
+        // Precise ids and the system entry are not legacy bindings.
+        assert_eq!(legacy_major_id("node-22.12.0"), None);
+        assert_eq!(legacy_major_id("node-system"), None);
+        assert_eq!(legacy_major_id("node"), None);
+        assert_eq!(legacy_major_id(""), None);
+
+        assert_eq!(precise_runtime_id("22.12.0"), "node-22.12.0");
+        // Pack/bundle nodeVersion declarations map onto ids without guessing.
+        assert_eq!(runtime_id_for_node_version("22.12.0"), "node-22.12.0");
+        // A bare major keeps the legacy id: it resolves to the legacy
+        // directory, never re-derived into a different binary.
+        assert_eq!(runtime_id_for_node_version("22"), "node-22");
+        assert_eq!(runtime_id_for_node_version(""), "node-system");
+        assert_eq!(runtime_id_for_node_version(" 22.12.0 "), "node-22.12.0");
     }
 
     #[test]
@@ -605,6 +745,249 @@ mod tests {
         assert!(instances_referencing_runtime(&root, "node-18.0.0")
             .await
             .is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /* --------------------- precise-binding conversion --------------------- */
+
+    /// The system node, like `release_e2e::fixtures::NodeInfo` but local to
+    /// these tests: the conversion health gates run the *real* binary, so the
+    /// seeded runtime trees must carry it. Skips when node is unavailable.
+    fn system_node() -> Option<(std::path::PathBuf, String)> {
+        let out = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let version = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .strip_prefix('v')?
+            .to_string();
+        if version.split('.').count() != 3 {
+            return None;
+        }
+        let exe = {
+            let out = std::process::Command::new("node")
+                .arg("-e")
+                .arg("process.stdout.write(process.execPath)")
+                .output()
+                .ok()?;
+            std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        exe.exists().then_some((exe, version))
+    }
+
+    /// Seeds `<root>/runtimes/<name>` with a marker recording `version` and a
+    /// runnable node binary copied from the system install.
+    fn seed_runtime(root: &Path, name: &str, version: &str) {
+        let dir = root.join("runtimes").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (exe, _) = system_node().expect("test requires a runnable system node");
+        std::fs::copy(&exe, dir.join(crate::launch::node_binary())).unwrap();
+        let marker = serde_json::json!({
+            "installedAt": "2026-01-01T00:00:00Z",
+            "version": version,
+        });
+        std::fs::write(dir.join("phl-runtime.json"), marker.to_string()).unwrap();
+    }
+
+    fn processes() -> crate::launch::Processes {
+        crate::launch::Processes::default()
+    }
+
+    #[tokio::test]
+    async fn conversion_preview_accepts_a_consistent_legacy_binding() {
+        let Some((_, version)) = system_node() else {
+            println!("skipped: no system node");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("phl-conv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        seed_instance(&root, "inst-a", "node-22");
+        seed_runtime(&root, "node-22", &version);
+
+        let phl = PhlState::with_pointer(Some(root.join("cfg").join("root.json")));
+        phl.set_root(&root.to_string_lossy()).unwrap();
+
+        let preview = conversion_preview(&root, &processes(), "inst-a")
+            .await
+            .unwrap();
+        assert_eq!(preview.legacy_id, "node-22");
+        assert_eq!(preview.legacy_major, 22);
+        assert_eq!(preview.recorded_version.as_deref(), Some(version.as_str()));
+        assert_eq!(preview.binary_version.as_deref(), Some(version.as_str()));
+        assert_eq!(preview.blocked_reason, None);
+        assert_eq!(preview.target_id, precise_runtime_id(&version));
+        assert!(!preview.target_installed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn conversion_preview_refuses_missing_or_inconsistent_facts() {
+        let Some((_, version)) = system_node() else {
+            println!("skipped: no system node");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("phl-conv-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+
+        // No marker → the target version cannot be known; refuse, don't guess.
+        seed_instance(&root, "inst-a", "node-22");
+        seed_runtime(&root, "node-22", &version);
+        std::fs::remove_file(
+            root.join("runtimes")
+                .join("node-22")
+                .join("phl-runtime.json"),
+        )
+        .unwrap();
+        let preview = conversion_preview(&root, &processes(), "inst-a")
+            .await
+            .unwrap();
+        assert!(preview.blocked_reason.is_some());
+        assert!(preview.target_id.is_empty());
+
+        // Marker claims another version than the binary reports → refuse.
+        seed_runtime(&root, "node-22", "99.99.99");
+        let preview = conversion_preview(&root, &processes(), "inst-a")
+            .await
+            .unwrap();
+        let reason = preview.blocked_reason.expect("mismatch must block");
+        assert!(reason.contains("不一致"), "unexpected: {reason}");
+
+        // A missing legacy directory is a broken binding, not a conversion.
+        std::fs::remove_dir_all(root.join("runtimes").join("node-22")).unwrap();
+        let preview = conversion_preview(&root, &processes(), "inst-a")
+            .await
+            .unwrap();
+        assert!(preview.blocked_reason.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn conversion_flips_the_binding_only_after_the_target_verifies() {
+        let Some((_, version)) = system_node() else {
+            println!("skipped: no system node");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("phl-conv-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        seed_instance(&root, "inst-a", "node-22");
+        seed_runtime(&root, "node-22", &version);
+        // The precise object already exists and is healthy: no download, the
+        // conversion is a pure rebind.
+        seed_runtime(&root, &precise_runtime_id(&version), &version);
+
+        let phl = PhlState::with_pointer(Some(root.join("cfg").join("root.json")));
+        phl.set_root(&root.to_string_lossy()).unwrap();
+        let preview = conversion_preview(&root, &processes(), "inst-a")
+            .await
+            .unwrap();
+        assert!(preview.target_installed);
+
+        let outcome = convert_runtime_binding_inner(
+            &Transfers::default(),
+            &crate::resources::ResourceLocks::default(),
+            &crate::resources::Tasks::default(),
+            &processes(),
+            &phl,
+            format!("conv-{}", std::process::id()),
+            "inst-a".into(),
+            "https://nodejs.org/dist".into(),
+            false,
+            tauri::ipc::Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.runtime_id, precise_runtime_id(&version));
+
+        let dir = crate::instances::instance_dir(&root, "inst-a").unwrap();
+        let manifest = crate::instances::read_manifest(&dir).await.unwrap();
+        assert_eq!(manifest.runtime_id, precise_runtime_id(&version));
+        // The legacy directory survives: cleanup stays an explicit step.
+        assert!(root.join("runtimes").join("node-22").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /* ------------------- CR-09 promotion tests ------------------- */
+
+    fn seed_snapshot(root: &Path, id: &str, runtime_id: &str) {
+        let dir = root.join("instances").join(id);
+        std::fs::create_dir_all(dir.join("snapshots").join("snap-1")).unwrap();
+        let body = serde_json::json!({
+            "id": "snap-1",
+            "label": "测试快照",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "versionId": "dsh-0.1.0",
+            "runtimeId": runtime_id,
+            "pluginCount": 0,
+            "size": 0,
+        });
+        std::fs::write(
+            dir.join("snapshots").join("snap-1").join("snapshot.json"),
+            serde_json::to_vec_pretty(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// CR-09/A06: a runtime referenced only by a snapshot is protected — the
+    /// delete guard must see what a restore would revive.
+    #[tokio::test]
+    async fn snapshot_referenced_runtime_cannot_be_deleted() {
+        let root = std::env::temp_dir().join(format!("phl-rt-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtimes")).unwrap();
+        let rt = root.join("runtimes").join("node-20.11.0");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(rt.join("node.exe"), b"interpreter").unwrap();
+        // Instance A binds node-22; its snapshot remembers node-20.11.0.
+        seed_instance(&root, "inst-a", "node-22");
+        seed_snapshot(&root, "inst-a", "node-20.11.0");
+
+        let phl = PhlState::with_pointer(Some(root.join("cfg").join("root.json")));
+        phl.set_root(&root.to_string_lossy()).unwrap();
+
+        let err = remove_runtime_dir_body(&phl, "node-20.11.0", &rt_task())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("绑定") || err.contains("实例"),
+            "unexpected: {err}"
+        );
+        assert!(rt.exists(), "a snapshot-referenced runtime must survive");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CR-09: an unreadable manifest must block the delete conservatively with
+    /// an explanation — never silently skipped.
+    #[tokio::test]
+    async fn unreadable_manifest_blocks_runtime_delete_conservatively() {
+        let root = std::env::temp_dir().join(format!("phl-rt-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtimes")).unwrap();
+        let rt = root.join("runtimes").join("node-21.3.0");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(rt.join("node.exe"), b"interpreter").unwrap();
+        // A manifest this build cannot read (garbage bytes).
+        let dir = root.join("instances").join("broken-inst");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("instance.json"), b"\xff\xfe not json").unwrap();
+
+        let phl = PhlState::with_pointer(Some(root.join("cfg").join("root.json")));
+        phl.set_root(&root.to_string_lossy()).unwrap();
+
+        let err = remove_runtime_dir_body(&phl, "node-21.3.0", &rt_task())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("不可读") || err.contains("无法确认"),
+            "unreadable manifests must be explained, not skipped: {err}"
+        );
+        assert!(rt.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

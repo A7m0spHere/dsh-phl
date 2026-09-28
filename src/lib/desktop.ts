@@ -169,13 +169,57 @@ export {
   NODE_DIST_OFFICIAL,
   NODE_DIST_MIRROR,
   listNodeRuntimeCatalog,
+  listNodeRuntimeVersions,
   listInstalledRuntimes,
   systemNodeVersion,
   downloadNodeRuntime,
   removeRuntimeDir,
   runtimesDiskUsage,
+  previewRuntimeConversion,
+  convertRuntimeBinding,
 } from './desktopRuntimes'
-export type { RemoteRuntimeMeta, InstalledRuntimeInfo, DownloadRuntimeArgs } from './desktopRuntimes'
+export type {
+  RemoteRuntimeMeta,
+  InstalledRuntimeInfo,
+  DownloadRuntimeArgs,
+  RuntimeConversionPreview,
+  RuntimeConversionOutcome,
+  ConvertRuntimeBindingArgs,
+} from './desktopRuntimes'
+
+export {
+  inspectEnvironment,
+  compareEnvironments,
+} from './desktopEnvironment'
+export type {
+  FactValue,
+  EnvironmentFacts,
+  EnvironmentDiff,
+  EnvironmentDiffItem,
+} from './desktopEnvironment'
+
+export {
+  listOperations,
+  exportOperationReport,
+} from './desktopOperations'
+export type { OperationSummary, ReportResult } from './desktopOperations'
+
+export {
+  previewCommunityPack,
+  installCommunityPack,
+  preparePackDependencies,
+} from './desktopPack'
+export type {
+  CommunityPackDependency,
+  CommunityPackPreview,
+  CommunityPackInstallRequest,
+  CommunityPackInstallOutcome,
+} from './desktopPack'
+export {
+  previewTrial,
+  createTrial,
+} from './desktopTrial'
+export type { TrialRequest, TrialScope, TrialWorkspace, TrialPreview, TrialOutcome } from './desktopTrial'
 
 /* ------------------------------- launch ------------------------------- */
 // §M2: launch IPC moved to `desktopLaunch.ts`; re-exported verbatim.
@@ -185,6 +229,7 @@ export {
   stopInstance,
   cancelLaunch,
   onInstanceExited,
+  onWebuiPageError,
   openDshWebUi,
 } from './desktopLaunch'
 export type {
@@ -194,6 +239,7 @@ export type {
   AdoptedProcess,
   DroppedProcess,
   AdoptReport,
+  WebuiPageError,
 } from './desktopLaunch'
 
 /* ------------------------------ task centre ------------------------------ */

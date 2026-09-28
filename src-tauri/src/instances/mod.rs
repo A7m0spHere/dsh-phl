@@ -36,12 +36,15 @@ pub(crate) mod adoption;
 pub(crate) mod bundle;
 pub(crate) mod copy;
 pub(crate) mod env_policy;
+pub(crate) mod import_state;
 pub(crate) mod manifest;
 pub(crate) mod snapshot;
+pub(crate) mod trial;
 
 pub(crate) use copy::{
     copy_tree_with_progress, dir_size, repoint_managed_links, LinkMatch, LinkPolicy, SkipRule,
 };
+pub(crate) use import_state::{read_import_failures, read_import_state, ImportState};
 use manifest::{classify_manifest, write_manifest, ManifestRead};
 pub(crate) use manifest::{
     home_of, load_manifest, profile_root_of, read_manifest, AdoptedFrom, InstanceManifest,
@@ -65,6 +68,16 @@ pub struct InstanceRecord {
     pub workspace: String,
     pub plugins: Vec<InstalledPluginInfo>,
     pub snapshots: Vec<SnapshotFile>,
+    /// Community-import readiness (CR-06): `needsDependencies` /
+    /// `readyToLaunch` / `corruptImport`, read from the import marker.
+    /// `None` for instances that came from anything but a community pack —
+    /// their readiness is what verify reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+    /// Why the last dependency attempt failed, straight from the import
+    /// record — empty for a healthy instance (R4-01).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub import_failures: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -774,11 +787,15 @@ pub(crate) async fn set_instance_api(
 
 pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> InstanceRecord {
     let profile = profile_root_of(dir, &manifest);
+    let readiness = read_import_state(dir, Some(&manifest)).await;
+    let import_failures = read_import_failures(dir).await;
     InstanceRecord {
         dsh_home: home_of(dir, &manifest).to_string_lossy().into_owned(),
         workspace: dir.join("workspace").to_string_lossy().into_owned(),
         plugins: scan_plugins(&profile).await,
         snapshots: scan_snapshots(dir).await,
+        readiness: readiness.wire().map(str::to_string),
+        import_failures,
         manifest,
     }
 }

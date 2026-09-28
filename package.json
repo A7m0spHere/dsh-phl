@@ -7,6 +7,7 @@
   "description": "PHL — an independent, PCL-inspired instance & runtime manager for DeepSeek Harness",
   "scripts": {
     "app:dev": "tauri dev",
+    "app:build:dev": "tauri build --debug --no-bundle",
     "app:build": "tauri build",
     "app:build:mac": "tauri build --bundles app,dmg",
     "tauri": "tauri",
@@ -19,6 +20,8 @@
     "test:e2e:core": "node scripts/e2e-gate.mjs core",
     "test:e2e:smoke": "node scripts/e2e-gate.mjs smoke",
     "test:desktop": "node scripts/alpha-desktop.mjs",
+    "test:trial-cdp": "node e2e/trial-copy-cdp.mjs",
+    "test:dep-retry": "node e2e/dependency-retry-cdp.mjs",
     "bridge:check": "node scripts/check-tauri-bridge.mjs",
     "icon": "node scripts/make-icon.mjs",
     "icon:all": "node scripts/make-icon.mjs --all --out=src-tauri/icons/candidates/ds-tail/build",

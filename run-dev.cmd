@@ -42,11 +42,9 @@ if defined FREED (
 )
 
 rem ---- 2/4 -------------------------------------------------------
-rem Always sync dependencies. npm is a no-op when nothing changed, and
-rem checking for node_modules is not enough: package.json may have grown
-rem new dependencies since the last install.
-echo   [2/4] Installing / syncing dependencies...
-call npm install
+rem Recreate node_modules from the committed lockfile for reproducible builds.
+echo   [2/4] Installing locked dependencies...
+call npm ci
 if errorlevel 1 goto :failed
 
 rem ---- 3/4 -------------------------------------------------------

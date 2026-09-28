@@ -69,6 +69,25 @@ export interface InstanceRuntimeState {
    * until the next launch replaces the runtime state.
    */
   lastExit?: { code: number | null; at: number; ranFor: number }
+  /**
+   * The embedded WebUI page reported a failed boot while the DSH process kept
+   * running (a plugin never activated — see the `webui` shell probe). Like
+   * `lastExit` this outlives its toast until the next launch replaces the
+   * runtime state: a bare "running" pill would hide a UI the user cannot
+   * actually use. Written by `instanceLifecycleActions`.
+   */
+  lastWebuiError?: {
+    at: number
+    headline: string
+    /** One human-readable line per plugin that failed to activate. */
+    causes: string[]
+    /** What the user can do about it. */
+    hint: string
+    /** Page-error log written by the shell, revealed through the action. */
+    logPath: string
+    /** The card's original text, verbatim, for post-mortem. */
+    detail: string
+  }
 }
 
 export type InstanceKind = 'production' | 'development' | 'test' | 'sandbox'
@@ -133,6 +152,18 @@ export interface Instance {
    * data omit it; the read layer normalises absent to `managed-copy`/`created`.
    * A UI gate keys destructive affordances off `managementMode === 'external'`.
    */
+  /**
+   * Community-import readiness (CR-06, R3-03); null = no import state.
+   * `corruptImport` means the import record is missing or damaged — the
+   * backend refuses to launch and the retry card rebuilds the record.
+   */
+  readiness?: 'needsDependencies' | 'needsCredentials' | 'readyToLaunch' | 'corruptImport' | null
+  /**
+   * Why the last dependency attempt failed, read from the import record
+   * (R4-01). Empty/absent for a healthy instance; shown by the retry card so
+   * a failure stays visible after the toast is gone.
+   */
+  importFailures?: string[]
   managementMode?: ManagementMode
   source?: InstanceSourceKind
   /** Absolute external DSH_HOME, present only when `managementMode` is external. */

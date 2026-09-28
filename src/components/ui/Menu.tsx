@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { cn } from '@/lib/cn'
+import { useUIStore } from '@/stores'
 import { MENU_Z, useMotion } from '@/lib/motion'
 import { computePlacement, estimateMenuHeight } from './menuPlacement'
 import { suppressTooltipOnFocus } from './Tooltip'
@@ -51,6 +52,15 @@ export function Menu({
   width?: number
 }) {
   const [open, setOpen] = useState(false)
+  // Mirror `open` into the shared overlay depth so the go-back hotkey cedes
+  // Escape while this menu owns it (same contract as Dropdown).
+  const pushOverlay = useUIStore((s) => s.pushOverlay)
+  const popOverlay = useUIStore((s) => s.popOverlay)
+  useLayoutEffect(() => {
+    if (!open) return
+    pushOverlay()
+    return popOverlay
+  }, [open, pushOverlay, popOverlay])
   const [dropUp, setDropUp] = useState(side === 'top')
   const [pos, setPos] = useState<CSSProperties>({ visibility: 'hidden' })
   const anchorRef = useRef<HTMLDivElement>(null)

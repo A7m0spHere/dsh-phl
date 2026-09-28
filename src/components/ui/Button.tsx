@@ -1,7 +1,7 @@
 import { forwardRef, type ReactNode } from 'react'
 import { motion, type HTMLMotionProps } from 'motion/react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { D, useMotion } from '@/lib/motion'
 import { Spinner } from './Spinner'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'quiet'
@@ -16,7 +16,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
   quiet:
     'bg-accent-soft text-accent-ink hover:bg-accent-soft/70 dark:hover:bg-accent-soft/80 active:bg-accent-soft',
   danger:
-    'bg-surface text-danger ring-1 ring-inset ring-danger/25 hover:bg-danger hover:text-white hover:ring-danger active:bg-danger/90',
+    'bg-surface text-danger ring-1 ring-inset ring-danger/25 hover:bg-danger hover:text-danger-on hover:ring-danger active:bg-danger/90',
 }
 
 const SIZES: Record<ButtonSize, string> = {
@@ -60,7 +60,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type="button"
       disabled={isDisabled}
       whileTap={scale === 0 || isDisabled ? undefined : { scale: size === 'hero' ? 0.98 : 0.97 }}
-      transition={t(0.09)}
+      transition={t(D.press)}
       className={cn(
         'relative inline-flex select-none items-center justify-center overflow-hidden whitespace-nowrap font-medium',
         'transition-[background-color,color,box-shadow] duration-150 ease-out',
@@ -75,7 +75,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       {sheen && !isDisabled && (
         <span
           aria-hidden
-          className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/22 to-transparent transition-transform duration-[650ms] ease-out group-hover/sheen:translate-x-full"
+          className="sheen pointer-events-none absolute inset-0 -translate-x-full transition-transform ease-out group-hover/sheen:translate-x-full"
+          style={{ transitionDuration: 'var(--d-sheen)' }}
         />
       )}
       {loading && <Spinner size={size === 'hero' ? 16 : 13} className="shrink-0" />}

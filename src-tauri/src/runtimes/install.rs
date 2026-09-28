@@ -25,6 +25,47 @@ use crate::launch::node_binary;
 pub(crate) struct RuntimeMarker {
     pub(crate) installed_at: String,
     pub(crate) version: String,
+    /// Recorded since precise-version installs. Legacy markers predate the
+    /// field: a missing value means "cannot verify", not "mismatch".
+    #[serde(default)]
+    pub(crate) platform: Option<String>,
+    #[serde(default)]
+    pub(crate) arch: Option<String>,
+}
+
+/// The host platform/arch pair recorded in new install markers. A marker
+/// carrying a different pair means the directory was installed for another
+/// machine and must not be launched (see `verify.rs`).
+pub(crate) fn host_platform_arch() -> (&'static str, &'static str) {
+    (std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// `node --version` reported by a specific binary, `None` when it cannot run
+/// or prints anything but a plain `MAJOR.MINOR.PATCH`. Shared by the install
+/// health gate and the legacy-binding conversion preview.
+pub(crate) async fn probe_node_version(node: &Path) -> Option<String> {
+    let node = node.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(&node);
+        command.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
+        }
+        let output = command.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let version = text.strip_prefix('v')?;
+        let ok = version.split('.').count() == 3
+            && version.chars().all(|c| c.is_ascii_digit() || c == '.');
+        ok.then(|| version.to_string())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 // The install pipeline threads flag + task + channel through every stage;
@@ -40,8 +81,11 @@ pub(crate) async fn run_runtime_install(
     task: &crate::resources::Task,
     on_progress: &Channel<ProgressEvent>,
 ) -> Result<(), String> {
-    // `version_name` is `node-<major>` (the install directory, and what the
-    // frontend passes back for removal); `version` is the full semver.
+    // `version_name` is the install directory under `<root>/runtimes/` and the
+    // id instances bind to — precise installs use `node-<full semver>`, while
+    // legacy directories keep their `node-<major>` names; `version` is the
+    // full semver being fetched. The two only agree for re-installing the
+    // exact same precise object; the name is never re-derived from `version`.
     let version_name = sanitize_version(version_name)?;
     let version = sanitize_version(version)?;
     if cancelled(flag) {
@@ -132,12 +176,17 @@ pub(crate) async fn run_runtime_install(
         .await?;
     }
 
-    let marker = serde_json::json!({
-        "installedAt": now_iso(),
-        "version": version,
-        "bytes": downloaded.bytes,
-        "sha256": hex::encode(&downloaded.sha256),
-    });
+    let marker = {
+        let (platform, arch) = host_platform_arch();
+        serde_json::json!({
+            "installedAt": now_iso(),
+            "version": version,
+            "platform": platform,
+            "arch": arch,
+            "bytes": downloaded.bytes,
+            "sha256": hex::encode(&downloaded.sha256),
+        })
+    };
     tokio::fs::write(staging.join("phl-runtime.json"), marker.to_string())
         .await
         .map_err(|e| e.to_string())?;

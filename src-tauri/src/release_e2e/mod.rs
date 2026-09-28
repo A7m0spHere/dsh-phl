@@ -24,7 +24,8 @@
 //! J1 cold install → runtime → version → create → launch → stop ·
 //! J2 restart adoption · J3 snapshot → rollback → pack export/install ·
 //! J4 journaled storage migration (commit/resume/undo) · J5 updater manifest
-//! contract against the real `updates` branch ·
+//! contract against the real `updates` branch · J6 trial copy: preview →
+//! create through the real command body → inspect → retry → launch ·
 //! F1 force-kill mid-run · F2 download abort mid-stream + resume ·
 //! F3 locked destination (the CI-runnable disk-full sibling) ·
 //! F4 old child exits *after* the new one launches.
@@ -33,6 +34,7 @@ pub(crate) mod driver;
 pub(crate) mod faults;
 pub(crate) mod fixtures;
 pub(crate) mod journeys;
+pub(crate) mod trial_journey;
 
 /// The fake DSH release the gate installs. A reserved pre-release so it can
 /// never collide with a real published version.

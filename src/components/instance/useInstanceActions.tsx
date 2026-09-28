@@ -4,6 +4,8 @@ import {
   ArrowUpRight,
   Copy,
   FolderOpen,
+  FlaskConical,
+  GitCompare,
   Package,
   Pencil,
   Play,
@@ -26,6 +28,8 @@ import {
 } from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useInstanceStore, useUIStore } from '@/stores'
+import { useEnvCompareStore } from '@/features/environment/compareStore'
+import { useTrialWizardStore } from '@/features/trial/trialStore'
 import type { Instance } from '@/types'
 
 /**
@@ -257,6 +261,19 @@ export function useInstanceActions(instance: Instance | undefined) {
         icon: <Copy size={13} />,
         disabled: external,
         onSelect: clone,
+      },
+      {
+        id: 'trial',
+        label: '复制并试用新版',
+        icon: <FlaskConical size={13} />,
+        disabled: external,
+        onSelect: () => useTrialWizardStore.getState().open(id),
+      },
+      {
+        id: 'compare-env',
+        label: '比较环境',
+        icon: <GitCompare size={13} />,
+        onSelect: () => useEnvCompareStore.getState().open(id),
       },
       { id: 'export', label: '导出 Bundle', icon: <Package size={13} />, onSelect: exportBundle },
       {

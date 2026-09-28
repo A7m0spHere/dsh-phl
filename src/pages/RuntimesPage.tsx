@@ -1,14 +1,16 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Cpu, Download, Server, Trash2, X } from 'lucide-react'
+import { ChevronDown, Cpu, Download, Server, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { formatBytes, formatSpeed } from '@/lib/format'
 import { useMotion } from '@/lib/motion'
 import { useCatalogStore, useInstanceStore, useUIStore } from '@/stores'
-import { Badge, Button, Notice, ProgressBar, SectionCard, Skeleton, Tooltip } from '@/components/ui'
+import { Badge, Button, Notice, ProgressBar, SectionCard, Skeleton, Spinner, Tooltip } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelShell, PanelStat } from '@/components/layout/Panel'
-import { isRuntimeBusy } from '@/types/runtime'
+import { isRuntimeBusy, isRuntimeBusyKind, type Runtime } from '@/types/runtime'
+import { Cancelled, repository } from '@/services'
+import { parseThrownError } from '@/lib/errorCodes'
 
 export function RuntimesPanel() {
   const runtimes = useCatalogStore((s) => s.runtimes)
@@ -58,6 +60,89 @@ export function RuntimesPage() {
     for (const i of instances) map.set(i.runtimeId, [...(map.get(i.runtimeId) ?? []), i.name])
     return map
   }, [instances])
+
+  /* ---- patch expander: install an older build of the same major (M1) ---- */
+  const [extras, setExtras] = useState<Record<number, Runtime[]>>({})
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({})
+  const [loadingMajor, setLoadingMajor] = useState<number | null>(null)
+  /** Per-extra-row install states, keyed by the precise runtime id. */
+  const [extraStates, setExtraStates] = useState<Record<string, Runtime['state']>>({})
+  const load = useCatalogStore((s) => s.load)
+
+  const toggleMajor = async (major: number) => {
+    if (expanded[major]) {
+      setExpanded((cur) => ({ ...cur, [major]: false }))
+      return
+    }
+    if (!extras[major]) {
+      setLoadingMajor(major)
+      try {
+        const rows = await repository.listRuntimeVersions(major)
+        setExtras((cur) => ({ ...cur, [major]: rows }))
+      } catch (err) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: '补丁版本加载失败',
+          message: parseThrownError(err).message || '无法连接 Node 发布源。',
+        })
+      } finally {
+        setLoadingMajor(null)
+      }
+    }
+    setExpanded((cur) => ({ ...cur, [major]: true }))
+  }
+
+  const installExtra = async (runtime: Runtime) => {
+    if (isRuntimeBusyKind(extraStates[runtime.id]?.kind)) return
+    const controller = new AbortController()
+    setExtraStates((cur) => ({ ...cur, [runtime.id]: { kind: 'queued' } }))
+    try {
+      await repository.installRuntime(runtime, (progress) => {
+        setExtraStates((cur) => ({
+          ...cur,
+          [runtime.id]:
+            progress.stage === 'downloading'
+              ? {
+                  kind: 'downloading',
+                  progress: progress.progress ?? 0,
+                  bytesDone: progress.bytesDone ?? 0,
+                  bytesPerSec: progress.bytesPerSec ?? 0,
+                }
+              : progress.stage === 'verifying'
+                ? { kind: 'verifying' }
+                : { kind: 'extracting', progress: progress.progress ?? 0 },
+        }))
+      }, controller.signal)
+      setExtraStates((cur) => ({
+        ...cur,
+        [runtime.id]: { kind: 'installed', installedAt: new Date().toISOString() },
+      }))
+      useUIStore.getState().toast({ kind: 'success', title: `${runtime.name} ${runtime.version} 安装完成` })
+      // 精确对象落盘后刷新列表，让已安装行与占用统计同步。
+      void load()
+    } catch (err) {
+      setExtraStates((cur) => ({
+        ...cur,
+        [runtime.id]:
+          err instanceof Cancelled
+            ? { kind: 'available' }
+            : { kind: 'failed', reason: '下载失败' },
+      }))
+      if (!(err instanceof Cancelled)) {
+        useUIStore.getState().toast({
+          kind: 'error',
+          title: `${runtime.name} ${runtime.version} 安装失败`,
+        })
+      }
+    }
+  }
+
+  const extraStateOf = (runtime: Runtime): Runtime['state'] =>
+    extraStates[runtime.id] ??
+    // 已安装的补丁版本刷新后会成为正式行；展开列表里的旧数据保持安静。
+    (useCatalogStore.getState().runtimes.find((r) => r.id === runtime.id)?.state ?? {
+      kind: 'available',
+    })
 
   const onRemove = async (id: string, name: string) => {
     const users = usedBy.get(id) ?? []
@@ -115,6 +200,13 @@ export function RuntimesPage() {
                         {r.codename && <Badge tone="neutral">{r.codename}</Badge>}
                         {r.lts && <Badge tone="ok">LTS</Badge>}
                         {r.system && <Badge tone="outline">系统 PATH</Badge>}
+                        {r.legacy && (
+                          <Tooltip content="旧式安装目录（仅主版本）。新安装均为精确版本；绑定它的实例可转为精确绑定。">
+                            <span>
+                              <Badge tone="warn">旧式绑定</Badge>
+                            </span>
+                          </Tooltip>
+                        )}
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-sm text-ink-faint">
                         {/* 真实目录没有安装前体积，未知时不显示「0 B」。 */}
@@ -142,6 +234,26 @@ export function RuntimesPage() {
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">
+                      {!r.system && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => void toggleMajor(r.major)}
+                          disabled={loadingMajor === r.major}
+                          className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100 data-[state=open]:opacity-100"
+                          data-state={expanded[r.major] ? 'open' : 'closed'}
+                        >
+                          {loadingMajor === r.major ? (
+                            <Spinner size={12} weight={2.6} />
+                          ) : (
+                            <ChevronDown
+                              size={12}
+                              className={cn('transition-transform', expanded[r.major] && 'rotate-180')}
+                            />
+                          )}
+                          补丁版本
+                        </Button>
+                      )}
                       {busy ? (
                         <Button size="sm" variant="secondary" onClick={() => cancel(r.id)}>
                           <X size={12} />
@@ -205,6 +317,59 @@ export function RuntimesPage() {
                             </span>
                           </div>
                         </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <AnimatePresence initial={false}>
+                    {expanded[r.major] && extras[r.major] && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={t(0.24)}
+                        className="overflow-hidden"
+                      >
+                        <ul className="mt-2 space-y-1 border-t border-line pt-2">
+                          {extras[r.major].map((extra) => {
+                            const st = extraStateOf(extra)
+                            const stInstalled = st.kind === 'installed'
+                            const stBusy = isRuntimeBusyKind(st.kind)
+                            return (
+                              <li
+                                key={extra.id}
+                                className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-surface-sunken/60"
+                              >
+                                <span className="font-mono text-sm text-ink-muted">
+                                  v{extra.version}
+                                </span>
+                                {extra.lts && <Badge tone="ok">LTS</Badge>}
+                                <span className="flex-1 text-sm text-ink-faint">
+                                  {stInstalled
+                                    ? '已安装'
+                                    : stBusy
+                                      ? st.kind === 'downloading'
+                                        ? `下载中 ${Math.round((st.progress ?? 0) * 100)}%`
+                                        : st.kind === 'verifying'
+                                          ? '校验中…'
+                                          : '解压中…'
+                                      : '与已安装版本并存，互不覆盖'}
+                                </span>
+                                {!stInstalled && (
+                                  <Button
+                                    size="sm"
+                                    variant={stBusy ? 'secondary' : 'ghost'}
+                                    disabled={stBusy}
+                                    onClick={() => void installExtra(extra)}
+                                  >
+                                    {stBusy ? <Spinner size={12} weight={2.6} /> : <Download size={12} />}
+                                    {stBusy ? '' : '安装'}
+                                  </Button>
+                                )}
+                              </li>
+                            )
+                          })}
+                        </ul>
                       </motion.div>
                     )}
                   </AnimatePresence>

@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   choosePackOpenPath: vi.fn(),
   previewPack: vi.fn(),
+  previewCommunityPack: vi.fn(),
   installPack: vi.fn(),
   admit: vi.fn(),
   load: vi.fn(),
@@ -13,6 +14,7 @@ vi.mock('@/lib/desktop', () => ({
   isDesktop: true,
   choosePackOpenPath: mocks.choosePackOpenPath,
   previewPack: mocks.previewPack,
+  previewCommunityPack: mocks.previewCommunityPack,
   installPack: mocks.installPack,
 }))
 vi.mock('@/lib/desktopCore', () => ({ isDesktop: true }))
@@ -62,6 +64,9 @@ it('pick then preview lands on the confirm step with the pack name as default', 
 it('a validation failure keeps the user on the preview step with an error', async () => {
   mocks.choosePackOpenPath.mockResolvedValue('/tmp/bad.phlpack')
   mocks.previewPack.mockRejectedValue(new Error('压缩包包含越界路径'))
+  // Neither family parses the file: the fallback also fails, and the
+  // .phlpack error is the one surfaced.
+  mocks.previewCommunityPack.mockRejectedValue(new Error('不是有效的 ZIP 容器'))
   await usePackStore.getState().pickPack()
   const s = usePackStore.getState()
   expect(s.previewState).toBe('error')

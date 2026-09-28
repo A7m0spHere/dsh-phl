@@ -75,12 +75,19 @@ export function SettingRow({
   )
 }
 
-/* ---------------- text ---------------- */
-
+/* ----------------- text ----------------- *
+ * Focus styling is one language app-wide (index.css `:focus-visible`): a 2px
+ * accent outline at the global thickness. Filled text fields used to carry
+ * their own 1.5px inset ring and inline editors a 1px one, so "I have focus"
+ * came in three strengths. Plain fields now defer to the global outline; the
+ * prefixed/suffixed variant is the one deliberate exception — its real input
+ * is borderless inside a wrapper, so the ring belongs on the wrapper (same
+ * accent, same 2px).
+ */
 // Placeholders keep the full-strength token: any alpha over the surface drops
 // them well below the 4.5:1 the token itself is tuned for.
 const inputBase =
-  'w-full rounded-sm bg-surface px-2 text-base text-ink ring-1 ring-inset ring-line-strong/60 placeholder:text-ink-faint transition-[box-shadow,background-color] duration-150 ease-out hover:ring-line-strong focus:outline-none focus:ring-[1.5px] focus:ring-accent disabled:opacity-50'
+  'w-full rounded-sm bg-surface px-2 text-base text-ink ring-1 ring-inset ring-line-strong/60 placeholder:text-ink-faint transition-[box-shadow,background-color] duration-150 ease-out hover:ring-line-strong disabled:opacity-50'
 
 export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   invalid?: boolean
@@ -96,7 +103,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     return (
       <div
         className={cn(
-          'flex h-7 items-center gap-1.5 rounded-sm bg-surface px-2 ring-1 ring-inset ring-line-strong/60 transition-shadow duration-150 focus-within:ring-[1.5px] focus-within:ring-accent hover:ring-line-strong',
+          'flex h-7 items-center gap-1.5 rounded-sm bg-surface px-2 ring-1 ring-inset ring-line-strong/60 transition-shadow duration-150 focus-within:ring-2 focus-within:ring-accent hover:ring-line-strong',
           invalid && 'ring-danger focus-within:ring-danger',
           rest.disabled && 'pointer-events-none opacity-50',
           className,
@@ -115,7 +122,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   return (
     <input
       ref={ref}
-      className={cn(inputBase, 'h-7', invalid && 'ring-danger focus:ring-danger', className)}
+      className={cn(inputBase, 'h-7', invalid && 'ring-danger', className)}
       {...rest}
     />
   )
@@ -185,7 +192,7 @@ export function Switch({
         initial={false}
         animate={{ x: checked ? 14 : 0 }}
         transition={spring}
-        className="h-4 w-4 rounded-full bg-white shadow-sm"
+        className="h-4 w-4 rounded-full bg-knob shadow-sm"
       />
     </button>
   )

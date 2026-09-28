@@ -1,8 +1,8 @@
-import { forwardRef, type HTMLAttributes, type ReactNode, useState } from 'react'
+import { forwardRef, useId, type HTMLAttributes, type ReactNode, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { useMotion } from '@/lib/motion'
+import { D, useMotion } from '@/lib/motion'
 
 export interface CardProps extends HTMLAttributes<HTMLDivElement> {
   /** Lifts and brightens on hover; use for anything clickable. */
@@ -60,6 +60,11 @@ interface SectionCardProps {
 /**
  * The workhorse panel: a titled block with an optional collapse. Collapsing
  * animates real height so the surrounding layout settles rather than jumps.
+ *
+ * When collapsible, the toggle is the chevron+title cluster — a real
+ * `<button>` — and the trailing `extra` actions are siblings, not children.
+ * The earlier shape made the whole header `role="button"` with `extra` nested
+ * inside, which reads as a button containing buttons; the two are peers now.
  */
 export function SectionCard({
   title,
@@ -74,42 +79,48 @@ export function SectionCard({
 }: SectionCardProps) {
   const [open, setOpen] = useState(defaultOpen)
   const { t, scale } = useMotion()
+  const bodyId = useId()
+
+  const chevron = collapsible ? (
+    <motion.span
+      animate={{ rotate: open ? 0 : -90 }}
+      transition={t(D.base)}
+      className="-ml-1 shrink-0 text-ink-faint"
+    >
+      <ChevronDown size={14} />
+    </motion.span>
+  ) : null
 
   const header = (
     <div
       className={cn(
         'flex min-h-[32px] items-center gap-2 px-3 py-1.5',
-        collapsible && 'cursor-pointer select-none hover:bg-surface-hover/60',
+        collapsible && 'select-none',
       )}
-      onClick={collapsible ? () => setOpen((v) => !v) : undefined}
-      role={collapsible ? 'button' : undefined}
-      tabIndex={collapsible ? 0 : undefined}
-      onKeyDown={
-        collapsible
-          ? (e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                setOpen((v) => !v)
-              }
-            }
-          : undefined
-      }
     >
-      {collapsible && (
-        <motion.span
-          animate={{ rotate: open ? 0 : -90 }}
-          transition={t(0.2)}
-          className="-ml-1 text-ink-faint"
+      {collapsible ? (
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((v) => !v)}
+          className="group flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left transition-colors"
         >
-          <ChevronDown size={14} />
-        </motion.span>
+          {chevron}
+          {icon && <span className="shrink-0 text-ink-faint">{icon}</span>}
+          <h3 className="min-w-0 truncate text-md font-medium text-ink">{title}</h3>
+          {description && <span className="truncate text-sm text-ink-faint">{description}</span>}
+        </button>
+      ) : (
+        <>
+          {icon && <span className="shrink-0 text-ink-faint">{icon}</span>}
+          <h3 className="min-w-0 truncate text-md font-medium text-ink">{title}</h3>
+          {description && <span className="truncate text-sm text-ink-faint">{description}</span>}
+        </>
       )}
-      {icon && <span className="text-ink-faint">{icon}</span>}
-      <h3 className="text-base font-medium text-ink">{title}</h3>
-      {description && <span className="truncate text-sm text-ink-faint">{description}</span>}
-      <div className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-        {extra}
-      </div>
+      {/* Siblings, not children: `extra` holds the section's real actions, and
+          a button inside a button is what the old whole-header target made. */}
+      {extra && <div className="ml-auto flex shrink-0 items-center gap-1">{extra}</div>}
     </div>
   )
 
@@ -120,6 +131,7 @@ export function SectionCard({
         {open && (
           <motion.div
             key="body"
+            id={bodyId}
             initial={scale === 0 ? false : { height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
@@ -150,7 +162,10 @@ export function DataRow({
 }) {
   return (
     <div className="group/row flex min-h-[22px] items-baseline gap-3 py-[2px]">
-      <span className="w-[88px] shrink-0 text-sm text-ink-faint">{label}</span>
+      {/* The label column grows with its content up to a cap: a fixed 88px
+          wrapped or truncated longer Chinese labels ("默认 API 供应商") while
+          short ones wasted the space. */}
+      <span className="min-w-[88px] max-w-[148px] shrink-0 text-sm text-ink-faint">{label}</span>
       <span
         className={cn(
           'min-w-0 flex-1 break-all text-base text-ink',

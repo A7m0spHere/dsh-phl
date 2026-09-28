@@ -37,18 +37,3 @@ export function Spinner({ size = 14, className, weight = 2 }: SpinnerProps) {
     </svg>
   )
 }
-
-/** Three-dot pulse for inline "working" hints inside dense rows. */
-export function DotPulse({ className }: { className?: string }) {
-  return (
-    <span className={cn('inline-flex items-center gap-[3px]', className)} aria-hidden>
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="h-[3px] w-[3px] animate-pulse rounded-full bg-current"
-          style={{ animationDelay: `${i * 0.18}s`, animationDuration: '1.3s' }}
-        />
-      ))}
-    </span>
-  )
-}

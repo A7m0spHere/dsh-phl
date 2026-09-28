@@ -7,7 +7,7 @@ import { cn } from '@/lib/cn'
 import { formatBytes, formatDate, slugify } from '@/lib/format'
 import { freeSpace } from '@/lib/desktop'
 import { HUES, hueTone } from '@/lib/hue'
-import { useMotion } from '@/lib/motion'
+import { LOCAL_OVERLAY_Z, useMotion } from '@/lib/motion'
 import { useCatalogStore, useInstanceStore, useIsDark, useSettingsStore, useUIStore, useViewStore, useWizardStore } from '@/stores'
 import { isVersionBusy, isVersionInstallable, isRuntimeBusy, type ApiInheritance, type DshVersion, type InstanceKind, type Runtime } from '@/types'
 import { Badge, Button, EmptyState, Field, Input, ProgressBar, SectionCard, Segmented, Spinner, Switch, TextArea, Tooltip } from '@/components/ui'
@@ -557,7 +557,7 @@ export function MoreSettings({ portIssue, attempted }: { portIssue?: string; att
           >
             <ChevronDown size={14} />
           </motion.span>
-          <h3 className="text-base font-medium text-ink">更多设置</h3>
+          <h3 className="text-md font-medium text-ink">更多设置</h3>
           <span className="truncate text-sm text-ink-faint">模板 · 端口 · 备注</span>
         </button>
 
@@ -796,7 +796,7 @@ export function CreatingOverlay() {
       {progress && (
         <motion.div
           key="creating"
-          className="absolute inset-0 z-40 flex items-center justify-center"
+          className={cn('absolute inset-0 flex items-center justify-center', LOCAL_OVERLAY_Z)}
         >
           <motion.div
             variants={overlay}

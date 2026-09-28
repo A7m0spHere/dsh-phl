@@ -105,6 +105,12 @@ function fromRecord(record: desktop.RemoteInstanceRecord): Instance {
     // trees stayed on disk — unrestorable and undeletable.
     snapshots: record.snapshots,
     api: record.api ?? null,
+    readiness: (
+      ['needsDependencies', 'needsCredentials', 'readyToLaunch', 'corruptImport'] as const
+    ).includes(record.readiness as never)
+      ? (record.readiness as Instance['readiness'])
+      : null,
+    importFailures: record.importFailures ?? [],
     managementMode: record.managementMode ?? 'managed-copy',
     source: record.source ?? 'created',
     externalHome: record.externalHome ?? null,

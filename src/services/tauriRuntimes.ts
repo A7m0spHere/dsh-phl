@@ -1,4 +1,5 @@
 import * as desktop from '@/lib/desktop'
+import type { RuntimeConversionOutcome, RuntimeConversionPreview } from '@/lib/desktop'
 import { NODE_DIST_MIRROR, NODE_DIST_OFFICIAL } from '@/lib/desktop'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { Runtime } from '@/types'
@@ -52,6 +53,9 @@ async function listRuntimes(): Promise<Runtime[]> {
       version: at ? at.version : meta.version,
       codename: meta.codename ?? undefined,
       lts: meta.lts,
+      legacy: at?.legacy,
+      platform: at?.platform,
+      arch: at?.arch,
       size: at ? (usage[meta.id] ?? 0) : 0,
       state: at ? { kind: 'installed', installedAt: at.installedAt } : { kind: 'available' },
     })
@@ -59,16 +63,23 @@ async function listRuntimes(): Promise<Runtime[]> {
   }
 
   // 已安装但目录里查不到的（目录是官方离线包手放的、或目录请求失败）——
-  // 与版本列表同一待遇：照常展示，不能因为目录挂了就消失。
+  // 与版本列表同一待遇：照常展示，不能因为目录挂了就消失。精确 id
+  // （node-22.11.0）取主版本展示；旧式 node-<major> 目录保留 legacy 标记，
+  // 绑定它的实例可以转为精确绑定。
   for (const [name, info] of pending) {
-    const major = Number(name.replace(/^node-/, ''))
+    const raw = name.replace(/^node-/, '')
+    const major = Number(raw.split('.')[0])
     if (!Number.isFinite(major)) continue
+    const legacy = /^\d+$/.test(raw)
     out.push({
       id: name,
       name: `Node ${major}`,
       major,
       version: info.version,
       lts: false,
+      legacy,
+      platform: info.platform,
+      arch: info.arch,
       size: usage[name] ?? 0,
       state: { kind: 'installed', installedAt: info.installedAt },
     })
@@ -124,14 +135,80 @@ async function installRuntime(
   }
 }
 
+async function listRuntimeVersions(major: number): Promise<Runtime[]> {
+  const metas = await desktop.listNodeRuntimeVersions(distBase(), major)
+  return metas.map((meta) => ({
+    id: meta.id,
+    name: `Node ${meta.major}`,
+    major: meta.major,
+    version: meta.version,
+    codename: meta.codename ?? undefined,
+    lts: meta.lts,
+    size: 0,
+    state: { kind: 'available' } as Runtime['state'],
+  }))
+}
+
+async function previewRuntimeConversion(
+  instanceId: string,
+): Promise<RuntimeConversionPreview | null> {
+  return desktop.previewRuntimeConversion(instanceId)
+}
+
+async function convertRuntimeBinding(
+  instanceId: string,
+  onProgress: (p: TransferProgress) => void,
+  signal: AbortSignal,
+): Promise<RuntimeConversionOutcome> {
+  const transferId = newTransferId(`rc:${instanceId}`)
+  if (signal.aborted) throw new Cancelled()
+  const onAbort = () => void desktop.cancelTransfer(transferId)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await desktop.convertRuntimeBinding({
+      transferId,
+      instanceId,
+      distBase: distBase(),
+      keepArchive: useSettingsStore.getState().keepArchives,
+      onProgress: (event) =>
+        onProgress({
+          // Rust task phases `checking`/`committing` have no TransferProgress
+          // stage; fold them into the neighbouring wire stages.
+          stage:
+            event.stage === 'checking'
+              ? 'verifying'
+              : event.stage === 'committing'
+                ? 'committing'
+                : event.stage,
+          progress: event.progress,
+          bytesDone: event.bytesDone,
+          bytesPerSec: event.bytesPerSec,
+        }),
+    })
+  } catch (err) {
+    if (signal.aborted) throw new Cancelled()
+    throw err instanceof Error ? err : new Error(String(err))
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
 /** The runtime module's overrides, spread into the desktop repository. */
 export const tauriRuntimeOverrides: Pick<
   PhlRepository,
-  'listRuntimes' | 'installRuntime' | 'removeRuntime'
+  | 'listRuntimes'
+  | 'installRuntime'
+  | 'removeRuntime'
+  | 'listRuntimeVersions'
+  | 'previewRuntimeConversion'
+  | 'convertRuntimeBinding'
 > = {
   listRuntimes,
   installRuntime,
   removeRuntime: async (id) => {
     await desktop.removeRuntimeDir(id)
   },
+  listRuntimeVersions,
+  previewRuntimeConversion,
+  convertRuntimeBinding,
 }
