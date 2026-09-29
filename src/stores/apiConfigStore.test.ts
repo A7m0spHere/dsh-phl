@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import type { ApiConfig } from '@/types'
 
 const mocks = vi.hoisted(() => ({
-  root: 'old-root', loadApiConfig: vi.fn(), saveApiConfig: vi.fn(), importInstanceApi: vi.fn(), toast: vi.fn(), enrichModelMetadata: vi.fn(),
+  root: 'old-root', loadApiConfig: vi.fn(), saveApiConfig: vi.fn(), deleteProviderCredential: vi.fn(), importInstanceApi: vi.fn(), toast: vi.fn(), enrichModelMetadata: vi.fn(),
 }))
 vi.mock('@/lib/desktop', () => ({ isDesktop: true, ...mocks }))
 vi.mock('@/services', () => ({ repository: { enrichModelMetadata: mocks.enrichModelMetadata } }))
@@ -39,6 +39,25 @@ it('reports an import as failed if persisting it fails', async () => {
   mocks.importInstanceApi.mockResolvedValue(config)
   mocks.saveApiConfig.mockRejectedValue(new Error('disk full'))
   expect(await useApiConfigStore.getState().importFromInstance('test')).toBeNull()
+})
+
+it('clearCredential deletes in the store then reloads the stored-key flags in place', async () => {
+  // The save flow never clears the store on an emptied form field, so this
+  // action is the one path that removes a secret — it must delete first and
+  // only then refresh, and a root switch mid-reload must not apply stale data.
+  mocks.deleteProviderCredential.mockResolvedValue(undefined)
+  const cleared: ApiConfig = {
+    ...config,
+    providers: [{ id: 'p1', name: 'p1', kind: 'custom', apiKeyEnv: 'P1_KEY', models: [], enabled: true }],
+  }
+  mocks.loadApiConfig.mockResolvedValue(cleared)
+  await useApiConfigStore.getState().clearCredential('p1')
+  expect(mocks.deleteProviderCredential).toHaveBeenCalledWith('p1')
+  expect(useApiConfigStore.getState().config?.providers[0]).toEqual(cleared.providers[0])
+
+  mocks.deleteProviderCredential.mockRejectedValue(new Error('store refused'))
+  await expect(useApiConfigStore.getState().clearCredential('p1')).rejects.toThrow('store refused')
+  expect(mocks.loadApiConfig).toHaveBeenCalledTimes(1)
 })
 
 it('queues a second API write behind the one in flight instead of dropping it', async () => {

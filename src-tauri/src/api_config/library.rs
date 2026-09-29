@@ -56,7 +56,33 @@ pub async fn load_api_config(
         Ok(_) => {}
         Err(e) => eprintln!("[phl] 凭据迁移失败，api.json 中的明文密钥暂保留: {e}"),
     }
+    // The store, not the file, is the source of truth for "a key exists";
+    // surface that to the settings page without ever shipping the secret.
+    // A read refusal reads as "no key" here on purpose: the flag only drives
+    // display and the clear affordance, never injection.
+    for p in &mut config.providers {
+        p.has_stored_credential = creds.get(&p.id).map(|k| k.is_some()).unwrap_or(false);
+    }
     Ok(Some(config))
+}
+
+/// Removes a provider's stored key from the OS credential store.
+///
+/// The save path only rewrites keys that were resubmitted, so clearing the
+/// key field in the form used to leave the old secret alive in the store —
+/// still injected at launch, still reported as present. This is the explicit
+/// way out (2026-09-29 review): the settings page calls it behind a
+/// confirmation and reloads the library. Idempotent, like every delete on
+/// the store.
+#[tauri::command]
+pub async fn delete_provider_credential(creds: State<'_, Creds>, id: String) -> Result<(), String> {
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("供应商 id 为空".into());
+    }
+    // Sync FFI, like the load path's migration — a single CredDelete, not a
+    // worker worth a blocking thread.
+    creds.delete(&id)
 }
 
 /// Moves every provider's locally stored key into the credential store and
@@ -243,6 +269,12 @@ pub(crate) async fn save_api_config_at(
             }
         }
     }
+    // The returned config replaces the frontend's state, so its store flags
+    // must reflect the store this save just wrote to — otherwise one save
+    // would report every key as gone until the next full reload.
+    for p in &mut config.providers {
+        p.has_stored_credential = creds.get(&p.id).map(|k| k.is_some()).unwrap_or(false);
+    }
     Ok(config)
 }
 
@@ -301,6 +333,7 @@ mod tests {
             base_url: None,
             api_key_env: format!("{id}_KEY"),
             api_key: None,
+            has_stored_credential: false,
             models: vec![],
             enabled: true,
         }
@@ -423,6 +456,35 @@ mod tests {
         assert!(err.contains("凭据管理器"), "{err}");
         assert!(err.contains("deepseek（p1）"), "names, not bare ids: {err}");
         assert!(err.contains("未能读出"), "states the read failure: {err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_save_response_reports_the_store_not_the_form() {
+        // The save response replaces the frontend's state: its
+        // hasStoredCredential flags must reflect the store this save just
+        // wrote to, not the stale `false` the form submitted (the frontend
+        // never sees the key, so it can never send `true`).
+        let path = temp_path("store-flags");
+        let store = FakeStore::default();
+        let mut next = config_with(&["withkey", "withoutkey"]);
+        next.providers[0].api_key = Some("sk-live".into());
+
+        let saved = save_api_config_at(&path, &store, next).await.unwrap();
+        assert!(
+            saved.providers[0].has_stored_credential,
+            "the key just written to the store must be reported"
+        );
+        assert!(
+            !saved.providers[1].has_stored_credential,
+            "a provider without a key reports none"
+        );
+
+        // Clearing (the delete_provider_credential body is creds.delete) is
+        // visible on the next save's response too.
+        store.delete("withkey").unwrap();
+        let saved = save_api_config_at(&path, &store, saved).await.unwrap();
+        assert!(!saved.providers[0].has_stored_credential);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

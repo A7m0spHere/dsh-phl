@@ -217,7 +217,7 @@ pub(crate) fn parse_node_version(stdout: &str) -> Option<String> {
 /// which are async with no timeout above them, so a wedged binary (a wrapper
 /// waiting on stdin) would park a runtime worker and hang the command. The
 /// child is killed and reported unusable instead.
-fn node_version_at(candidate: &Path, timeout: Duration) -> Option<String> {
+pub(crate) fn node_version_at(candidate: &Path, timeout: Duration) -> Option<String> {
     let mut command = std::process::Command::new(candidate);
     command
         .arg("--version")
@@ -388,10 +388,9 @@ pub(crate) fn nvm_bin_dirs(nvm_home: &Path) -> Vec<PathBuf> {
 /// `None` for a name semver cannot read, which sorts it last in both
 /// version-manager listings rather than letting it silently win the scan.
 ///
-/// Gated like its only callers: a helper used solely by Unix-only (and
-/// test-only) code is itself dead code on a Windows build, and `-D warnings`
-/// says so.
-#[cfg(any(not(windows), test))]
+/// Gated like its callers: Unix discovery walks and test fixtures on every
+/// host — plus `versions::dependencies`' runtime pick, which runs on all
+/// platforms (a `node-<semver>` sort is platform-neutral).
 pub(crate) fn version_of_dir_name(name: &str) -> Option<semver::Version> {
     semver::Version::parse(name.trim_start_matches('v')).ok()
 }

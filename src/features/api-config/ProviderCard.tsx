@@ -21,12 +21,16 @@ export function ProviderCard({
   usedBy,
   onDelete,
   onEdit,
+  onClearCredential,
 }: {
   provider: ApiProvider
   isDefault: boolean
   usedBy: number
   onDelete: () => void
   onEdit: (patch: Partial<ApiProvider>) => void
+  /** Present only when a key may exist in the OS store: the card shows the
+   * 清除密钥 affordance and the page owns confirm + reload. */
+  onClearCredential?: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [modelsEnriching, setModelsEnriching] = useState(false)
@@ -87,14 +91,14 @@ export function ProviderCard({
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-faint">
               <Tooltip
                 content={
-                  provider.apiKey
-                    ? `密钥已存于 PHL 本地配置，启动实例时注入为环境变量 ${provider.apiKeyEnv}；系统/实例环境已有同名值时以其为准`
+                  provider.hasStoredCredential
+                    ? `密钥已存入系统凭据管理器，启动实例时注入为环境变量 ${provider.apiKeyEnv}；系统/实例环境已有同名值时以其为准`
                     : `DSH 从环境变量 ${provider.apiKeyEnv} 读取密钥（或由 DSH 凭据提供）；可在编辑中直接填入密钥`
                 }
               >
                 <span className="font-mono">{provider.apiKeyEnv}</span>
               </Tooltip>
-              {provider.apiKey && <Badge tone="ok">本机密钥</Badge>}
+              {provider.hasStoredCredential && <Badge tone="ok">本机密钥</Badge>}
               <span className="text-ink-faint/50">·</span>
               <span>{provider.baseURL || '默认端点'}</span>
               <span className="text-ink-faint/50">·</span>
@@ -110,6 +114,19 @@ export function ProviderCard({
           <div className="flex shrink-0 items-center gap-1.5">
             {!editing ? (
               <>
+                {provider.hasStoredCredential && onClearCredential && (
+                  <Tooltip content="从系统凭据管理器删除已存的密钥">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="opacity-0 transition-opacity group-hover/row:opacity-100 focus:opacity-100"
+                      onClick={onClearCredential}
+                    >
+                      <KeyRound size={12} className="opacity-50" />
+                      清除密钥
+                    </Button>
+                  </Tooltip>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"

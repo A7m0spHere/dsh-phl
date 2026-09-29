@@ -43,25 +43,20 @@ pub(crate) fn host_platform_arch() -> (&'static str, &'static str) {
 /// `node --version` reported by a specific binary, `None` when it cannot run
 /// or prints anything but a plain `MAJOR.MINOR.PATCH`. Shared by the install
 /// health gate and the legacy-binding conversion preview.
+///
+/// Bounded by the shared probe budget: an unbounded `output()` here used to
+/// let a wedged binary (a wrapper waiting on stdin) hang the runtime-install
+/// command forever — `discovery::inspect` fixed exactly this for its own
+/// probes and documents why (2026-09-29 review closed the loop).
 pub(crate) async fn probe_node_version(node: &Path) -> Option<String> {
     let node = node.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new(&node);
-        command.arg("--version");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
-        }
-        let output = command.output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let version = text.strip_prefix('v')?;
-        let ok = version.split('.').count() == 3
-            && version.chars().all(|c| c.is_ascii_digit() || c == '.');
-        ok.then(|| version.to_string())
+        // The creation flag lives inside `node_version_at`; Windows stays
+        // windowless here exactly as before.
+        crate::discovery::inspect::node_version_at(
+            &node,
+            crate::discovery::inspect::NODE_PROBE_TIMEOUT,
+        )
     })
     .await
     .ok()
@@ -240,29 +235,25 @@ pub(crate) async fn check_runtime_health(staging: &Path, version: &str) -> Resul
     if !node.exists() {
         return Err("node 可执行文件缺失".into());
     }
-    let reported = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new(&node);
-        command.arg("--version");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
-        }
-        command
-            .output()
-            .map_err(|e| format!("无法运行 node --version: {e}"))
-    })
-    .await
-    .map_err(|e| format!("校验线程异常退出: {e}"))??;
-    if !reported.status.success() {
-        return Err(format!(
-            "node --version 退出码 {}",
-            reported.status.code().unwrap_or(-1)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&reported.stdout).trim().to_string();
-    if stdout != format!("v{version}") {
-        return Err(format!("node --version 返回 {stdout}，期望 v{version}"));
+    // The same bounded probe the discovery scan uses: a binary that never
+    // answers is killed and reported unusable here, not allowed to hang the
+    // health gate (and with it the runtime install command) forever.
+    let reported = {
+        let node = node.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::discovery::inspect::node_version_at(
+                &node,
+                crate::discovery::inspect::NODE_PROBE_TIMEOUT,
+            )
+        })
+        .await
+        .map_err(|e| format!("校验线程异常退出: {e}"))?
+    };
+    let Some(stdout) = reported else {
+        return Err("node --version 无响应或输出不可解析（已按探测预算终止）".into());
+    };
+    if stdout != version {
+        return Err(format!("node --version 返回 v{stdout}，期望 v{version}"));
     }
     Ok(())
 }

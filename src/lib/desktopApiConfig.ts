@@ -27,6 +27,17 @@ export async function saveApiConfig(config: ApiConfig): Promise<ApiConfig> {
   return invoke('save_api_config', { config })
 }
 
+/**
+ * Remove a provider's key from the OS credential store. The save flow only
+ * rewrites keys that were resubmitted, so an emptied form field never
+ * reached the store on its own — this is the explicit way out. Idempotent.
+ * Callers re-run `loadApiConfig` afterwards to refresh the stored flags.
+ */
+export async function deleteProviderCredential(providerId: string): Promise<void> {
+  if (!isDesktop) throw new Error('清除密钥仅在桌面端可用')
+  return invoke('delete_provider_credential', { id: providerId })
+}
+
 /** Materialize a binding into the instance's dsh-home/settings.yaml. */
 export async function syncInstanceApi(
   instanceId: string,

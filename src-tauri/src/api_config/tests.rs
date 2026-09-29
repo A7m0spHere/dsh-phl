@@ -22,6 +22,7 @@ fn provider(name: &str, env: &str) -> Provider {
         base_url: Some(format!("https://{name}.example/v1")),
         api_key_env: env.into(),
         api_key: None,
+        has_stored_credential: false,
         models: vec![ModelRef {
             id: format!("{name}-model"),
             name: None,

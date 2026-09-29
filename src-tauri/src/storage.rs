@@ -209,17 +209,16 @@ impl MigrationJournal {
         (kinds, bytes)
     }
 
-    /// tmp+rename: a torn journal file is worse than no journal file, it is
-    /// the only record of where half-moved data is.
+    /// tmp+rename with a pre-rename flush (write_durable): a torn journal
+    /// file is worse than no journal file, it is the only record of where
+    /// half-moved data is — and an unflushed rename survives the power cut
+    /// that loses the data it points at.
     fn save(&self, path: &Path) -> Result<(), String> {
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("json.tmp");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-        Ok(())
+        crate::paths::write_durable(path, body.as_bytes())
     }
 }
 

@@ -20,6 +20,7 @@ import { cn } from '@/lib/cn'
 import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
 import { instanceSessionCount } from '@/lib/desktop'
 import { resolveBoundVersion } from '@/lib/instanceVersion'
+import { MIN_WEB_PORT } from '@/lib/ports'
 import { formatBytes, formatDateTime, formatDuration, formatRelative } from '@/lib/format'
 import { useUptime } from '@/lib/hooks'
 import { useFirstVisit } from '@/lib/useFirstVisit'
@@ -197,6 +198,18 @@ export function InstanceDetailPage({ id }: { id: string }) {
 
   const saveEdit = () => {
     if (!instance) return
+    // The number input's min/max only style the spinner: a cleared field is
+    // Number('') === 0 and the browser hands it through. The create wizard
+    // gates this at its own port field; the edit form used to persist
+    // whatever it got, success toast included (2026-09-29 review).
+    if (!edit.autoPort && (!Number.isInteger(edit.port) || edit.port < MIN_WEB_PORT || edit.port > 65535)) {
+      toast({
+        kind: 'error',
+        title: '端口不可用',
+        message: `端口必须是 ${MIN_WEB_PORT}–65535 之间的整数，或改用自动分配。`,
+      })
+      return
+    }
     update(instance.id, {
       versionId: edit.versionId,
       runtimeId: edit.runtimeId,
@@ -919,7 +932,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
               <EmptyState
                 compact
                 title="还没有快照"
-                description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），不会改变实例引用的 DSH 与 Runtime。"
+                description="快照会记录当前的 DSH 版本、Runtime、插件与配置。回滚只替换 dsh-home（插件与配置），会话与附件保留现网，也不会改变实例引用的 DSH 与 Runtime。"
                 action={
                   <Tooltip content={running || busy ? '请先停止实例，再创建快照' : ''}>
                     <Button
@@ -960,7 +973,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
                           onClick={async () => {
                             const ok = await confirm({
                               title: `回滚到「${snap.label}」`,
-                              message: '当前 dsh-home 里的插件与配置会被快照内容整体替换。',
+                              message: '当前 dsh-home 里的插件与配置会被快照内容整体替换；会话与附件保留现网，不参与回滚。',
                               detail: `快照记录：DSH ${snap.versionId} · ${snap.runtimeId} · ${snap.pluginCount} 个插件。回滚不改变实例当前引用的 DSH 版本与 Runtime。`,
                               confirmLabel: '回滚',
                             })

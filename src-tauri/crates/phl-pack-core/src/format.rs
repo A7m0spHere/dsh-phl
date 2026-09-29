@@ -198,6 +198,19 @@ pub fn validate_manifest(m: &PhlPackManifest) -> Result<(), String> {
     if m.dsh.version.trim().is_empty() {
         return Err("整合包未声明 DSH 依赖版本".to_string());
     }
+    if !valid_binding_version(&m.dsh.version) {
+        return Err(format!(
+            "整合包的 DSH 版本 {} 含非法字符（只允许字母、数字与 . - _ +）",
+            m.dsh.version
+        ));
+    }
+    if let Some(node) = &m.runtime.node_version {
+        if !valid_binding_version(node) {
+            return Err(format!(
+                "整合包的 Node 版本 {node} 含非法字符（只允许字母、数字与 . - _ +）"
+            ));
+        }
+    }
     let mut ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for p in &m.plugins {
         if p.id.trim().is_empty() {
@@ -237,6 +250,24 @@ fn looks_like_root(s: &str) -> bool {
     // so the rule matches the string as it appears in the manifest.
     let b = s.as_bytes();
     b.len() >= 2 && b[1] == b':' && (b[0].is_ascii_alphabetic())
+}
+
+/// A version string this format allows into paths and runtime ids.
+///
+/// `dsh.version` and `runtime.nodeVersion` are not just display fields: every
+/// consumer joins them into `versions/<id>/` and `runtimes/node-<v>/` and an
+/// install resolves binaries inside the joined directory. Holding them to a
+/// semver-ish charset here — the rulebook export and install share — closes
+/// the path escape an unvalidated manifest could otherwise smuggle past those
+/// joins (2026-09-29 review). DSH and Node versions never carry anything
+/// outside these characters, so no honest pack gets stricter.
+fn valid_binding_version(s: &str) -> bool {
+    // `..` is refused on top of the charset: with the `dsh-` prefix stripped
+    // (install.rs), a bare `..` would be a real traversal component.
+    !s.is_empty()
+        && !s.contains("..")
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
 }
 
 #[cfg(test)]

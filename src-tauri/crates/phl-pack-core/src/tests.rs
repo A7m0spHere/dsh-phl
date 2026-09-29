@@ -337,3 +337,35 @@ fn integrity_hash_observes_cancel_inside_one_large_reader() {
         "hash read the entire file after cancellation"
     );
 }
+
+#[test]
+fn a_manifest_binding_version_that_cannot_be_a_path_component_is_refused() {
+    // The 2026-09-29 review: `nodeVersion` and `dsh.version` are joined into
+    // `runtimes/node-<v>/` and `versions/<id>/` on every consumer, so a
+    // traversal or separator smuggled into either field must fail the
+    // rulebook itself, not the consumer's path code.
+    for (field, value) in [
+        ("nodeVersion", "/../../x"),
+        ("nodeVersion", ".."),
+        ("nodeVersion", "a/b"),
+        ("nodeVersion", "22\\evil"),
+        ("nodeVersion", "22:evil"),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_slice(&valid_manifest_json()).unwrap();
+        json["runtime"][field] = json!(value);
+        let err = validate_manifest(&serde_json::from_value(json).unwrap()).unwrap_err();
+        assert!(err.contains("非法字符"), "{field}={value}: {err}");
+    }
+    for value in ["../..", "0.1/x", "C:", "0.1\t2"] {
+        let mut json: serde_json::Value = serde_json::from_slice(&valid_manifest_json()).unwrap();
+        json["dsh"]["version"] = json!(value);
+        let err = validate_manifest(&serde_json::from_value(json).unwrap()).unwrap_err();
+        assert!(err.contains("非法字符"), "dsh.version={value}: {err}");
+    }
+    // Honest versions keep installing: prerelease, build metadata and a bare
+    // major are all inside the charset.
+    let mut json: serde_json::Value = serde_json::from_slice(&valid_manifest_json()).unwrap();
+    json["dsh"]["version"] = json!("0.1.7-rc.1+build.2");
+    json["runtime"]["nodeVersion"] = json!("22.11.0");
+    assert!(validate_manifest(&serde_json::from_value(json).unwrap()).is_ok());
+}

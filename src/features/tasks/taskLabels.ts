@@ -45,6 +45,7 @@ export const KIND_LABEL: Record<string, string> = {
   'community-pack-install': '安装社区整合包',
   'pack-dependencies': '安装整合包依赖',
   'root-migration': '迁移数据目录',
+  'root-set': '更改数据目录',
   'root-migration-finish': '完成目录迁移',
   'root-migration-undo': '撤销目录迁移',
   adopt: '接入本机 DSH',

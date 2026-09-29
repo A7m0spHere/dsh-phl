@@ -110,16 +110,23 @@ pub struct Provider {
     /// in `settings.yaml` as `apiKeyEnv`, and where launch-injection puts a
     /// locally stored key.
     pub api_key_env: String,
-    /// An optional locally stored key. The product decision followed
-    /// cc-switch here: users paste a real key into the form and the tool
-    /// owns delivering it — at launch we inject it into the DSH child's
-    /// environment as this provider's `apiKeyEnv` (only when neither the
-    /// system nor the instance already defines that variable). settings.yaml
-    /// still carries just the variable name, so no instance directory ever
-    /// holds the secret; the local `api.json` does, in plaintext, exactly
-    /// like cc-switch's SQLite.
+    /// An optional locally stored key, honored only on the save path. The
+    /// product decision followed cc-switch: users paste a real key into the
+    /// form and the tool owns delivering it — the save moves it into the OS
+    /// credential store and clears the field, and at launch the injector
+    /// reads the store and hands it to the DSH child as this provider's
+    /// `apiKeyEnv` (only when neither the system nor the instance already
+    /// defines that variable). settings.yaml and api.json both carry just
+    /// the variable *name*; the secret lives only in the store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Whether the OS credential store currently holds a key for this
+    /// provider. Wire-only: `skip_serializing` keeps api.json free of a
+    /// second copy of store state that could drift, and the flag itself is
+    /// not a secret — it is what lets the settings page show 「本机密钥」
+    /// and offer 清除密钥 without the frontend ever seeing the key.
+    #[serde(default, skip_serializing)]
+    pub has_stored_credential: bool,
     #[serde(default)]
     pub models: Vec<ModelRef>,
     #[serde(default = "default_true")]

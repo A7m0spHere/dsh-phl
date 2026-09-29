@@ -6,6 +6,7 @@
 //! and relocations. Destructive commands resolve ids into concrete paths only
 //! in Rust and confine every one of them under the root.
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -312,12 +313,44 @@ impl PhlState {
         if let Some(parent) = pointer.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("无法创建配置目录: {e}"))?;
         }
-        let tmp = pointer.with_extension("json.tmp");
-        std::fs::write(&tmp, root.to_string_lossy().as_bytes())
-            .map_err(|e| format!("无法记录数据目录: {e}"))?;
-        std::fs::rename(&tmp, pointer).map_err(|e| format!("无法记录数据目录: {e}"))?;
-        Ok(())
+        write_durable(pointer, root.to_string_lossy().as_bytes())
+            .map_err(|e| format!("无法记录数据目录: {e}"))
     }
+}
+
+/// Durable record write for the files that tell the next boot how to read
+/// the disk: unique temp name (concurrent writers cannot trample each
+/// other's bytes, which a shared `*.tmp` once let them do), then flush to
+/// the platter *before* the rename. The rename is the commit — a torn temp
+/// is discardable, but a renamed-but-unflushed file survives a power cut
+/// while its data does not, which on the root pointer reads as "the user's
+/// data vanished" (2026-09-29 review).
+///
+/// The temp name keeps the `.phl-` prefix so a crashed write never surfaces
+/// in clones, snapshots or orphan scans (`copy::skipped`).
+pub(crate) fn write_durable(path: &Path, body: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "record".into());
+    let tmp = path.with_file_name(format!(
+        ".phl-{name}.tmp.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let commit = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(body)?;
+        file.sync_all()
+    };
+    commit().map_err(|e| format!("无法写入 {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("无法提交 {}: {e}", path.display())
+    })?;
+    Ok(())
 }
 
 fn validate_root(root: &str) -> Result<PathBuf, String> {
@@ -351,11 +384,40 @@ pub fn init_phl_root(hint: Option<String>, state: State<'_, PhlState>) -> Result
 
 /// Points PHL at a new data root (settings → 存储). Persists the choice;
 /// moving the data itself is `move_root_data`'s job.
+///
+/// DataRoot-guarded because this rewrites the same authoritative pointer a
+/// migration commits: concurrent with `move_root_data`, this used to win the
+/// write and then lose the root — the migration's final `relocate_root`
+/// re-pointed the pointer at the journal's `to`, while instances created in
+/// the meantime were landing in the user's chosen root (2026-09-29 review).
+/// An unfinished migration journal is refused outright: setting a root now
+/// would race that same commit from the other side.
 #[tauri::command]
-pub fn set_phl_root(root: String, state: State<'_, PhlState>) -> Result<String, String> {
-    state
-        .set_root(&root)
-        .map(|root| root.to_string_lossy().into_owned())
+pub async fn set_phl_root(
+    locks: State<'_, crate::resources::ResourceLocks>,
+    tasks: State<'_, crate::resources::Tasks>,
+    state: State<'_, PhlState>,
+    root: String,
+) -> Result<String, String> {
+    let journal = state.sibling_file(crate::storage::JOURNAL_NAME);
+    crate::resources::guarded(
+        crate::resources::next_task_id("root-set"),
+        "root-set",
+        "更改数据目录",
+        vec![crate::resources::Resource::DataRoot],
+        None,
+        &locks,
+        &tasks,
+        move |_task| async move {
+            if journal.as_deref().is_some_and(|p| p.exists()) {
+                return Err("存在未完成的数据目录迁移，请先完成或放弃迁移".into());
+            }
+            state
+                .set_root(&root)
+                .map(|root| root.to_string_lossy().into_owned())
+        },
+    )
+    .await
 }
 
 #[cfg(test)]

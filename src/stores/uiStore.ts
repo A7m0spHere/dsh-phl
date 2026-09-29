@@ -205,6 +205,17 @@ type Dialog =
   | { kind: 'confirm'; spec: ConfirmSpec; resolve: (ok: boolean) => void }
   | { kind: 'prompt'; spec: PromptSpec; resolve: (value: string | null) => void }
 
+/** Resolve the currently-open dialog (if any) with its displaced/cancel
+ * value, so a replaced dialog's awaiting code resumes on its no-branch
+ * instead of hanging forever (2026-09-29 review). Runs before `set` swaps
+ * the dialog, so the previous resolver can never be lost. */
+function settleDisplacedDialog(): void {
+  const current = useUIStore.getState().dialog
+  if (!current) return
+  if (current.kind === 'confirm') current.resolve(false)
+  else current.resolve(null)
+}
+
 /* ------------------------------------------------------------------ *
  * appearance
  * ------------------------------------------------------------------ */
@@ -446,10 +457,22 @@ export const useUIStore = create<UIState>()(
 
       /* ---------------- dialogs ---------------- */
       dialog: null,
+      // Replacing an open dialog resolves the displaced one with its cancel
+      // value instead of leaking its promise: the awaiting code (a delete
+      // confirm, a close-requested guard) then takes its no-branch and runs
+      // its cleanup, rather than hanging silently while its UI vanished.
+      // Close-requested defers its own confirm for exactly this reason (see
+      // App.tsx) — every other displaced flow wanted "not confirmed" anyway.
       confirm: (spec) =>
-        new Promise<boolean>((resolve) => set({ dialog: { kind: 'confirm', spec, resolve } })),
+        new Promise<boolean>((resolve) => {
+          settleDisplacedDialog()
+          set({ dialog: { kind: 'confirm', spec, resolve } })
+        }),
       prompt: (spec) =>
-        new Promise<string | null>((resolve) => set({ dialog: { kind: 'prompt', spec, resolve } })),
+        new Promise<string | null>((resolve) => {
+          settleDisplacedDialog()
+          set({ dialog: { kind: 'prompt', spec, resolve } })
+        }),
       closeDialog: (result) => {
         const dialog = get().dialog
         if (!dialog) return

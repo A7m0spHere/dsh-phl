@@ -311,6 +311,7 @@ macro_rules! phl_command_handler {
             launch::adopt_processes,
             api_config::library::load_api_config,
             api_config::library::save_api_config,
+            api_config::library::delete_provider_credential,
             api_config::sync::sync_instance_api,
             api_config::sync::import_instance_api,
             api_config::sync::instance_live_snapshot,

@@ -8,6 +8,7 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { parseThrownError } from '@/lib/errorCodes'
 import { isDesktop as isDesktopFlag } from '@/lib/desktopCore'
 import { repository } from '@/services'
 import { useMotion } from '@/lib/motion'
@@ -93,6 +94,7 @@ export function ApiConfigPage() {
   const enrichMissingModels = useApiConfigStore((s) => s.enrichMissingModels)
   const updateProvider = useApiConfigStore((s) => s.updateProvider)
   const removeProvider = useApiConfigStore((s) => s.removeProvider)
+  const clearCredential = useApiConfigStore((s) => s.clearCredential)
   const setDefaults = useApiConfigStore((s) => s.setDefaults)
   const importFromInstance = useApiConfigStore((s) => s.importFromInstance)
   const refreshSnapshots = useApiConfigStore((s) => s.refreshSnapshots)
@@ -244,6 +246,22 @@ export function ApiConfigPage() {
     if (ok) await removeProvider(id)
   }
 
+  const onClearCredential = async (id: string, name: string) => {
+    const ok = await confirm({
+      title: '清除已存密钥',
+      message: `将从系统凭据管理器删除「${name}」的密钥。绑定它的实例下次启动将失去注入，可随时在编辑中重新填入。`,
+      tone: 'danger',
+      confirmLabel: '清除',
+    })
+    if (!ok) return
+    try {
+      await clearCredential(id)
+      toast({ kind: 'success', title: '已清除密钥', message: '系统凭据管理器中的条目已删除。' })
+    } catch (e) {
+      toast({ kind: 'error', title: '清除密钥失败', message: parseThrownError(e).message })
+    }
+  }
+
   const onImport = async () => {
     if (!importTarget) return
     const seeded = await importFromInstance(importTarget)
@@ -352,6 +370,7 @@ export function ApiConfigPage() {
                     usedBy={usedByCount(p.id)}
                     onDelete={() => void onDeleteProvider(p.id)}
                     onEdit={(patch) => void onEditProvider(p.id, patch)}
+                    onClearCredential={isDesktopFlag ? () => void onClearCredential(p.id, p.name) : undefined}
                   />
                 ))}
               </motion.ul>

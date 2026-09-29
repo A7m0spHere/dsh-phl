@@ -34,12 +34,22 @@ pub(crate) enum SkipRule {
     /// own. Everything deeper belongs to packages and copies verbatim.
     /// `skip_sessions` is the `环境配置` vs `环境＋会话` scope switch.
     Trial { skip_sessions: bool, depth: u8 },
+    /// Restore staging (2026-09-29 review): the snapshot tree being placed
+    /// must be plugins + configuration only — conversation data is *not*
+    /// rolled back. The live home's `sessions/` and `attachments/` move into
+    /// the staged copy before the swap (restore_snapshot_with), so copying
+    /// the snapshot's own copies here would only be deleted again.
+    Restore,
 }
 
 impl SkipRule {
     pub(crate) fn skips(self, name: &str) -> bool {
         match self {
             SkipRule::RunStateAtRoot => skipped(name),
+            SkipRule::Restore => match name {
+                "sessions" | "attachments" => true,
+                _ => skipped(name),
+            },
             SkipRule::Trial {
                 skip_sessions,
                 depth,
@@ -606,6 +616,10 @@ pub(crate) async fn copy_tree_with_progress<F: Fn(CloneProgress) + Send + Sync>(
             SkipRule::RunStateAtRoot => dir_size_skipping(&from),
             // The progress denominator counts what the copy will actually
             // carry; the same skip rule decides both.
+            SkipRule::Restore => dir_size_skipping_if(&from, &|name| match name {
+                "sessions" | "attachments" => true,
+                _ => skipped(name),
+            }),
             SkipRule::Trial { skip_sessions, .. } => {
                 dir_size_skipping_if(&from, &|name| match name {
                     "sessions" => skip_sessions,

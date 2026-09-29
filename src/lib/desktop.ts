@@ -378,6 +378,7 @@ export type {
 export {
   loadApiConfig,
   saveApiConfig,
+  deleteProviderCredential,
   syncInstanceApi,
   importInstanceApi,
   instanceLiveSnapshot,

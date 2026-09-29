@@ -310,7 +310,9 @@ pub(crate) async fn import_inner(dir: &Path) -> Result<Option<ApiConfig>, String
             }),
             // A live settings.yaml never contains the key itself (DSH keeps
             // it in credentials/env), so an import can only produce a name.
+            // The store flag is wired by the load path, not the import.
             api_key: None,
+            has_stored_credential: false,
             models,
             enabled: true,
         });

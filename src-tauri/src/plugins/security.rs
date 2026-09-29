@@ -57,16 +57,47 @@ pub(crate) async fn resolve_commit(repo: &str) -> Option<String> {
             .ok()?;
         let value: serde_json::Value = response.json().await.ok()?;
         if let Some(sha) = value.get("sha").and_then(|s| s.as_str()) {
-            if sha.len() >= 40 {
-                return Some(sha[..40].to_string());
+            if let Some(sha) = normalize_commit_sha(sha) {
+                return Some(sha);
             }
         }
     }
     None
 }
+
+/// The 40-hex commit SHA a `sha` field must hold before an install pins to
+/// it. Both guards matter: the first candidate source is a third-party proxy
+/// that can hand back any bytes, and slicing `raw[..40]` unchecked panics on
+/// a multi-byte char boundary — remote data must never be able to crash the
+/// install path (2026-09-29 review).
+pub(crate) fn normalize_commit_sha(raw: &str) -> Option<String> {
+    let taken: String = raw.chars().take(40).collect();
+    (taken.len() == 40 && taken.bytes().all(|b| b.is_ascii_hexdigit())).then_some(taken)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sha_field_that_cannot_be_a_commit_is_refused_not_sliced() {
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            normalize_commit_sha(hex40).as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        // Longer output keeps the first 40, like the old slice did — safely.
+        assert_eq!(
+            normalize_commit_sha(&format!("{hex40}ffff")).as_deref(),
+            Some(hex40)
+        );
+        // Short, non-hex, and multi-byte shapes are all just "no SHA".
+        assert_eq!(normalize_commit_sha("0123456789"), None);
+        assert_eq!(normalize_commit_sha(&"g".repeat(40)), None);
+        // 39 ASCII bytes + one multi-byte char: the old `raw[..40]` panicked
+        // on exactly this shape.
+        let poisoned = format!("{}中", "a".repeat(39));
+        assert_eq!(normalize_commit_sha(&poisoned), None);
+    }
 
     fn resolved(integrity: Option<&str>, commit: Option<String>) -> ResolvedSource {
         ResolvedSource {

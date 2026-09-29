@@ -73,6 +73,13 @@ interface ApiConfigState {
   ) => Promise<ApiProvider | null>
   updateProvider: (id: string, patch: Partial<ApiProvider>) => Promise<boolean>
   removeProvider: (id: string) => Promise<boolean>
+  /**
+   * Delete a provider's key from the OS credential store and refresh the
+   * library. The save flow only rewrites keys that were resubmitted — an
+   * emptied form field never reached the store on its own — so this is the
+   * one path that actually clears a stored secret.
+   */
+  clearCredential: (id: string) => Promise<void>
   setDefaults: (defaultProviderId: string | undefined, defaultModel: ApiConfig['defaultModel']) => Promise<boolean>
 
   /** Materialize + persist the binding on the instance manifest. */
@@ -245,6 +252,16 @@ export const useApiConfigStore = create<ApiConfigState>()((set, get) => ({
       providers: current.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)),
     })
     return !!saved
+  },
+
+  async clearCredential(id) {
+    if (!desktop.isDesktop) return
+    await desktop.deleteProviderCredential(id)
+    // Reload in place (no config flash, unlike load()): only the
+    // hasStoredCredential flags actually change.
+    const root = useSettingsStore.getState().root
+    const config = await desktop.loadApiConfig()
+    if (root === useSettingsStore.getState().root) set({ config })
   },
 
   async removeProvider(id) {

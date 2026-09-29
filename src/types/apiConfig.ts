@@ -80,13 +80,19 @@ export interface ApiProvider {
    * settings.yaml. Every provider needs one. */
   apiKeyEnv: string
   /**
-   * Optional locally stored key. cc-switch model: the user pastes a real key,
-   * PHL owns delivering it — at instance launch it is injected into the DSH
-   * child's environment as `apiKeyEnv` (system/instance env always win). The
-   * secret lives only in the local api.json and the process env; no instance
-   * directory file ever contains it.
+   * Optional locally stored key, honored only on the save path. cc-switch
+   * model: the user pastes a real key, PHL owns delivering it — the save
+   * moves it into the OS credential store and clears the field, and at
+   * launch the store's value is injected into the DSH child's environment
+   * as `apiKeyEnv` (system/instance env always win). The secret lives only
+   * in the OS store; no file ever contains it.
    */
   apiKey?: string
+  /** Whether the OS credential store currently holds this provider's key.
+   * Backend-reported on load (wire-only, never persisted) — the flag behind
+   * the 「本机密钥」 badge and the 清除密钥 affordance; the key itself is
+   * never sent to the frontend. */
+  hasStoredCredential?: boolean
   models: ApiModelRef[]
   enabled: boolean
 }

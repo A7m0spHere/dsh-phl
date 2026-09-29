@@ -1,11 +1,16 @@
 //! Point-in-time copies of an instance's `dsh-home`: create under a staging
 //! name, restore by copy-swap with the previous tree as backup, delete.
 //!
-//! A restore replaces the home's plugins and configuration and nothing else.
-//! The snapshot records which DSH version and Runtime the instance referenced,
-//! but the instance keeps its current binding: re-pointing a live instance at
-//! a version that may since have been deleted would trade a recoverable state
-//! for an unrunnable one. The UI says so instead of implying a full rollback.
+//! A restore replaces the home's plugins and configuration. Conversation
+//! data — the live home's `sessions/` and `attachments/` — is kept: the
+//! staged copy leaves the snapshot's own copies out (`SkipRule::Restore`)
+//! and the live directories move in before the swap. The snapshot itself
+//! still holds the full home, so its sessions stay reachable by hand for
+//! disaster recovery. The snapshot records which DSH version and Runtime
+//! the instance referenced, but the instance keeps its current binding:
+//! re-pointing a live instance at a version that may since have been deleted
+//! would trade a recoverable state for an unrunnable one. The UI says so
+//! instead of implying a full rollback.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -416,7 +421,10 @@ pub(crate) async fn restore_snapshot_with<F: Fn(CloneProgress) + Send + Sync>(
         snap_home.clone(),
         dest_home.clone(),
         Arc::clone(flag),
-        SkipRule::Nothing,
+        // The contract (module header and the UI copy) is plugins and
+        // configuration: the copier leaves the snapshot's own conversation
+        // data out, and the live home's moves in below.
+        SkipRule::Restore,
         // `current` is where this tree is renamed to, so in-tree links must
         // name the live home rather than the `.phl-restore` staging path.
         LinkPolicy::Preserve {
@@ -433,6 +441,32 @@ pub(crate) async fn restore_snapshot_with<F: Fn(CloneProgress) + Send + Sync>(
             return Err("cancelled".into());
         }
         return Err(format!("还原快照失败: {e}"));
+    }
+
+    // Conversation data is not rolled back: the live home's sessions and
+    // attachments move into the staged copy, taking the place of the ones
+    // the copier skipped. Both directories live under the instance
+    // directory, so these are same-volume renames; a failure here happens
+    // before any swap, so the live home is still untouched.
+    for keep in ["sessions", "attachments"] {
+        let staged = dest_home.join(keep);
+        let live = current.join(keep);
+        if staged.exists() {
+            // The staged tree is PHL's own copy output; a straggler there is
+            // a link or file, which remove_dir_all refuses.
+            let _ = tokio::fs::remove_dir_all(&staged).await;
+            let _ = tokio::fs::remove_file(&staged).await;
+            if staged.exists() {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(format!("无法清理暂存目录中的 {keep}"));
+            }
+        }
+        if live.exists() {
+            if let Err(e) = tokio::fs::rename(&live, &staged).await {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(format!("无法保留现网 {keep}（重命名失败: {e}）"));
+            }
+        }
     }
 
     let backup = dir.join(".phl-old-dsh-home");
@@ -654,6 +688,102 @@ mod tests {
             !dir.join(".phl-old-dsh-home").exists(),
             "the swap never started"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The 2026-09-29 review's P1, pinned: a restore replaces plugins and
+    /// configuration, NOT conversation data. The live home's sessions and
+    /// attachments survive — including sessions created *after* the snapshot
+    /// — the snapshot's own copies never surface, and everything else rolls
+    /// back to the snapshot's content.
+    #[tokio::test]
+    async fn a_restore_keeps_the_live_conversation_data() {
+        let root = temp_root("restore-sessions");
+        let id = "inst-s1";
+        let dir = root.join("instances").join(id);
+        let home = dir.join("dsh-home");
+        // Live home at snapshot time: one session, one attachment, one config.
+        std::fs::create_dir_all(home.join("sessions").join("proj").join("s-old")).unwrap();
+        std::fs::write(
+            home.join("sessions")
+                .join("proj")
+                .join("s-old")
+                .join("meta.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join("attachments")).unwrap();
+        std::fs::write(home.join("attachments").join("old.txt"), "old").unwrap();
+        std::fs::create_dir_all(home.join("profiles").join("web")).unwrap();
+        std::fs::write(
+            home.join("profiles").join("web").join("config.json"),
+            "old-config",
+        )
+        .unwrap();
+        crate::instances::manifest::write_manifest(&dir, &manifest(id))
+            .await
+            .unwrap();
+
+        let snap = run_snapshot_create(
+            &Arc::new(AtomicBool::new(false)),
+            &fake_processes(),
+            &root,
+            id,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+        // After the snapshot the conversation moves on: the old session and
+        // attachment are deleted, new ones appear, and the config drifts.
+        // Under the pre-fix behavior the restore resurrected `s-old` and
+        // `old.txt` out of the snapshot and deleted the newer data.
+        std::fs::remove_dir_all(home.join("sessions").join("proj").join("s-old")).unwrap();
+        std::fs::create_dir_all(home.join("sessions").join("proj").join("s-new")).unwrap();
+        std::fs::write(
+            home.join("sessions")
+                .join("proj")
+                .join("s-new")
+                .join("meta.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::remove_file(home.join("attachments").join("old.txt")).unwrap();
+        std::fs::write(home.join("attachments").join("new.txt"), "new").unwrap();
+        std::fs::write(
+            home.join("profiles").join("web").join("config.json"),
+            "new-config",
+        )
+        .unwrap();
+
+        restore_snapshot_inner(&root, id, &snap.id, &fake_processes())
+            .await
+            .unwrap();
+
+        // Conversation data kept — including what the snapshot predates.
+        assert!(
+            home.join("sessions")
+                .join("proj")
+                .join("s-new")
+                .join("meta.json")
+                .exists(),
+            "sessions newer than the snapshot must survive the restore"
+        );
+        assert!(
+            !home.join("sessions").join("proj").join("s-old").exists(),
+            "the snapshot's own session copy must not surface"
+        );
+        assert!(home.join("attachments").join("new.txt").exists());
+        assert!(!home.join("attachments").join("old.txt").exists());
+        // Everything else rolls back to the snapshot.
+        assert_eq!(
+            std::fs::read_to_string(home.join("profiles").join("web").join("config.json")).unwrap(),
+            "old-config"
+        );
+        // No staging leftovers.
+        assert!(!dir.join(".phl-restore").exists());
+        assert!(!dir.join(".phl-old-dsh-home").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }

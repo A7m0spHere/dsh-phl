@@ -115,7 +115,10 @@ pub(crate) async fn resolve_source(
             // it shipped is exactly what the trust model exists to expose.
             match resolve_commit(repo).await {
                 Some(sha) => {
-                    let short = &sha[..7];
+                    // `resolve_commit` only returns validated 40-hex SHAs, so
+                    // the slice cannot cut a char boundary; get() keeps that
+                    // true even if the validator's contract ever widens.
+                    let short = sha.get(..7).unwrap_or(&sha);
                     Ok(ResolvedSource {
                         url: format!("https://codeload.github.com/{repo}/tar.gz/{sha}"),
                         integrity: None,

@@ -190,13 +190,16 @@ pub(crate) async fn scan_residue_with(
     out
 }
 
-/// Every hidden staging tree an interrupted create/clone/pack-install or a
-/// crashed snapshot create can leave inside the `instances/` domain:
-/// `instances/.phl-new-*`, `instances/.phl-pack-*` and, per instance,
-/// `instances/<id>/snapshots/.phl-new-*`. These names have no recovery role
-/// (a retry's own `remove_dir_all(staging)` is their recovery path), unlike
-/// `.phl-restore` / `.phl-old-dsh-home` inside an instance dir — those are
-/// live restore-transaction state handled by
+/// Every hidden staging tree an interrupted create/clone/pack-install, trial
+/// or adoption can leave inside the `instances/` domain. Trial and adoption
+/// copy the *entire* DSH home into `.phl-trial-*` / `.phl-adopt-*` before a
+/// promote rename — a crash mid-copy left those stranded until the 2026-09-29
+/// review added them here; the orphan scanner skips every hidden name
+/// (`is_hidden_tree_name`), so this list is their only reclamation path.
+/// Per instance, `instances/<id>/snapshots/.phl-new-*` joins them. These
+/// names have no recovery role (a retry's own `remove_dir_all(staging)` is
+/// their recovery path), unlike `.phl-restore` / `.phl-old-dsh-home` inside
+/// an instance dir — those are live restore-transaction state handled by
 /// `snapshot::recover_interrupted_restore` and deliberately stay out here.
 async fn staging_instance_dirs(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -211,7 +214,9 @@ async fn staging_instance_dirs(root: &Path) -> Vec<PathBuf> {
         if !path.is_dir() {
             continue;
         }
-        if name.starts_with(".phl-new-") || name.starts_with(".phl-pack-") {
+        const STAGING_PREFIXES: &[&str] =
+            &[".phl-new-", ".phl-pack-", ".phl-trial-", ".phl-adopt-"];
+        if STAGING_PREFIXES.iter().any(|p| name.starts_with(p)) {
             out.push(path);
             continue;
         }
@@ -613,6 +618,13 @@ mod tests {
         std::fs::write(clone.join("instance.json"), "{}").unwrap();
         let pack = instances.join(".phl-pack-inst-7");
         std::fs::create_dir_all(&pack).unwrap();
+        // A trial copy and an adoption copy that died before their promote
+        // rename — multi-GB homes the orphan scanner cannot see (hidden
+        // names), stranded permanently before the 2026-09-29 review.
+        let trial = instances.join(".phl-trial-new-1");
+        std::fs::create_dir_all(trial.join("dsh-home")).unwrap();
+        let adopt = instances.join(".phl-adopt-src-2");
+        std::fs::create_dir_all(adopt.join("dsh-home")).unwrap();
         // A snapshot create that died after its snapshot.json, still under the
         // hidden staging name.
         let snap = instances
@@ -629,7 +641,13 @@ mod tests {
         std::fs::create_dir_all(&backup).unwrap();
 
         let residue = scan_residue_inner(&root).await.unwrap();
-        for name in [".phl-new-clone-9", ".phl-pack-inst-7", ".phl-new-snap-5"] {
+        for name in [
+            ".phl-new-clone-9",
+            ".phl-pack-inst-7",
+            ".phl-trial-new-1",
+            ".phl-adopt-src-2",
+            ".phl-new-snap-5",
+        ] {
             let item = residue
                 .iter()
                 .find(|r| r.path.ends_with(name))
@@ -651,11 +669,18 @@ mod tests {
         // The default (one-hour-ago) cutoff leaves every fresh tree alone...
         cleanup_txn(&root).await.unwrap();
         assert!(clone.exists() && pack.exists() && snap.exists());
-        // ...a future cutoff marks all stale: the sweep takes the three
+        // ...a future cutoff marks all stale: the sweep takes the five
         // staging trees and nothing else.
         let future = std::time::SystemTime::now() + Duration::from_secs(3600);
-        assert_eq!(sweep_txn(&root, future).await.unwrap(), 3);
-        assert!(!clone.exists() && !pack.exists() && !snap.exists());
+        assert_eq!(sweep_txn(&root, future).await.unwrap(), 5);
+        assert!(
+            !clone.exists() && !pack.exists() && !snap.exists(),
+            "create/pack/snapshot staging swept"
+        );
+        assert!(
+            !trial.exists() && !adopt.exists(),
+            "trial/adopt staging swept"
+        );
         assert!(healthy.exists());
         assert!(backup.exists());
 
