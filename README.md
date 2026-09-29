@@ -38,19 +38,19 @@ PHL 是基于 Tauri 2 + Rust 的桌面应用。版本下载、实例管理、磁
 
 ## 下载与安装
 
-目前提供 **Windows 10/11 x64 的 alpha 预览版**，界面与数据格式仍可能调整。macOS / Linux 尚未完成真机验收。
+目前提供 **Windows 10/11 x64** 与 **macOS（Apple Silicon）** 的 rc 预览版，界面与数据格式仍可能调整。Linux 暂未提供安装包。
 
-1. 打开 **[Releases 下载页](https://github.com/A7m0spHere/dsh-phl/releases)**，在所选预览版的 **Assets** 中下载 `PHL_<version>_x64-setup.exe` 和同名 `.sha256` 文件。
-2. 在下载目录执行下方命令，与 `.sha256` 中的值核对一致后运行安装程序。
-3. 从开始菜单打开 **PHL**，创建第一个实例。
+1. 打开 **[Releases 下载页](https://github.com/A7m0spHere/dsh-phl/releases)**，在所选预览版的 **Assets** 中下载对应平台的安装包与同名 `.sha256` 文件：Windows 为 `PHL_<version>_x64-setup.exe`，macOS 为 `PHL_<version>_aarch64.dmg`。
+2. 在下载目录执行下方命令，与 `.sha256` 中的值核对一致后运行安装程序（macOS 挂载 DMG 后拖入「应用程序」）。
+3. 打开 **PHL**，创建第一个实例。
 
 ```powershell
 Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 ```
 
-安装包尚未做 Windows 代码签名，首次下载或运行可能出现 SmartScreen 提示，处理方法见[安装说明](./docs/install-note.md)。桌面窗口依赖 WebView2，系统缺失时安装器会联网安装。
+安装包尚未做代码签名：Windows 首次下载或运行可能出现 SmartScreen 提示，macOS 首次打开会被 Gatekeeper 拦下，处理方法见[安装说明](./docs/install-note.md)。桌面窗口在 Windows 上依赖 WebView2，系统缺失时安装器会联网安装。
 
-已有 alpha.3 或更新版本，可在「**设置 → 关于**」检查更新、下载并安装；更早版本需手动安装一次，详见[应用内更新](./docs/auto-update.md)。
+已有可自动更新的版本，可在「**设置 → 关于**」检查更新、下载并安装（macOS 版暂无应用内更新），详见[应用内更新](./docs/auto-update.md)。
 
 ## 首次运行
 

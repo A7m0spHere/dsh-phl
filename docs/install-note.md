@@ -17,8 +17,17 @@ Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 签名方案与进度见 [docs/code-signing.md](https://github.com/A7m0spHere/dsh-phl/blob/main/docs/code-signing.md)；
 拿到证书之前，上述提示不会消失。
 
+## macOS 安装（Apple Silicon）
+
+- 下载 `PHL_<version>_aarch64.dmg`，校验方式同上（macOS 用 `shasum -a 256 PHL_*_aarch64.dmg`）。
+  当前仅提供 Apple Silicon 版本，Intel Mac 未做真机验收。
+- 安装包**未签名未公证**：首次打开会被 Gatekeeper 拦下（「无法打开，因为无法验证开发者」）。
+  **这不是检测到恶意软件，而是缺少签名与公证**。处理：在 Finder 中对 PHL **右键 →「打开」→ 再点「打开」**；
+  若仍被拦，到「系统设置 → 隐私与安全性」底部点「仍要打开」。
+- 挂载 DMG 后把 PHL 拖入「应用程序」即可。macOS 版**暂无应用内自动更新**，升级需手动下载新 DMG 覆盖。
+
 ## 反馈
 
 - 问题与建议：<https://github.com/A7m0spHere/dsh-phl/issues>
-- 安装包不签名、SmartScreen 提示等已知情况：见上。
-- 这个版本是 alpha，界面与数据格式仍可能变化。
+- 安装包不签名、SmartScreen/Gatekeeper 提示等已知情况：见上。
+- 这个版本是 rc 预览版，界面与数据格式仍可能变化。

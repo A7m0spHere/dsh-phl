@@ -251,3 +251,101 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "manifest unchanged"; exit 0 }
           git -C $dir push origin updates
           Write-Host "published latest.json to the updates branch"
+
+  # The macOS lane attaches the arm64 DMG to the release the Windows job just
+  # created. It runs after `release` on purpose: a failing Windows gate must
+  # not leave a half-populated release, and the updater manifest stays
+  # Windows-only until the macOS side has signing, notarization and an updater
+  # chain of its own (the DMG below is ad-hoc signed only; Gatekeeper handling
+  # lives in docs/install-note.md, which the release body already carries).
+  release-macos:
+    name: macOS DMG (unsigned, Apple Silicon)
+    runs-on: macos-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The same "this tag may be published" gates the Windows job runs: one
+      # version, one boundary, before any build is paid for.
+      - name: Verify versions (package + lock · Cargo + lock · tauri.conf.json · tag)
+        shell: bash
+        env:
+          PHL_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: node scripts/check-versions.mjs
+
+      - name: Publication boundary (code-only tree)
+        shell: bash
+        run: node scripts/check-public-boundary.mjs
+
+      - run: npm test
+        shell: bash
+
+      # `tauri::generate_context!` reads ../dist at compile time, so the Rust
+      # tests need the frontend built first (same as the CI macOS lane).
+      - run: npm run build
+        shell: bash
+
+      - run: cargo test --workspace
+        shell: bash
+        working-directory: src-tauri
+
+      # A fresh checkout must carry every bundle input; fail here, naming the
+      # missing file, instead of deep inside DMG packaging.
+      - name: Check bundle inputs (icons)
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const conf = require('./src-tauri/tauri.conf.json');
+            for (const icon of conf.bundle.icon) {
+              if (!fs.existsSync('src-tauri/' + icon)) {
+                console.error('missing bundle input: src-tauri/' + icon);
+                process.exit(1);
+              }
+            }
+          "
+
+      - name: Build macOS app bundle and DMG
+        shell: bash
+        # `tauri.macos.conf.json` is merged in by tauri-build itself (Overlay
+        # titlebar, traffic lights); no updater config is merged, so the build
+        # never asks for the updater signing key that macOS does not use yet.
+        run: npm run app:build:mac
+
+      - name: Hash artifacts (SHA256)
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          shopt -s nullglob
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::the build produced no DMG"
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            base=$(basename "$dmg")
+            # Checksum files follow the Windows lane's "<hash>  <name>" shape.
+            (cd "$(dirname "$dmg")" && shasum -a 256 "$base") > "dist-release/$base.sha256"
+            cp "$dmg" dist-release/
+          done
+          ls -l dist-release
+
+      - name: Attach the DMG to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          # The release (body, prerelease flag, changelog) belongs to the
+          # Windows job; this only appends the macOS assets to it.
+          files: dist-release/*
