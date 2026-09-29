@@ -147,7 +147,7 @@ pub(crate) fn declared_plugin_entries_in(lines: &[String]) -> Vec<(String, bool)
         for key in ["id", "name"] {
             if let Some(serde_yaml::Value::String(id)) = row_value(lines, row.range, key) {
                 let disabled =
-                    row_value(&lines, row.range, "disabled") == Some(serde_yaml::Value::Bool(true));
+                    row_value(lines, row.range, "disabled") == Some(serde_yaml::Value::Bool(true));
                 out.push((id, disabled));
                 break;
             }
