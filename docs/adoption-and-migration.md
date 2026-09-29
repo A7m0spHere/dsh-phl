@@ -43,6 +43,9 @@ Linux 的 flatpak/snap home 重定向刻意不猜，留给手动选择。非宿�
 - **Preview**：`preview_adoption` → 版本/插件/对话数/预计复制量/符号链接数/警告。
 - **staging/rollback**：`.phl-adopt-<id>` 暂存目录，成功才 `rename` 进位；任一步失败
   删 staging，不留半个实例。
+- **插件清单**：实例页从 profile 磁盘扫描 PHL 安装记录、Cordis patch 直挂插件，以及
+  `dsh.profile.bundles` 中实际存在并声明 `dsh.bundle.patch` 的 DSH 原生 bundle。
+  原生 bundle 标成只读外部管理项；PHL 不用单插件 patch/uninstall 流程改动它，启停或卸载仍由 DSH 管理。
 - **按对话选择迁移**：`SessionStrategy::Selected`。复制阶段排除顶层 `sessions` 与
   派生投影缓存，随后 `import_selected_sessions` 把选定会话目录**原 id、原字节布局**
   迁入实例 home；任何一个选定目录缺失即整单失败。命令 `list_adoption_sessions(path)`

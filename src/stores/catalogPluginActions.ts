@@ -66,7 +66,7 @@ function launchLatestChecks(get: CatalogGet, set: CatalogSet, instanceId: string
   if (!instance) return []
   const runs: Promise<void>[] = []
   for (const installed of instance.plugins) {
-    if (installed.linked || !get().pluginById(installed.pluginId)) continue
+    if (installed.linked || installed.manageable === false || !get().pluginById(installed.pluginId)) continue
     const current = get().latestVersions[installed.pluginId]
     if (current?.status === 'checking') continue
     if (!force && current !== undefined && current.status !== 'error') continue

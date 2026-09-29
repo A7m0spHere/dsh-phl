@@ -69,7 +69,7 @@ export function PluginsPanel() {
     if (!instance) return 0
     return instance.plugins.filter((ip) => {
       const meta = plugins.find((p) => p.id === ip.pluginId)
-      if (!meta || ip.linked) return false
+      if (!meta || ip.linked || ip.manageable === false) return false
       // Same pure rule the row uses (§M4/R5) — the tab count and the list can
       // never disagree about what counts as updatable.
       return resolveUpdate({
@@ -345,12 +345,12 @@ export function PluginsPage() {
           check,
           seedLatest: meta ? latestRelease(meta)?.version : undefined,
           installedVersion: ip.version,
-          linked: !!ip.linked,
+          linked: !!ip.linked || ip.manageable === false,
         })
         return {
           ...ip,
           meta,
-          name: meta?.name ?? linkedPluginNames[ip.pluginId] ?? ip.pluginId,
+          name: ip.displayName ?? meta?.name ?? linkedPluginNames[ip.pluginId] ?? ip.pluginId,
           newest,
           outdated,
           check,
@@ -374,7 +374,7 @@ export function PluginsPage() {
     const c = { checking: 0, failed: 0, unresolvable: 0 }
     if (!instance) return c
     for (const ip of instance.plugins) {
-      if (ip.linked) continue
+      if (ip.linked || ip.manageable === false) continue
       const st = latestVersions[ip.pluginId]?.status
       if (st === 'checking') c.checking++
       else if (st === 'error') c.failed++

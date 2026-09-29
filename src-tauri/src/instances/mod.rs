@@ -93,6 +93,16 @@ pub struct InstalledPluginInfo {
     /// Markers written before trust existed read back as `unknown`.
     #[serde(default)]
     pub trust: String,
+    /// A pnpm `link:` / `file:` dependency that remains owned by its source
+    /// checkout instead of a PHL-managed install transaction.
+    #[serde(default)]
+    pub linked: bool,
+    /// False for native DSH bundle layers: PHL can inventory them, but its
+    /// one-row install controls must not edit or remove them as plain plugins.
+    pub manageable: bool,
+    /// Optional package-owned display label, such as `meta.title`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -809,20 +819,61 @@ pub(crate) async fn build_record(dir: &Path, manifest: InstanceManifest) -> Inst
 /// plugin added out of band is discovered rather than ignored.
 ///
 /// A package counts as installed when it carries PHL's `phl-plugin.json`
-/// marker *or* when `cordis.patch.yml` declares a mount row for it (`id:` or
-/// `name:`). The second clause is the out-of-band half: a plugin installed by
-/// hand (`pnpm add` into the profile + a written insert block) is exactly as
-/// installed to DSH as one PHL committed — it simply lacks PHL's paperwork.
-/// Packages that are merely present in `node_modules` (transitive deps,
-/// pnpm's store layout) match neither and stay invisible.
+/// marker, when `cordis.patch.yml` declares a mount row for it, or when it is
+/// an installed `dsh.profile.bundles` package with a `dsh.bundle.patch`.
+/// Native DSH bundles are inventory-only here: their mount rows live in the
+/// package's own patch layer, so PHL's single-row enable/uninstall controls
+/// must not treat them like PHL-managed packages. Packages merely present in
+/// `node_modules` (transitive deps, pnpm's store layout) still stay invisible.
 pub(crate) async fn scan_plugins(profile: &Path) -> Vec<InstalledPluginInfo> {
     let node_modules = profile.join("node_modules");
     let disabled = disabled_plugin_ids(profile).await;
     let declared = declared_plugin_ids(profile).await;
+    let bundles = profile_bundle_packages(profile).await;
     let mut out = Vec::new();
-    collect_packages(&node_modules, &disabled, &declared, &mut out, true).await;
+    collect_packages(
+        &node_modules,
+        &disabled,
+        &declared,
+        &bundles,
+        &mut out,
+        true,
+    )
+    .await;
     out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
     out
+}
+
+/// Bundle package names come from the same profile manifest DSH composes.
+/// The value records whether pnpm links the package to a local checkout.
+async fn profile_bundle_packages(profile: &Path) -> HashMap<String, bool> {
+    let Ok(raw) = tokio::fs::read_to_string(profile.join("package.json")).await else {
+        return HashMap::new();
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return HashMap::new();
+    };
+    let Some(bundles) = package
+        .pointer("/dsh/profile/bundles")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return HashMap::new();
+    };
+    let dependencies = package
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object);
+    bundles
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| {
+            let linked = dependencies
+                .and_then(|deps| deps.get(name))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|spec| spec.starts_with("link:") || spec.starts_with("file:"));
+            (name.to_string(), linked)
+        })
+        .collect()
 }
 
 /// npm scopes are a directory level (`@scope/pkg`), so the walk descends once
@@ -831,6 +882,7 @@ async fn collect_packages(
     dir: &Path,
     disabled: &HashSet<String>,
     declared: &HashMap<String, bool>,
+    bundles: &HashMap<String, bool>,
     out: &mut Vec<InstalledPluginInfo>,
     allow_scopes: bool,
 ) {
@@ -848,7 +900,10 @@ async fn collect_packages(
             continue;
         }
         if allow_scopes && name.starts_with('@') {
-            Box::pin(collect_packages(&path, disabled, declared, out, false)).await;
+            Box::pin(collect_packages(
+                &path, disabled, declared, bundles, out, false,
+            ))
+            .await;
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(path.join("phl-plugin.json")).await {
@@ -874,6 +929,9 @@ async fn collect_packages(
                 } else {
                     marker.trust
                 },
+                linked: false,
+                manageable: true,
+                display_name: None,
             });
             continue;
         }
@@ -886,35 +944,131 @@ async fn collect_packages(
                 dir.file_name().unwrap_or_default().to_string_lossy()
             )
         };
-        let Some(&disabled_here) = declared.get(&name) else {
+        if let Some(&disabled_here) = declared.get(&name) {
+            let manifest = package_json_manifest(&path).await;
+            let version = manifest.as_ref().map(manifest_version).unwrap_or_default();
+            let display_name = manifest.as_ref().and_then(manifest_title);
+            out.push(InstalledPluginInfo {
+                enabled: !disabled_here,
+                registry_id: name.clone(),
+                plugin_id: name.clone(),
+                version,
+                trust: "unknown".to_string(),
+                linked: bundles.get(&name).copied().unwrap_or(false),
+                manageable: true,
+                display_name,
+            });
+            continue;
+        }
+
+        // `dsh plugin add` installs a native bundle through
+        // `dsh.profile.bundles`; its Cordis rows live in the bundle's own
+        // patch, so they never appear in the profile-level patch scanned
+        // above. Show the package as externally managed and keep PHL's
+        // one-plugin enable/uninstall controls away from the bundle layer.
+        let Some(&linked) = bundles.get(&name) else {
             continue;
         };
-        let version = package_json_version(&path).await;
+        let Some(manifest) = package_json_manifest(&path).await else {
+            continue;
+        };
+        if !is_dsh_bundle(&manifest) {
+            continue;
+        }
+        let mounts = bundle_mounts(&path, &manifest).await;
+        let enabled = if mounts.is_empty() {
+            !disabled.contains(&name)
+        } else {
+            mounts
+                .iter()
+                .any(|(id, disabled_in_bundle)| !disabled_in_bundle && !disabled.contains(id))
+        };
         out.push(InstalledPluginInfo {
-            enabled: !disabled_here,
+            enabled,
             registry_id: name.clone(),
             plugin_id: name,
-            version,
+            version: manifest_version(&manifest),
             trust: "unknown".to_string(),
+            linked,
+            manageable: false,
+            display_name: manifest_title(&manifest),
         });
     }
 }
 
-/// The `version` field of a package's `package.json`, for out-of-band
-/// installs that carry no PHL marker. Best effort: a broken or absent
-/// package.json degrades to an empty version, not a dropped plugin.
-async fn package_json_version(pkg_dir: &Path) -> String {
+async fn package_json_manifest(pkg_dir: &Path) -> Option<serde_json::Value> {
     let Ok(raw) = tokio::fs::read_to_string(pkg_dir.join("package.json")).await else {
-        return String::new();
+        return None;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return String::new();
-    };
-    value
+    serde_json::from_str::<serde_json::Value>(&raw).ok()
+}
+
+fn manifest_version(manifest: &serde_json::Value) -> String {
+    manifest
         .get("version")
         .and_then(|v| v.as_str())
+        .map(str::to_owned)
         .unwrap_or_default()
-        .to_string()
+}
+
+fn manifest_title(manifest: &serde_json::Value) -> Option<String> {
+    manifest
+        .pointer("/meta/title")?
+        .as_str()
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn is_dsh_bundle(manifest: &serde_json::Value) -> bool {
+    match manifest.pointer("/dsh/bundle/patch") {
+        Some(serde_json::Value::String(path)) => !path.trim().is_empty(),
+        Some(serde_json::Value::Array(paths)) => paths
+            .iter()
+            .any(|path| path.as_str().is_some_and(|value| !value.trim().is_empty())),
+        _ => false,
+    }
+}
+
+async fn bundle_mounts(package_dir: &Path, manifest: &serde_json::Value) -> Vec<(String, bool)> {
+    let Some(patch) = manifest.pointer("/dsh/bundle/patch") else {
+        return Vec::new();
+    };
+    let files: Vec<&str> = match patch {
+        serde_json::Value::String(path) => vec![path],
+        serde_json::Value::Array(paths) => {
+            paths.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    };
+    let Ok(package_root) = tokio::fs::canonicalize(package_dir).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for file in files {
+        let relative = Path::new(file);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            continue;
+        }
+        let Ok(path) = tokio::fs::canonicalize(package_root.join(relative)).await else {
+            continue;
+        };
+        if !path.starts_with(&package_root) {
+            continue;
+        }
+        let Ok(text) = tokio::fs::read_to_string(path).await else {
+            continue;
+        };
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        out.extend(crate::plugins::cordis::declared_plugin_entries_in(&lines));
+    }
+    out
 }
 
 async fn run_clone(
@@ -1623,6 +1777,80 @@ mod tests {
             .unwrap();
         assert!(scoped.enabled, "a sibling's disabled flag must not leak");
         assert_eq!(scoped.version, "2.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn native_dsh_bundles_are_listed_as_external_read_only_plugins() {
+        let root = temp_root("scan-dsh-bundle");
+        create_instance_inner(root.as_path(), manifest("bundle-0001", "Bundle"))
+            .await
+            .unwrap();
+
+        let profile = root
+            .join("instances")
+            .join("bundle-0001")
+            .join("dsh-home")
+            .join("profiles")
+            .join("default");
+        let modules = profile.join("node_modules");
+        let bundle = "dsh-feiyufm-core";
+        let bundle_dir = modules.join(bundle);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{
+              "dependencies": {"dsh-feiyufm-core": "link:D:/projects/dsh-feiyuFM"},
+              "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-base", "dsh-feiyufm-core"]}}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle_dir.join("package.json"),
+            r#"{
+              "name":"dsh-feiyufm-core",
+              "version":"0.1.0",
+              "meta":{"title":"肥鱼电台 FishFM"},
+              "dsh":{"bundle":{"patch":"./cordis.patch.yml"}}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle_dir.join("cordis.patch.yml"),
+            "- insert:\n    - id: fishfm\n      name: dsh-feiyufm-core\n",
+        )
+        .unwrap();
+        std::fs::write(profile.join("cordis.patch.yml"), "[]\n").unwrap();
+
+        let plugins = scan_plugins(&profile).await;
+        assert_eq!(
+            plugins.len(),
+            1,
+            "only the installed external bundle is listed"
+        );
+        let plugin = &plugins[0];
+        assert_eq!(plugin.plugin_id, bundle);
+        assert_eq!(plugin.registry_id, bundle);
+        assert_eq!(plugin.display_name.as_deref(), Some("肥鱼电台 FishFM"));
+        assert_eq!(plugin.version, "0.1.0");
+        assert!(plugin.enabled);
+        assert!(plugin.linked);
+        assert!(
+            !plugin.manageable,
+            "PHL must not edit a DSH-owned bundle layer"
+        );
+
+        std::fs::write(
+            profile.join("cordis.patch.yml"),
+            "- id: fishfm\n  disabled: true\n",
+        )
+        .unwrap();
+        let disabled = scan_plugins(&profile).await;
+        assert!(
+            !disabled[0].enabled,
+            "a profile override is reflected in the row"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

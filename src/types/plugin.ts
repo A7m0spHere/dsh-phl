@@ -138,6 +138,8 @@ export interface InstalledPlugin {
   pluginId: string
   version: string
   enabled: boolean
+  /** Optional name exported by a DSH bundle's own package.json metadata. */
+  displayName?: string
   /**
    * The id this plugin is registered under in `cordis.patch.yml` — the npm
    * package name, or the repo name for GitHub sources.
@@ -150,6 +152,8 @@ export interface InstalledPlugin {
   registryId?: string
   /** Local, unpublished plugin being developed against this instance. */
   linked?: boolean
+  /** False when PHL only inventories a native DSH bundle; DSH owns its controls. */
+  manageable?: boolean
   /**
    * Install-time trust level, read back from the install record (T-107):
    * `verified` = npm exact version with a matching registry integrity,

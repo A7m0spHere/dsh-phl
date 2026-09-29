@@ -220,7 +220,11 @@ export function InstanceDetailPage({ id }: { id: string }) {
     return instance.plugins.map((installed) => {
       const meta = plugins.find((p) => p.id === installed.pluginId)
       const newest = meta ? latestRelease(meta) : undefined
-      const outdated = !!newest && !installed.linked && newest.version !== installed.version
+      const outdated =
+        installed.manageable !== false &&
+        !!newest &&
+        !installed.linked &&
+        newest.version !== installed.version
       const incompatible =
         !!newest &&
         !!meta &&
@@ -230,7 +234,7 @@ export function InstanceDetailPage({ id }: { id: string }) {
           ?.compatible.includes(instance.versionId)
       return {
         ...installed,
-        name: meta?.name ?? linkedPluginNames[installed.pluginId] ?? installed.pluginId,
+        name: installed.displayName ?? meta?.name ?? linkedPluginNames[installed.pluginId] ?? installed.pluginId,
         official: meta?.official,
         newestVersion: newest?.version,
         outdated,
@@ -846,11 +850,17 @@ export function InstanceDetailPage({ id }: { id: string }) {
                     <span className="num w-14 shrink-0 text-right font-mono text-sm text-ink-faint">
                       {p.version}
                     </span>
-                    <Switch
-                      checked={p.enabled}
-                      onChange={(v) => togglePlugin(p.pluginId, v)}
-                      label={`启用 ${p.name}`}
-                    />
+                    {p.manageable === false ? (
+                      <Tooltip content="该插件由 DSH bundle 层管理；请在 DSH profile 中修改。">
+                        <Badge tone="neutral">DSH bundle</Badge>
+                      </Tooltip>
+                    ) : (
+                      <Switch
+                        checked={p.enabled}
+                        onChange={(v) => togglePlugin(p.pluginId, v)}
+                        label={`启用 ${p.name}`}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>

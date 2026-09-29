@@ -135,10 +135,17 @@ pub(crate) async fn declared_plugin_ids(profile: &Path) -> std::collections::Has
 /// comparison must preserve it instead of normalizing to a set (B03).
 pub(crate) async fn declared_plugin_entries_in_order(profile: &Path) -> Vec<(String, bool)> {
     let lines = read_patch_lines(profile).await;
+    declared_plugin_entries_in(&lines)
+}
+
+/// Parse mount rows from an already-read Cordis patch. Bundle scanners use
+/// the same line parser on package-owned patch files, which can also contain
+/// `!!js` values that a whole-document YAML parse cannot accept.
+pub(crate) fn declared_plugin_entries_in(lines: &[String]) -> Vec<(String, bool)> {
     let mut out = Vec::new();
-    for row in mount_rows(&lines) {
+    for row in mount_rows(lines) {
         for key in ["id", "name"] {
-            if let Some(serde_yaml::Value::String(id)) = row_value(&lines, row.range, key) {
+            if let Some(serde_yaml::Value::String(id)) = row_value(lines, row.range, key) {
                 let disabled =
                     row_value(&lines, row.range, "disabled") == Some(serde_yaml::Value::Bool(true));
                 out.push((id, disabled));

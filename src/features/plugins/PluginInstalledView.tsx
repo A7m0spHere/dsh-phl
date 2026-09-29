@@ -174,8 +174,13 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                         {row.name}
                       </span>
                       {row.linked && <Badge tone="accent">本地链接</Badge>}
+                      {row.manageable === false && (
+                        <Tooltip content="这个 bundle 由 DSH profile 管理；PHL 在这里只显示，不会修改它。">
+                          <Badge tone="neutral">DSH bundle</Badge>
+                        </Tooltip>
+                      )}
                       {row.meta && <SourceBadge plugin={row.meta} />}
-                      {row.trust && row.trust !== 'verified' && (
+                      {row.manageable !== false && row.trust && row.trust !== 'verified' && (
                         <Tooltip content={TRUST_HINT[row.trust]}>
                           <Badge tone={row.trust === 'pinned' ? 'accent' : 'warn'}>
                             {TRUST_LABEL[row.trust]}
@@ -232,6 +237,7 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                     {stage ? (
                       <Badge tone="warn">{STAGE_LABEL[stage] ?? '安装中'}</Badge>
                     ) : (
+                      row.manageable !== false &&
                       row.outdated &&
                       row.newest && (
                         <Button
@@ -246,7 +252,7 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                         </Button>
                       )
                     )}
-                    {!stage && (
+                    {!stage && row.manageable !== false && (
                       <Tooltip content={row.enabled ? '停用' : '启用'}>
                         <Switch
                           checked={row.enabled}
@@ -255,7 +261,7 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                         />
                       </Tooltip>
                     )}
-                    {!stage && !row.linked && confirmUninstall !== row.pluginId && (
+                    {!stage && row.manageable !== false && !row.linked && confirmUninstall !== row.pluginId && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -265,7 +271,7 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                         <Trash2 size={12} />
                       </Button>
                     )}
-                    {confirmUninstall === row.pluginId && (
+                    {row.manageable !== false && confirmUninstall === row.pluginId && (
                       <div className="flex items-center gap-1.5">
                         <Button
                           size="sm"
