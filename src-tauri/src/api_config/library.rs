@@ -87,39 +87,51 @@ fn migrate_stored_keys(
 ///
 /// The store write has to happen before the file commit — a file that names a
 /// key the store does not hold is worse than a stale one — but the previous
-/// value must not be lost when that commit fails. Each entry is the previous
-/// secret, or `None` when the store could not be read and nothing can be put
-/// back. Returns the ids that could not be restored.
+/// value must not be lost when that commit fails. Each entry names a provider
+/// whose old secret cannot be put back, formatted for the user-facing error
+/// (`名称（标识）`: a generated id alone reads like noise when the form just
+/// showed a friendly name). The `bool` says whether any previous value was
+/// unknown because the store refused to be read — on an unsupported or broken
+/// store that is every entry, and the warning must not quietly pass that off
+/// as an overwrite risk.
 fn restore_credentials(
     creds: &dyn CredentialStore,
-    previous: &[(String, Option<Option<String>>)],
-) -> Vec<String> {
+    previous: &[(String, String, Option<Option<String>>)],
+) -> (Vec<String>, bool) {
     let mut failed = Vec::new();
-    for (id, prev) in previous {
+    let mut reads_failed = false;
+    for (id, name, prev) in previous {
         let ok = match prev {
             Some(Some(secret)) => creds.set(id, secret).is_ok(),
             Some(None) => creds.delete(id).is_ok(),
-            None => false,
+            None => {
+                reads_failed = true;
+                false
+            }
         };
         if !ok {
-            failed.push(id.clone());
+            failed.push(format!("{name}（{id}）"));
         }
     }
-    failed
+    (failed, reads_failed)
 }
 
 /// The error text for a save that failed after the store may have been
 /// touched: name the providers whose key is now uncertain, so the user knows
 /// to type it again instead of trusting a message that says nothing changed.
-fn save_failure(what: &str, e: &str, unrestored: &[String]) -> String {
-    if unrestored.is_empty() {
+fn save_failure(what: &str, e: &str, unrestored: &[String], reads_failed: bool) -> String {
+    let mut message = if unrestored.is_empty() {
         format!("{what}，旧配置与凭据保持不变: {e}")
     } else {
         format!(
             "{what}: {e}；以下供应商的密钥可能已被新值覆盖，请重新输入: {}",
             unrestored.join("、")
         )
+    };
+    if reads_failed {
+        message.push_str("；另有旧密钥未能读出，本次保存无法保证其原样恢复");
     }
+    message
 }
 
 #[tauri::command]
@@ -169,7 +181,7 @@ pub(crate) async fn save_api_config_at(
     // and the old file stands. Before the store is touched, remember every
     // secret this save replaces, so a later failure can put them back — the
     // store step runs first, and "nothing changed" has to stay true.
-    let mut previous: Vec<(String, Option<Option<String>>)> = Vec::new();
+    let mut previous: Vec<(String, String, Option<Option<String>>)> = Vec::new();
     for p in &config.providers {
         let typed = p
             .api_key
@@ -177,15 +189,16 @@ pub(crate) async fn save_api_config_at(
             .map(str::trim)
             .is_some_and(|k| !k.is_empty());
         if typed {
-            previous.push((p.id.clone(), creds.get(&p.id).ok()));
+            previous.push((p.id.clone(), p.name.clone(), creds.get(&p.id).ok()));
         }
     }
     if let Err(e) = migrate_stored_keys(&mut config, creds) {
-        let unrestored = restore_credentials(creds, &previous);
+        let (unrestored, reads_failed) = restore_credentials(creds, &previous);
         return Err(save_failure(
             "无法将密钥写入系统凭据管理器，未保存",
             &e,
             &unrestored,
+            reads_failed,
         ));
     }
 
@@ -210,8 +223,13 @@ pub(crate) async fn save_api_config_at(
     }
     .await;
     if let Err(e) = commit {
-        let unrestored = restore_credentials(creds, &previous);
-        return Err(save_failure("API 配置写入失败", &e, &unrestored));
+        let (unrestored, reads_failed) = restore_credentials(creds, &previous);
+        return Err(save_failure(
+            "API 配置写入失败",
+            &e,
+            &unrestored,
+            reads_failed,
+        ));
     }
 
     // Cleanup phase: providers removed from the library take their
@@ -244,11 +262,15 @@ mod tests {
     struct FakeStore {
         ops: Arc<Mutex<Vec<String>>>,
         fail_set: Arc<Mutex<Vec<String>>>,
+        fail_get: Arc<Mutex<Vec<String>>>,
         secrets: Arc<Mutex<HashMap<String, String>>>,
     }
 
     impl CredentialStore for FakeStore {
         fn get(&self, id: &str) -> Result<Option<String>, String> {
+            if self.fail_get.lock().unwrap().iter().any(|f| f == id) {
+                return Err("fake store read refusal".into());
+            }
             Ok(self.secrets.lock().unwrap().get(id).cloned())
         }
         fn set(&self, id: &str, secret: &str) -> Result<(), String> {
@@ -380,6 +402,27 @@ mod tests {
             Some("sk-old"),
             "a failed commit must not leave the new key in the store"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_be_read_owns_up_to_it() {
+        // The pre-Keychain macOS builds hit this path: the stub store refused
+        // every read and write. The old error told the user the keys "可能已被
+        // 新值覆盖" and listed a bare generated id — nothing was in fact
+        // overwritten, and an id is not a name. The error must name providers
+        // by name and state the real reason: old keys could not be read back.
+        let path = temp_path("store-unreadable");
+        let store = FakeStore::default();
+        store.fail_get.lock().unwrap().push("p1".into());
+        store.fail_set.lock().unwrap().push("p1".into());
+        let mut next = config_with(&["p1"]);
+        next.providers[0].name = "deepseek".into();
+        next.providers[0].api_key = Some("sk-x".into());
+        let err = save_api_config_at(&path, &store, next).await.unwrap_err();
+        assert!(err.contains("凭据管理器"), "{err}");
+        assert!(err.contains("deepseek（p1）"), "names, not bare ids: {err}");
+        assert!(err.contains("未能读出"), "states the read failure: {err}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

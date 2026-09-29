@@ -45,11 +45,11 @@ export default {
         knob: withOpacity('--c-knob'),
       },
       borderRadius: {
-        xs: '3px',
+        xs: '4px',
         sm: '5px',
-        DEFAULT: '6px',
+        DEFAULT: '8px',
         md: '6px',
-        lg: '8px',
+        lg: '10px',
         xl: '11px',
       },
       fontFamily: {

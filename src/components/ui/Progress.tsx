@@ -11,7 +11,6 @@ const TONES: Record<ProgressTone, string> = {
   warn: 'bg-warn',
   danger: 'bg-danger',
 }
-
 interface ProgressBarProps {
   /** 0..1. Ignored when `indeterminate`. */
   value?: number
@@ -90,4 +89,3 @@ export function EdgeProgress({
     </div>
   )
 }
-

@@ -10,7 +10,7 @@
 //! legacy directory — see `legacy_major_id` and the conversion commands.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -97,6 +97,14 @@ pub struct NodeRuntimeMeta {
     pub version: String,
     pub codename: Option<String>,
     pub lts: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemNodeInfo {
+    /// The canonical executable path the launch pipeline will use.
+    pub path: String,
+    pub version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,37 +221,25 @@ pub async fn list_installed_runtimes(
     Ok(out)
 }
 
-/// The `node` found on PATH, if any — the "系统 Node" entry runs this binary,
-/// so the version shown must be what would actually execute. Spawned on a
-/// blocking thread: `node --version` is a process launch, not a syscall.
-/// The PATH node's reported version, for environment facts (A08): the
-/// same parse rules as the command below, exposed as a plain async fn.
+/// The system Node version for environment facts (A08). Resolve the absolute
+/// executable through the same lookup used by launch, so Finder-launched apps
+/// do not report a different PATH result from the binary they can actually run.
+/// Resolution probes a process and is kept off the async executor thread.
 pub(crate) async fn probe_system_node_version() -> Option<String> {
-    probe_node_version(&PathBuf::from("node")).await
-}
-
-#[tauri::command]
-pub async fn system_node_version() -> Option<String> {
     tokio::task::spawn_blocking(|| {
-        let mut command = std::process::Command::new("node");
-        command.arg("--version");
-        // A console program opens a console window unless told not to; this
-        // probe runs on every refresh, so it must stay silent.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(crate::launch::CREATE_NO_WINDOW);
-        }
-        let output = command.output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let version = text.strip_prefix('v')?;
-        // Accept only `MAJOR.MINOR.PATCH`; shims and wrappers print other things.
-        let ok = version.split('.').count() == 3
-            && version.chars().all(|c| c.is_ascii_digit() || c == '.');
-        ok.then(|| version.to_string())
+        crate::discovery::inspect::resolve_system_node().map(|(_, version)| version)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+#[tauri::command]
+pub async fn system_node_version() -> Option<SystemNodeInfo> {
+    tokio::task::spawn_blocking(|| {
+        crate::discovery::inspect::resolve_system_node().map(|(path, version)| SystemNodeInfo {
+            path: path.to_string_lossy().into_owned(),
+            version,
+        })
     })
     .await
     .ok()
@@ -649,7 +645,17 @@ mod tests {
         let dest = Path::new("phl").join("runtimes").join("node-22");
         assert!(safe_join(&dest, Path::new("node.exe")).is_ok());
         assert!(safe_join(&dest, Path::new("../evil")).is_err());
-        assert!(safe_join(&dest, Path::new("C:\\evil")).is_err());
+        if cfg!(windows) {
+            // `\` separates here, so `C:\evil` is an absolute escape.
+            assert!(safe_join(&dest, Path::new("C:\\evil")).is_err());
+        } else {
+            // …and on Unix the same string is ONE ordinary (ugly) name, which
+            // must pass: Windows-made archives legitimately carry such member
+            // names, and refusing them would reject the archive, not the bug.
+            assert!(safe_join(&dest, Path::new("C:\\evil")).is_ok());
+        }
+        // What the guard refuses on every platform: an absolute root.
+        assert!(safe_join(&dest, Path::new("/etc/evil")).is_err());
     }
 
     fn rt_task() -> crate::resources::Task {
@@ -774,12 +780,19 @@ mod tests {
     }
 
     /// Seeds `<root>/runtimes/<name>` with a marker recording `version` and a
-    /// runnable node binary copied from the system install.
+    /// runnable system Node. On Unix, keep a link to its installed location:
+    /// Homebrew's Node can depend on a sibling libnode dylib and a bare copy
+    /// would stop running even though the original binary is healthy.
     fn seed_runtime(root: &Path, name: &str, version: &str) {
         let dir = root.join("runtimes").join(name);
-        std::fs::create_dir_all(&dir).unwrap();
+        let node = crate::launch::runtime_bin_dir(root, name).join(crate::launch::node_binary());
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         let (exe, _) = system_node().expect("test requires a runnable system node");
-        std::fs::copy(&exe, dir.join(crate::launch::node_binary())).unwrap();
+        let _ = std::fs::remove_file(&node);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&exe, &node).unwrap();
+        #[cfg(windows)]
+        std::fs::copy(&exe, &node).unwrap();
         let marker = serde_json::json!({
             "installedAt": "2026-01-01T00:00:00Z",
             "version": version,

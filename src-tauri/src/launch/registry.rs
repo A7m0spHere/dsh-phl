@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// Everything an adoption needs to answer "is this pid still *our* DSH, or
 /// has the OS handed the number to someone else since".
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedProcess {
     pub instance_id: String,
@@ -34,25 +34,15 @@ pub struct PersistedProcess {
     pub started_at_ms: i64,
     /// Canonicalized node binary path, for the identity comparison.
     pub exe_path: String,
+    /// macOS birth token; legacy records fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_token: Option<String>,
 }
 
-/// Query failures are not evidence that a process exited.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ProcessState {
-    Alive,
-    Exited,
-    #[default]
-    Unknown,
-}
-
-/// What a pid probe found at adoption time.
-#[derive(Clone, Debug, Default)]
-pub struct Probe {
-    pub state: ProcessState,
-    /// `None` when the query itself failed (protected process, no rights).
-    pub exe_path: Option<String>,
-    pub created_at_ms: Option<i64>,
-}
+/// Query failures are not evidence that a process exited. See `probe.rs` for
+/// the platform implementations; re-exported here so every existing
+/// `registry::…` import (including `launch::mod`'s re-export line) is stable.
+pub(crate) use super::probe::{probe_process, Probe, ProcessState};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Adoption {
@@ -60,13 +50,10 @@ pub enum Adoption {
     Forget { reason: String, keep_running: bool },
 }
 
-/// The ± tolerance between our spawn stamp and the kernel creation time.
-/// Generous enough for a slow first disk, narrow enough to reject a reused
-/// pid (the same exe would have to be relaunched within the window by hand).
+/// Windows process-start tolerance.
 const CREATION_TOLERANCE_MS: i64 = 10 * 60 * 1000;
 
-/// Normalize for comparison: strip the Windows verbatim prefix and case,
-/// unify separators.
+/// Normalize Windows image paths.
 pub(crate) fn normalize_exe(raw: &str) -> String {
     let text = raw
         .strip_prefix(r"\\?\UNC\")
@@ -96,6 +83,18 @@ pub fn decide(rec: &PersistedProcess, probe: &Probe) -> Adoption {
                     reason: "该 PID 已被其他程序复用".into(),
                     keep_running: true,
                 };
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if !super::probe::same_process_start_token(
+                    &rec.process_start_token,
+                    &probe.process_start_token,
+                ) {
+                    return Adoption::Forget {
+                        reason: "PID身份不匹配或缺失".into(),
+                        keep_running: true,
+                    };
+                }
             }
             if let Some(created) = probe.created_at_ms {
                 let delta = (created - rec.started_at_ms).abs();
@@ -344,124 +343,6 @@ impl Registry {
     }
 }
 
-/* ------------------------------ probing ------------------------------ */
-
-/// Is this pid still the same process we recorded? Windows-only identity
-/// query (manual advapi32-style FFI, matching `credentials.rs`; other
-/// platforms report "unknown", which adoption treats as
-/// `keep_running` — forget the record, touch nothing).
-pub(crate) fn probe_process(pid: u32) -> Probe {
-    #[cfg(windows)]
-    {
-        win::probe(pid)
-    }
-    #[cfg(not(windows))]
-    {
-        // A cheap portable approximation: signal 0 probes liveness only.
-        let state = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| {
-                if s.success() {
-                    ProcessState::Alive
-                } else {
-                    ProcessState::Unknown
-                }
-            })
-            .unwrap_or(ProcessState::Unknown);
-        Probe {
-            state,
-            exe_path: None,
-            created_at_ms: None,
-        }
-    }
-}
-
-#[cfg(windows)]
-mod win {
-    use super::{Probe, ProcessState};
-
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const STILL_ACTIVE: u32 = 259;
-
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct FileTime {
-        low: u32,
-        high: u32,
-    }
-
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-        fn GetLastError() -> u32;
-        fn GetExitCodeProcess(handle: *mut core::ffi::c_void, exit_code: *mut u32) -> i32;
-        fn QueryFullProcessImageNameW(
-            handle: *mut core::ffi::c_void,
-            flags: u32,
-            buffer: *mut u16,
-            size: *mut u32,
-        ) -> i32;
-        fn GetProcessTimes(
-            handle: *mut core::ffi::c_void,
-            creation: *mut FileTime,
-            exit: *mut FileTime,
-            kernel: *mut FileTime,
-            user: *mut FileTime,
-        ) -> i32;
-    }
-
-    fn filetime_to_ms(t: FileTime) -> i64 {
-        // 100 ns ticks since 1601-01-01 → ms since the Unix epoch.
-        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
-        let ticks = (((t.high as u64) << 32) | t.low as u64) as i64;
-        (ticks - EPOCH_DIFF_100NS) / 10_000
-    }
-
-    pub fn probe(pid: u32) -> Probe {
-        let mut out = Probe::default();
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                // Invalid pid is proof of absence. Access denied and every
-                // other failure keep the default Unknown state.
-                if GetLastError() == 87 {
-                    out.state = ProcessState::Exited;
-                }
-                return out;
-            }
-            let mut code: u32 = 0;
-            let ok = GetExitCodeProcess(handle, &mut code);
-            if ok == 0 {
-                CloseHandle(handle);
-                return out;
-            }
-            if code != STILL_ACTIVE {
-                out.state = ProcessState::Exited;
-                CloseHandle(handle);
-                return out;
-            }
-            out.state = ProcessState::Alive;
-            let mut buf = [0u16; 32768];
-            let mut size = buf.len() as u32;
-            if QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) != 0 {
-                out.exe_path = Some(String::from_utf16_lossy(&buf[..size as usize]));
-            }
-            let mut creation = FileTime::default();
-            let mut exit = FileTime::default();
-            let mut kernel = FileTime::default();
-            let mut user = FileTime::default();
-            if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
-                out.created_at_ms = Some(filetime_to_ms(creation));
-            }
-            CloseHandle(handle);
-        }
-        out
-    }
-}
-
 /* ------------------------------ tests ------------------------------ */
 
 #[cfg(test)]
@@ -486,6 +367,7 @@ mod tests {
             port: 3080,
             started_at_ms: 1_700_000_000_000,
             exe_path: r"C:\PHL\runtimes\node-22\node.exe".into(),
+            process_start_token: Some("test".into()),
         }
     }
 
@@ -493,6 +375,7 @@ mod tests {
         Probe {
             state: ProcessState::Alive,
             exe_path: exe.map(str::to_string),
+            process_start_token: exe.map(|_| "test".into()),
             created_at_ms: created,
         }
     }
@@ -654,6 +537,7 @@ mod tests {
                         port: 3000,
                         started_at_ms: 0,
                         exe_path: "x".into(),
+                        ..Default::default()
                     });
                     r.forget(&id);
                 }
@@ -699,6 +583,7 @@ mod tests {
                         port: 3000,
                         started_at_ms: 0,
                         exe_path: "x".into(),
+                        ..Default::default()
                     });
                 }
             }));
@@ -745,6 +630,7 @@ mod tests {
             port: 3000,
             started_at_ms: 0,
             exe_path: "x".into(),
+            ..Default::default()
         });
 
         // A commits again — must keep B's "other" row on disk.
@@ -754,6 +640,7 @@ mod tests {
             port: 3001,
             started_at_ms: 0,
             exe_path: "x".into(),
+            ..Default::default()
         });
 
         let reloaded = Registry::default();

@@ -568,6 +568,7 @@ async fn f4_late_exiting_child_keeps_registration_until_confirmed() {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
             exe_path: node.exe.to_string_lossy().into_owned(),
+            process_start_token: None,
         });
 
         // Non-forced kill: the stub ignores the signal and stays alive.

@@ -63,6 +63,8 @@ export interface Runtime {
   size: number
   /** Discovered on PATH rather than installed by PHL. */
   system?: boolean
+  /** Canonical executable path for the discovered system Node. */
+  path?: string
   /**
    * True for legacy install directories named `node-<major>`: they predate
    * precise bindings. Such rows still launch, and an instance bound to one

@@ -6,7 +6,28 @@ const day = (n: number) => {
   return d.toISOString()
 }
 
+/**
+ * Newest first, which is the order `list_dsh_versions` returns (it sorts by
+ * semver). The pages reshuffle for display, but the create wizard's fallback
+ * default reads this array in order — so a hand-edited seed has to keep the
+ * real catalog's shape or the preview silently preselects an older version.
+ */
 export const versionSeed: DshVersion[] = [
+  {
+    id: 'dsh-0.2.0-nightly.0831',
+    name: '0.2.0-nightly.0831',
+    channel: 'nightly',
+    releasedAt: day(0),
+    size: 49_880_000,
+    requiresNode: [24],
+    // The badge marks the highest version in the catalog whatever its channel
+    // (versions::catalog::mark_latest), so in a newest-first list it always
+    // sits on the first row. The channel badges (Nightly / Alpha) are what
+    // tell the channels apart.
+    latest: true,
+    notes: ['每日构建，接口可能随时变化'],
+    state: { kind: 'available' },
+  },
   {
     // Mirrors a real situation: GitHub cut the tag, npm hasn't published the
     // package yet. In the browser preview there is no agent to hand the build
@@ -78,16 +99,6 @@ export const versionSeed: DshVersion[] = [
     requiresNode: [18, 20],
     legacy: true,
     notes: ['旧版 Profile 结构'],
-    state: { kind: 'available' },
-  },
-  {
-    id: 'dsh-0.2.0-nightly.0831',
-    name: '0.2.0-nightly.0831',
-    channel: 'nightly',
-    releasedAt: day(0),
-    size: 49_880_000,
-    requiresNode: [24],
-    notes: ['每日构建，接口可能随时变化'],
     state: { kind: 'available' },
   },
   {
