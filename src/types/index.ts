@@ -1,5 +1,6 @@
 export * from './apiConfig'
 export * from './instance'
+export * from './officialDesktop'
 export * from './version'
 export * from './runtime'
 export * from './plugin'

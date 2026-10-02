@@ -233,3 +233,64 @@ fn task_registry_wire_shape_is_stable() {
     );
     assert_eq!(value["state"], "running");
 }
+
+/// Mirrors `OfficialDesktopInfo` in `src/types/officialDesktop.ts`: the
+/// 「官方桌面端」 card's live snapshot. The optional fields are the
+/// fail-closed channel — a `null` must survive the wire as `null` (`unknown`),
+/// never become a default that pretends "not running".
+#[test]
+fn official_desktop_wire_shape_is_stable() {
+    let info = crate::official::OfficialDesktopInfo {
+        status: crate::official::OfficialDesktopStatus::Installed,
+        root: Some("D:/dsh".into()),
+        main_exe: Some("D:/dsh/DeepSeek Harness.exe".into()),
+        version: Some("0.2.0-rc.2".into()),
+        running: Some(true),
+        pid: Some(42),
+    };
+    let value = serde_json::to_value(&info).expect("serialize");
+    assert_eq!(
+        keys(&value),
+        set(&["status", "root", "mainExe", "version", "running", "pid"]),
+        "OfficialDesktopInfo drifted from the TS mirror"
+    );
+    assert_eq!(value["status"], "installed");
+    assert_eq!(value["mainExe"], "D:/dsh/DeepSeek Harness.exe");
+    for key in keys(&value) {
+        assert!(!key.contains('_'), "non-camelCase field on the wire: {key}");
+    }
+
+    // The fail-closed statuses and outcomes, spelled the way the TS union
+    // expects.
+    for (variant, wire) in [
+        (
+            crate::official::OfficialDesktopStatus::NotInstalled,
+            "not_installed",
+        ),
+        (
+            crate::official::OfficialDesktopStatus::Unsupported,
+            "unsupported",
+        ),
+        (crate::official::OfficialDesktopStatus::Unknown, "unknown"),
+    ] {
+        let value = serde_json::to_value(crate::official::OfficialDesktopInfo {
+            status: variant,
+            root: None,
+            main_exe: None,
+            version: None,
+            running: None,
+            pid: None,
+        })
+        .expect("serialize");
+        assert_eq!(value["status"], wire);
+        assert_eq!(value["running"], Value::Null, "absent probe stays absent");
+    }
+    assert_eq!(
+        serde_json::to_value(crate::official::QuitOutcome::Exited).unwrap(),
+        json!("exited")
+    );
+    assert_eq!(
+        serde_json::to_value(crate::official::QuitOutcome::StillRunning).unwrap(),
+        json!("still_running")
+    );
+}

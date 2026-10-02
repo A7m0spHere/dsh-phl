@@ -5,6 +5,7 @@ import type {
   InstanceDraft,
   InstanceTemplate,
   LaunchPhase,
+  OfficialDesktopInfo,
   Plugin,
   Runtime,
   Snapshot,
@@ -354,4 +355,32 @@ export interface PhlRepository {
    * updates tab without hammering npm for the whole catalog.
    */
   latestPluginVersion(plugin: Plugin): Promise<string | null>
+
+  /**
+   * The official DeepSeek Harness desktop app, seen as a machine singleton
+   * PHL helps operate (planning input 2026-09-29 §8): one install per
+   * machine, owned by its own installer/updater. Read-only operations on the
+   * user's real daily environment — nothing is written, nothing cached.
+   *
+   * `null` means the repository has no official-desktop support (browser
+   * mode): the card shows a desktop-only notice instead of pretending. A
+   * live probe failure arrives as a status `unknown` info, not `null` —
+   * "cannot determine" and "no such feature" must stay distinguishable.
+   */
+  officialDesktop(): Promise<OfficialDesktopInfo | null>
+
+  /**
+   * Launches the official app detached, untouched (no env injection, no
+   * flags). Rejects with a readable reason — not installed / already
+   * running / spawn failure — rather than resolving as a no-op.
+   */
+  launchOfficialDesktop(): Promise<void>
+
+  /**
+   * Asks the official app to quit. `force=false` sends the polite request
+   * (WM_CLOSE / SIGTERM) and waits out the app's own quit-inspection;
+   * `still_running` hands the decision to the user, who confirms before
+   * `force=true` ends it hard.
+   */
+  quitOfficialDesktop(force: boolean): Promise<'exited' | 'still_running'>
 }

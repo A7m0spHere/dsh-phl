@@ -11,6 +11,7 @@ import type {
   InstanceDraft,
   InstanceTemplate,
   LaunchPhase,
+  OfficialDesktopInfo,
   Plugin,
   PluginTrust,
   Runtime,
@@ -652,6 +653,23 @@ class MockRepository implements PhlRepository {
     // bridge returns null for them too.
     if (plugin.source.kind !== 'npm') return null
     return plugin.releases[0]?.version ?? null
+  }
+
+  /**
+   * The official desktop singleton is a desktop-only surface: no mock data.
+   * Browser mode may degrade features but must never pretend they ran —
+   * `null` reads as 「浏览器模式」 on the card, and the actions reject.
+   */
+  async officialDesktop(): Promise<OfficialDesktopInfo | null> {
+    return null
+  }
+
+  async launchOfficialDesktop(): Promise<void> {
+    throw new Error('官方桌面端管理仅在桌面应用内可用')
+  }
+
+  async quitOfficialDesktop(_force: boolean): Promise<'exited' | 'still_running'> {
+    throw new Error('官方桌面端管理仅在桌面应用内可用')
   }
 }
 

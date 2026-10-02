@@ -11,6 +11,7 @@ mod environment;
 mod errors;
 mod instances;
 mod launch;
+mod official;
 mod operations;
 mod pack;
 mod paths;
@@ -280,6 +281,9 @@ macro_rules! phl_command_handler {
             discovery::discover_dsh,
             discovery::inspect_dsh_home,
             discovery::inspect_dsh_executable,
+            official::inspect_official_desktop,
+            official::launch_official_desktop,
+            official::quit_official_desktop,
             sessions::list_sessions,
             sessions::inspect_session,
             sessions::copy_session,

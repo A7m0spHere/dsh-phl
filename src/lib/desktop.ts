@@ -391,3 +391,15 @@ export {
 // §M2: generic shell helpers (folder picker lives with the dialogs above, the
 // reveal + open helpers here) moved to `desktopShell.ts`.
 export { revealPath, openExternal } from './desktopShell'
+
+/* ------------------------- official desktop singleton ------------------- */
+
+// The official DeepSeek Harness desktop app as a machine singleton PHL helps
+// operate (planning input 2026-09-29 §8): discover / launch / quit. Nothing
+// is cached — the official app self-updates on the nightly channel.
+export {
+  inspectOfficialDesktop,
+  launchOfficialDesktop,
+  quitOfficialDesktop,
+} from './desktopOfficial'
+export type { OfficialDesktopInfo, OfficialDesktopQuitOutcome } from './desktopOfficial'

@@ -34,6 +34,7 @@ import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/co
 import { InstanceCard } from '@/components/instance/InstanceCard'
 import { InstanceWelcome } from '@/components/instance/InstanceWelcome'
 import { LaunchDock } from '@/components/instance/LaunchDock'
+import { OfficialDesktopCard } from '@/components/instance/OfficialDesktopCard'
 
 /* ------------------------------------------------------------------ *
  * context panel
@@ -306,6 +307,7 @@ export function InstancesPage() {
             </>
           ) : undefined}
         >
+          <OfficialDesktopCard />
           {!loaded ? (
             <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
               {[0, 1, 2, 3].map((i) => (
