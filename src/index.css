@@ -353,8 +353,14 @@
  * 「卡片」于是渲染成一整行宽的长条（和列表毫无差别）。容器查询让
  * 同一个网格在 125% 缩放的小窗口里也是真卡片；WebView2 (Chromium 105+)
  * 与 WKWebView (Safari 16+) 原生支持，无需插件。
- * 阈值按卡片可用最小宽度选取：2 列 ≥640px（每列 ≥312），
- * 3 列 ≥900px（每列 ≥292），4 列 ≥1140px（每列 ≥278，版面上限 1200）。
+ *
+ * 阈值按卡片可用最小宽度选取（实测最窄 230px 仍是单行控件、无横向溢出；
+ * 低于 ~220px 控件行才换行，卡片高 99→127px）：
+ * 2 列 ≥480px、3 列 ≥900px、4 列 ≥1140px（版面上限 1200）。
+ * 2 列的 480 覆盖了三个实测下限里最紧的一个——应用内缩放 125% 叠加
+ * 窗口最小宽度 780px 时内容区只有 493px（缩放用 zoom 实现，会一起缩小
+ * 有效 CSS 宽度）；阈值取 520 会让这个组合退回单列。此时卡片约 241px，
+ * 仍在单行控件范围内。
  * ------------------------------------------------------------------ */
 .inst-grid-scope {
   container-type: inline-size;
@@ -367,7 +373,7 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-@container (min-width: 640px) {
+@container (min-width: 480px) {
   .inst-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -382,6 +388,30 @@
 @container (min-width: 1140px) {
   .inst-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Fallback for an engine without container queries: without it the rules
+   above never match and every card stays full width — the long-bar bug this
+   block exists to fix, silently restored. These are the viewport breakpoints
+   the grid used before the container query, kept only for that case.
+   (WebView2 and WKWebView both support container queries today; this is the
+   guard for an older engine, not the normal path.) */
+@supports not (container-type: inline-size) {
+  @media (min-width: 1024px) {
+    .inst-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (min-width: 1280px) {
+    .inst-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+  @media (min-width: 1536px) {
+    .inst-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
   }
 }
 
