@@ -3,7 +3,10 @@
 </p>
 
 <p align="center">
-  <strong>Windows 10 / 11 · x64</strong> &nbsp; / &nbsp; Alpha 预览 &nbsp; / &nbsp; MIT 开源
+  <a href="https://github.com/A7m0spHere/dsh-phl/releases"><img src="https://img.shields.io/github/v/release/A7m0spHere/dsh-phl?include_prereleases&sort=semver&label=release" alt="最新版本（预览版）"></a>
+  <a href="https://github.com/A7m0spHere/dsh-phl/actions/workflows/ci.yml"><img src="https://github.com/A7m0spHere/dsh-phl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64%20%7C%20macOS%20Apple%20Silicon-informational" alt="Windows 10/11 x64 与 macOS（Apple Silicon）">
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/A7m0spHere/dsh-phl" alt="MIT 开源"></a>
 </p>
 
 <p align="center">
@@ -100,7 +103,7 @@ Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 
 前端使用 **React 18 · TypeScript · Vite 6**，桌面端使用 **Tauri 2 · Rust**。
 
-Windows 开发需准备 **Node.js 22（与 CI 一致）、Rust stable / MSVC、Visual Studio C++ Build Tools 的「使用 C++ 的桌面开发」工作负载，以及 WebView2**。
+Windows 开发需准备 **Node.js 22（与 CI 一致）、Rust stable / MSVC、Visual Studio C++ Build Tools 的「使用 C++ 的桌面开发」工作负载，以及 WebView2**；macOS（Apple Silicon）需 **Node.js 22、Rust stable 与 Xcode 命令行工具**。
 
 ```bash
 git clone https://github.com/A7m0spHere/dsh-phl.git
@@ -117,9 +120,10 @@ npm run app:dev
 | `npm run app:dev` | 启动桌面应用，连接真实 Rust 后端 |
 | `npm run app:build:dev` | 构建可直接运行的调试版，不生成安装包 |
 | `npm run app:build` | 构建 Windows 应用与 NSIS 安装包 |
+| `npm run app:build:mac` | 构建 macOS 应用与 DMG（显式 `--bundles`） |
 | `npm run icon` | 从仓库内母版生成应用图标 |
 
-调试版输出到 `src-tauri/target/debug/dsh-phl.exe`；安装包输出到 `src-tauri/target/release/bundle/nsis/`，也可双击 [`build-app.cmd`](./build-app.cmd) 构建并打开产物目录。浏览器预览不执行真实桌面操作。
+调试版输出到 `src-tauri/target/debug/dsh-phl.exe`；Windows 安装包输出到 `src-tauri/target/release/bundle/nsis/`，macOS 产物在 `bundle/dmg/` 与 `bundle/macos/`，也可双击 [`build-app.cmd`](./build-app.cmd) 构建并打开产物目录。浏览器预览不执行真实桌面操作。
 
 <details>
 <summary>开发检查与代码导航</summary>
