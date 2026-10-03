@@ -21,6 +21,14 @@
  * ever touches budgets for files that already exist; it never registers new
  * paths (rule B's job) and never lowers a manual budget below what you set
  * for anything already inside 10% (so an intentional tight budget survives).
+ *
+ * Sizes are the COMMITTED bytes: CRLF is normalised to LF before measuring.
+ * This repository has no .gitattributes, so a Windows checkout with
+ * `core.autocrlf=true` materialises one extra byte per line; measuring the
+ * working tree raw made every CRLF file look ~1 byte/line bigger than the same
+ * file on `ubuntu-latest` (where this script actually gates CI), so the gate
+ * went red locally and green in CI. Normalising first makes both agree, and
+ * leaves CI numbers byte-identical because LF files have no CRLF to strip.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -46,6 +54,20 @@ function walk(dir, out) {
   }
 }
 
+/**
+ * Size of a source file in the unit the budgets were registered in: bytes as
+ * committed, i.e. every CRLF pair counted as one byte. Reading each candidate
+ * is the cost of platform-independent numbers; this tree is a few megabytes.
+ */
+function sourceBytes(abs) {
+  const buf = fs.readFileSync(abs)
+  let crlf = 0
+  for (let i = 0; i + 1 < buf.length; i += 1) {
+    if (buf[i] === 13 && buf[i + 1] === 10) crlf += 1
+  }
+  return buf.length - crlf
+}
+
 const budgetDoc = JSON.parse(fs.readFileSync(budgetPath, 'utf8'))
 const budgets = budgetDoc.budgets
 
@@ -56,7 +78,7 @@ if (UPDATE) {
   for (const [rel, cap] of Object.entries(budgets)) {
     const abs = path.join(repoRoot, rel)
     if (!fs.existsSync(abs)) continue
-    const size = fs.statSync(abs).size
+    const size = sourceBytes(abs)
     if (size < cap * SHRINK_HINT) {
       budgets[rel] = Math.ceil(size * 1.05)
       changed += 1
@@ -93,7 +115,7 @@ for (const rel of Object.keys(budgets)) {
     missing.push(rel)
     continue
   }
-  const size = fs.statSync(abs).size
+  const size = sourceBytes(abs)
   now.set(rel, size)
   const cap = budgets[rel]
   if (size > cap) violations.push({ rel, size, cap })
@@ -109,7 +131,7 @@ for (const root of WALK_ROOTS) {
   for (const f of files) {
     const rel = path.relative(repoRoot, f).split(path.sep).join('/')
     if (budgets[rel] !== undefined) continue
-    const size = fs.statSync(f).size
+    const size = sourceBytes(f)
     if (size >= UNBUDGETED_MAX) unregistered.push({ rel, size })
   }
 }
