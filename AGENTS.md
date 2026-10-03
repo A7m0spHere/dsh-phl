@@ -119,6 +119,12 @@ macOS 开发链路（2026-09-16 起）：
 
 TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确保 `npm run typecheck` 通过。
 
+## 提交约定
+
+提交信息（标题与正文）一律用中文（2026-10-03 起）：`type(scope)` 前缀、提交哈希、
+文件路径、代码标识符与约定俗成的英文技术名词保持原样，不必翻译。适用于工作区与
+发布副本两条历史，`sync(public)` 镜像提交的描述同样用中文。
+
 ## 文档分工（O-15）
 
 - `AGENTS.md`（本文件）是开发约定的唯一权威来源；仓库根目录的 `CLAUDE.md` 只是指向它的兼容入口，
