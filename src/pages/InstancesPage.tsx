@@ -261,6 +261,8 @@ export function InstancesPage() {
         <PageShell
           title="实例"
           subtitle="管理独立的 DSH 环境，让不同版本与配置并行工作。"
+          // 卡片网格页：比默认数据宽度更宽，最大化窗口下 3–4 列方片才摆得开。
+          maxWidth={1200}
           actions={
             <>
               <Menu
@@ -308,50 +310,52 @@ export function InstancesPage() {
           ) : undefined}
         >
           <OfficialDesktopCard />
-          {!loaded ? (
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
-              {[0, 1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-[104px]" />
-              ))}
-            </div>
-          ) : instances.length === 0 ? (
-            <InstanceWelcome />
-          ) : visible.length === 0 ? (
-            <EmptyState
-              icon={<Boxes size={20} />}
-              title="没有匹配的实例"
-              description="试试其他关键词，或清除搜索与筛选条件。"
-              action={
-                <Button variant="secondary" onClick={() => {
-                  setQuery('')
-                  setFilter('all')
-                }}>
-                  显示全部实例
-                </Button>
-              }
-            />
-          ) : (
-            <motion.div
-              variants={stagger()}
-              initial="hidden"
-              animate="show"
-              className={
-                layout === 'grid' ? 'grid grid-cols-1 gap-2.5 lg:grid-cols-2 2xl:grid-cols-3' : 'flex flex-col gap-1.5'
-              }
-            >
-              {/* `sync`, not `popLayout`: popLayout lifts an exiting card out of
-                  flow (position:absolute) while it animates out, and an
-                  interrupted exit — e.g. tab-switching mid-animation — strands
-                  that full-size ghost over the grid, swallowing every click on
-                  the instances page. sync cross-fades in flow with no floating
-                  node. */}
-              <AnimatePresence mode="sync">
-                {visible.map((instance) => (
-                  <InstanceCard key={instance.id} instance={instance} layout={layout} />
+          {/* 列数由 .inst-grid 的容器查询决定（见 index.css）：内容区够宽
+              才加列，125% DPI 小窗口也能排出真正的卡片。 */}
+          <div className="inst-grid-scope">
+            {!loaded ? (
+              <div className="inst-grid">
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton key={i} className="h-[104px]" />
                 ))}
-              </AnimatePresence>
-            </motion.div>
-          )}
+              </div>
+            ) : instances.length === 0 ? (
+              <InstanceWelcome />
+            ) : visible.length === 0 ? (
+              <EmptyState
+                icon={<Boxes size={20} />}
+                title="没有匹配的实例"
+                description="试试其他关键词，或清除搜索与筛选条件。"
+                action={
+                  <Button variant="secondary" onClick={() => {
+                    setQuery('')
+                    setFilter('all')
+                  }}>
+                    显示全部实例
+                  </Button>
+                }
+              />
+            ) : (
+              <motion.div
+                variants={stagger()}
+                initial="hidden"
+                animate="show"
+                className={layout === 'grid' ? 'inst-grid' : 'flex flex-col gap-1.5'}
+              >
+                {/* `sync`, not `popLayout`: popLayout lifts an exiting card out of
+                    flow (position:absolute) while it animates out, and an
+                    interrupted exit — e.g. tab-switching mid-animation — strands
+                    that full-size ghost over the grid, swallowing every click on
+                    the instances page. sync cross-fades in flow with no floating
+                    node. */}
+                <AnimatePresence mode="sync">
+                  {visible.map((instance) => (
+                    <InstanceCard key={instance.id} instance={instance} layout={layout} />
+                  ))}
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </div>
         </PageShell>
       </div>
       {showDock && loaded && <LaunchDock />}

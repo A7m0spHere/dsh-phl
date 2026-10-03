@@ -346,6 +346,45 @@
   --d-sheen: 358ms;
 }
 
+/* ------------------------------------------------------------------ *
+ * 实例页卡片网格：列数跟随内容区实际宽度（容器查询），不跟随窗口。
+ * 视口断点在这里是错的：侧栏固定占掉一块，且 125% 系统 DPI 下一个
+ * ~1250px 的窗口只有 ~1000px CSS 宽度——低于 lg 断点，网格永远单列，
+ * 「卡片」于是渲染成一整行宽的长条（和列表毫无差别）。容器查询让
+ * 同一个网格在 125% 缩放的小窗口里也是真卡片；WebView2 (Chromium 105+)
+ * 与 WKWebView (Safari 16+) 原生支持，无需插件。
+ * 阈值按卡片可用最小宽度选取：2 列 ≥640px（每列 ≥312），
+ * 3 列 ≥900px（每列 ≥292），4 列 ≥1140px（每列 ≥278，版面上限 1200）。
+ * ------------------------------------------------------------------ */
+.inst-grid-scope {
+  container-type: inline-size;
+  width: 100%;
+}
+
+.inst-grid {
+  display: grid;
+  gap: 0.625rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 640px) {
+  .inst-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 900px) {
+  .inst-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 1140px) {
+  .inst-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 /* The in-app "动画：关闭" (uiStore.setMotion → data-motion="off") neutralises
    every CSS animation and transition — not just the Framer Motion tree — so a
    user who asked for no movement never sees one. Scoped to the root attribute

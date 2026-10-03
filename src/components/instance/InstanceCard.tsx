@@ -209,11 +209,15 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           </span>
         ) : (
         <div
-          className={cn('flex shrink-0 items-center gap-1', layout === 'grid' && 'w-full border-t border-line pt-2')}
+          className={cn(
+            'flex shrink-0 items-center gap-1',
+            // flex-wrap：窄卡片叠加错误徽章时让图标换行，而不是被 overflow-hidden 裁掉。
+            layout === 'grid' && 'w-full flex-wrap border-t border-line pt-2',
+          )}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          <StatusPill status={status} startedAt={state.startedAt} showClock={layout === 'list'} />
+          <StatusPill status={status} startedAt={state.startedAt} showClock />
 
           {/* A crash's toast is gone in seconds; the fact should outlive it
               until the next launch replaces the runtime state. */}

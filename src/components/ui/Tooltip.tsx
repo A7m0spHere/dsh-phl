@@ -29,6 +29,19 @@ import {
 /** Marker consumed by the focus path; exported for callers that must undo it. */
 export const SUPPRESS_FOCUS_ATTR = 'data-tooltip-suppress-focus'
 
+// Timestamp of the last window activation. Chromium re-dispatches the focused
+// element's `focus` event when the window is re-activated (alt-tab back into
+// the app): that restore carries no keyboard intent, and the pointer is
+// wherever the user left it — arming a hint there used to pin the bubble on
+// screen with nothing left to dismiss it. A real keyboard Tab always lands
+// well past this window, so it stays the only focus that may arm a hint.
+let windowFocusedAt = -Infinity
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', () => {
+    windowFocusedAt = performance.now()
+  })
+}
+
 /**
  * Mark a programmatic focus so the Tooltip wrapping this element skips its
  * next focus-driven arm. Menu hands focus back to its trigger on close — a
@@ -165,6 +178,7 @@ export function Tooltip({
   useEffect(() => {
     if (!open) return
     const close = () => setOpen(false)
+    const anchorEl = anchorRef.current
     // Only a scroll that actually MOVES the trigger detaches the bubble:
     // pages re-clamp their scroll position while async content settles (the
     // create wizard's readiness banner, list refills) and that fires a scroll
@@ -176,11 +190,24 @@ export function Tooltip({
       const r = anchorRef.current?.getBoundingClientRect()
       if (!r || Math.abs(r.top - anchorTop) > 1 || Math.abs(r.left - anchorLeft) > 1) close()
     }
+    // Two window-level nets for a bubble whose audience is gone. Alt-tabbing
+    // away blurs the window without moving focus or the pointer; and a
+    // trigger that reflows out from under a stationary pointer fires no
+    // mouseleave until the pointer next moves — the next move may land
+    // anywhere, and if it is not on this trigger the hint has no reader.
+    const onWindowBlur = () => close()
+    const onPointerMove = (e: PointerEvent) => {
+      if (anchorEl && e.target instanceof Node && !anchorEl.contains(e.target)) close()
+    }
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', close)
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('pointermove', onPointerMove)
     return () => {
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', close)
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('pointermove', onPointerMove)
     }
   }, [open])
 
@@ -249,6 +276,15 @@ export function Tooltip({
           return
         }
         if (hovering.current) return
+        // The window-reactivation focus restore (see `windowFocusedAt`) is
+        // never a hint request.
+        if (performance.now() - windowFocusedAt < 150) return
+        // Only a keyboard-shaped focus (focus-visible) is a hint request. A
+        // mouse click also focuses the trigger, and Chromium re-dispatches
+        // that focus when the window is re-activated — arming here would
+        // reopen the bubble 420ms later with the pointer in another window,
+        // where no mouseleave or blur ever dismisses it.
+        if (!(e.target as Element | null)?.matches?.(':focus-visible')) return
         show()
       }}
       onBlur={hide}
