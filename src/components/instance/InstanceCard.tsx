@@ -110,7 +110,7 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
         style={{ background: tone.solid, transform: running || focused ? 'scaleY(1)' : undefined }}
       />
 
-      <div className={cn('flex gap-2.5', layout === 'grid' ? 'flex-wrap items-start' : 'items-center')}>
+      <div className={cn('flex gap-2', layout === 'grid' ? 'flex-wrap items-start' : 'items-center')}>
         <InstanceTile
           name={instance.name}
           hue={instance.hue}
@@ -124,6 +124,14 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
             <h3 className="truncate text-md font-medium leading-4 text-ink">{instance.name}</h3>
             {instance.favorite && (
               <Star size={10} className="shrink-0 fill-warn text-warn" aria-label="已置顶" />
+            )}
+            {/* Grid cards lead with status on the title row: it is the fact the
+                eye looks for first, and it used to sit one row lower beside
+                the buttons while the port and time took a row of their own. */}
+            {layout === 'grid' && (
+              <span className="ml-auto shrink-0">
+                <StatusPill status={status} startedAt={state.startedAt} showClock />
+              </span>
             )}
           </div>
 
@@ -217,7 +225,23 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          <StatusPill status={status} startedAt={state.startedAt} showClock />
+          {/* Grid only: the port and the last run share the control row instead
+              of a fourth row of their own. Status is up on the title row, so
+              the pill here would be a duplicate. */}
+          {layout === 'grid' && (
+            <span className="flex min-w-0 items-center gap-1.5 text-sm text-ink-faint">
+              <Tooltip content={instance.autoPort ? `端口 ${instance.port}（自动分配）` : `端口 ${instance.port}`}>
+                <Chip>:{instance.port}</Chip>
+              </Tooltip>
+              <span className="truncate">{formatRelative(instance.lastRunAt)}</span>
+            </span>
+          )}
+
+          {/* Grid shows the pill up on the title row; the list keeps it here,
+              inline with the port and time it sits beside. */}
+          {layout === 'list' && (
+            <StatusPill status={status} startedAt={state.startedAt} showClock />
+          )}
 
           {/* A crash's toast is gone in seconds; the fact should outlive it
               until the next launch replaces the runtime state. */}
@@ -299,15 +323,6 @@ export const InstanceCard = memo(function InstanceCard({ instance, layout = 'gri
         </div>
         )}
       </div>
-
-      {/* Secondary row only exists in the grid layout, where there is room. */}
-      {layout === 'grid' && (
-        <div className="mt-2 flex items-center gap-2 text-sm text-ink-faint">
-          <Chip>:{instance.port}</Chip>
-          {instance.autoPort && <span className="text-2xs text-ink-faint">自动分配</span>}
-          <span className="ml-auto truncate">{formatRelative(instance.lastRunAt)}</span>
-        </div>
-      )}
 
       <AnimatePresence>
         {busy && (
