@@ -4,7 +4,7 @@
 //! A restore replaces the home's plugins and configuration. Conversation
 //! data — the live home's `sessions/` and `attachments/` — is kept: the
 //! staged copy leaves the snapshot's own copies out (`SkipRule::Restore`)
-//! and the live directories move in before the swap. The snapshot itself
+//! and copies of the live directories join it before the swap. The snapshot itself
 //! still holds the full home, so its sessions stay reachable by hand for
 //! disaster recovery. The snapshot records which DSH version and Runtime
 //! the instance referenced, but the instance keeps its current binding:
@@ -30,6 +30,8 @@ use super::{
 use crate::launch::Processes;
 use crate::paths::{ensure_under_root, PhlState};
 use crate::versions::{now_iso, Transfers};
+
+mod restore;
 
 /* ------------------------------ snapshots ----------------------------- */
 
@@ -148,42 +150,59 @@ pub async fn create_instance_snapshot(
     result
 }
 
-/// Undo the debris of an interrupted restore.
-///
-/// The swap renames the live home aside before the restored copy is placed, so
-/// a crash between the two leaves the instance with *no* home and the only
-/// copy under a hidden name; a crash after the swap leaves a stale backup. Both
-/// are repaired here rather than refused, because the alternative is telling
-/// the user their data is gone. Safe to call when there is nothing to do.
+/// Recover only under the instance lock, before startup listing or launch
+/// can observe a half-swapped home. Ambiguous state is preserved and reported.
 pub(crate) async fn recover_interrupted_restore(
     dir: &Path,
     manifest: &InstanceManifest,
 ) -> Result<(), String> {
-    let current = home_of(dir, manifest);
-    let backup = dir.join(".phl-old-dsh-home");
-    let staging = dir.join(".phl-restore");
-    if !backup.exists() {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Ok(());
-    }
-    if current.exists() {
-        // The swap finished; only the cleanup was interrupted.
-        let _ = tokio::fs::remove_dir_all(&backup).await;
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Ok(());
-    }
-    tokio::fs::rename(&backup, &current).await.map_err(|e| {
-        format!(
-            "检测到中断的快照还原，但无法把 {} 放回 {}：{e}",
-            backup.display(),
-            current.display()
+    restore::recover(dir, manifest).await
+}
+
+pub(crate) async fn has_pending_restore(dir: &Path) -> Result<bool, String> {
+    restore::pending(dir).await
+}
+
+pub(crate) async fn recover_pending_restores(
+    root: &Path,
+    processes: &Processes,
+    registry: &crate::launch::Registry,
+    locks: &crate::resources::ResourceLocks,
+) -> Result<(), String> {
+    let mut entries = match tokio::fs::read_dir(instances_root(root)).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if crate::paths::is_hidden_tree_name(&name)
+            || !entry.file_type().await.map_err(|e| e.to_string())?.is_dir()
+        {
+            continue;
+        }
+        let Ok(id) = sanitize_segment(&name, "实例 id") else {
+            continue; // Unrelated/orphan directories are not restore targets.
+        };
+        let Ok(_held) = locks.acquire(&[crate::resources::Resource::Instance(id.clone())]) else {
+            continue; // An active restore owns its staging directory.
+        };
+        if !has_pending_restore(&entry.path()).await? {
+            continue;
+        }
+        if crate::launch::ensure_launch_available(
+            processes,
+            registry,
+            &id,
+            crate::launch::probe_process,
         )
-    })?;
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    eprintln!(
-        "[phl] 已回滚中断的快照还原，{} 已放回原位",
-        current.display()
-    );
+        .is_err()
+        {
+            continue; // Keep a running/uncertain process and its home untouched.
+        }
+        let manifest = load_manifest(&entry.path(), &id).await?;
+        recover_interrupted_restore(&entry.path(), &manifest).await?;
+    }
     Ok(())
 }
 
@@ -198,7 +217,8 @@ pub(crate) async fn run_snapshot_create<F: Fn(CloneProgress) + Send + Sync>(
     let dir = instance_dir(root, &id)?;
     let manifest = load_manifest(&dir, &id).await?;
     ensure_not_running(processes, &id)?;
-    recover_interrupted_restore(&dir, &manifest).await?;
+    let _restore_lock = restore::lock(&dir).await?;
+    restore::recover_locked(&dir, &manifest).await?;
 
     // Snapshotting reads the home; for an external instance that is the
     // user's own directory, and copying it *out* into the instance tree is
@@ -304,6 +324,7 @@ pub async fn restore_instance_snapshot(
     locks: State<'_, crate::resources::ResourceLocks>,
     tasks: State<'_, crate::resources::Tasks>,
     processes: State<'_, Processes>,
+    registry: State<'_, crate::launch::Registry>,
     state: State<'_, PhlState>,
     transfer_id: String,
     id: String,
@@ -320,6 +341,12 @@ pub async fn restore_instance_snapshot(
         &locks,
         &tasks,
         move |task| async move {
+            crate::launch::ensure_launch_available(
+                &processes,
+                &registry,
+                &id,
+                crate::launch::probe_process,
+            )?;
             task.set_phase("copying");
             let r = restore_snapshot_with(
                 &state.root(),
@@ -374,116 +401,10 @@ pub(crate) async fn restore_snapshot_with<F: Fn(CloneProgress) + Send + Sync>(
     flag: &Arc<AtomicBool>,
     on_progress: &F,
 ) -> Result<InstanceRecord, String> {
-    let id = sanitize_segment(id, "实例 id")?;
-    let dir = instance_dir(root, &id)?;
-    let manifest = load_manifest(&dir, &id).await?;
-    ensure_not_running(processes, &id)?;
-    // Restore overwrites the live home in place. For an external instance
-    // that would stamp PHL's copy over the user's own directory — the one
-    // operation adoption explicitly forbids.
-    reject_external_write(&manifest, &id, "还原快照并覆盖")?;
-    // An interrupted earlier restore is repaired before this one reasons about
-    // the live home: without it, a half-swapped instance looks like one with
-    // no dsh-home at all and this command would refuse to help.
-    recover_interrupted_restore(&dir, &manifest).await?;
-
-    let snap_dir = snapshot_dir(&dir, snapshot_id)?;
-    let raw = tokio::fs::read_to_string(snap_dir.join("snapshot.json"))
-        .await
-        .map_err(|_| format!("快照不存在: {snapshot_id}"))?;
-    serde_json::from_str::<SnapshotFile>(&raw).map_err(|e| format!("快照元数据解析失败: {e}"))?;
-    let snap_home = snap_dir.join("dsh-home");
-    if !snap_home.exists() {
-        return Err(format!("快照 {snapshot_id} 缺少 dsh-home，无法还原"));
-    }
-    let current = home_of(&dir, &manifest);
-    if !current.exists() {
-        return Err("实例缺少 dsh-home，无法还原".into());
-    }
-
-    // Copy back under a staging name, then swap. If the swap fails, the
-    // current tree steps back in; the snapshot itself is never touched.
-    let staging = dir.join(".phl-restore");
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    tokio::fs::create_dir_all(&staging)
-        .await
-        .map_err(|e| e.to_string())?;
-    // Same guarded copier as create: it runs on a blocking thread (the old
-    // `copy_tree_sync` blocked the async runtime for the whole restore),
-    // classifies links instead of following them, and reports the worker's
-    // real result rather than a half-finished tree. The transfer's cancel
-    // flag reaches the copier (it is the only cancellable leg of a restore:
-    // after this point the swap must run to completion), and every byte
-    // counted goes to `on_progress` — the old `&|_| {}` discarded it, so the
-    // restore's longest step showed nothing anywhere.
-    let dest_home = staging.join("dsh-home");
-    if let Err(e) = copy_tree_with_progress(
-        snap_home.clone(),
-        dest_home.clone(),
-        Arc::clone(flag),
-        // The contract (module header and the UI copy) is plugins and
-        // configuration: the copier leaves the snapshot's own conversation
-        // data out, and the live home's moves in below.
-        SkipRule::Restore,
-        // `current` is where this tree is renamed to, so in-tree links must
-        // name the live home rather than the `.phl-restore` staging path.
-        LinkPolicy::Preserve {
-            source_root: snap_home.clone(),
-            dest_root: current.clone(),
-        },
-        root.to_path_buf(),
-        on_progress,
-    )
+    restore::run(root, id, snapshot_id, processes, flag, on_progress, &|_| {
+        Ok(())
+    })
     .await
-    {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        if crate::versions::cancelled(flag) {
-            return Err("cancelled".into());
-        }
-        return Err(format!("还原快照失败: {e}"));
-    }
-
-    // Conversation data is not rolled back: the live home's sessions and
-    // attachments move into the staged copy, taking the place of the ones
-    // the copier skipped. Both directories live under the instance
-    // directory, so these are same-volume renames; a failure here happens
-    // before any swap, so the live home is still untouched.
-    for keep in ["sessions", "attachments"] {
-        let staged = dest_home.join(keep);
-        let live = current.join(keep);
-        if staged.exists() {
-            // The staged tree is PHL's own copy output; a straggler there is
-            // a link or file, which remove_dir_all refuses.
-            let _ = tokio::fs::remove_dir_all(&staged).await;
-            let _ = tokio::fs::remove_file(&staged).await;
-            if staged.exists() {
-                let _ = tokio::fs::remove_dir_all(&staging).await;
-                return Err(format!("无法清理暂存目录中的 {keep}"));
-            }
-        }
-        if live.exists() {
-            if let Err(e) = tokio::fs::rename(&live, &staged).await {
-                let _ = tokio::fs::remove_dir_all(&staging).await;
-                return Err(format!("无法保留现网 {keep}（重命名失败: {e}）"));
-            }
-        }
-    }
-
-    let backup = dir.join(".phl-old-dsh-home");
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-    tokio::fs::rename(&current, &backup)
-        .await
-        .map_err(|e| format!("无法备份当前 dsh-home: {e}"))?;
-    if let Err(e) = tokio::fs::rename(staging.join("dsh-home"), &current).await {
-        let _ = tokio::fs::rename(&backup, &current).await;
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(format!("无法放置还原内容: {e}"));
-    }
-    let _ = tokio::fs::remove_dir_all(&staging).await;
-    let _ = tokio::fs::remove_dir_all(&backup).await;
-
-    let manifest = load_manifest(&dir, &id).await?;
-    Ok(build_record(&dir, manifest).await)
 }
 
 #[tauri::command]
@@ -519,6 +440,10 @@ pub(crate) async fn delete_snapshot_inner(
     let id = sanitize_segment(id, "实例 id")?;
     let dir = instance_dir(root, &id)?;
     ensure_not_running(processes, &id)?;
+    let _restore_lock = restore::lock(&dir).await?;
+    if has_pending_restore(&dir).await? {
+        return Err("实例有未完成的快照还原，请先完成恢复；暂不删除快照以保留恢复资料".into());
+    }
     let snap_dir = snapshot_dir(&dir, snapshot_id)?;
     ensure_under_root(&instances_root(root), &snap_dir)?;
     if snap_dir.exists() {

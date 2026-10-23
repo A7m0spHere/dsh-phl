@@ -30,6 +30,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::paths::PhlState;
 use crate::versions::{now_iso, sanitize_version};
 
+pub(crate) mod home;
 pub(crate) mod probe;
 pub(crate) mod process;
 pub(crate) mod registry;
@@ -731,34 +732,7 @@ pub(crate) async fn run_launch(
         .map_err(|e| format!("安装 DSH {version_name} 的依赖失败: {e}"))?;
     }
 
-    // The home follows the manifest: a managed copy lives inside the instance
-    // directory, an externally-adopted instance points at its own DSH_HOME.
-    // Creating `profiles/web` under it is idempotent (external homes already
-    // have it; this only matters for a freshly created copy).
-    let manifest = crate::instances::read_manifest(&instance_dir).await;
-    let dsh_home = match &manifest {
-        Some(m) => crate::instances::home_of(&instance_dir, m),
-        None => instance_dir.join("dsh-home"),
-    };
-    // Launch gate for community imports (CR-06/D17, R3-03): a pending
-    // dependency install AND a damaged/missing import record both refuse the
-    // boot — the retry lives in the instance detail, not in a degraded launch.
-    if let Some(m) = &manifest {
-        import_launch_gate(&instance_dir, m).await?;
-    }
-    let workspace = instance_dir.join("workspace");
-    for dir in [dsh_home.join("profiles").join(&profile), workspace.clone()] {
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if !manifest.as_ref().is_some_and(crate::instances::is_external) {
-        // launch_instance holds the same instance lock as plugin writes.
-        crate::plugins::install::recover_profile_transaction(
-            &dsh_home.join("profiles").join(&profile),
-        )
-        .await?;
-    }
+    let (dsh_home, workspace) = home::prepare(&instance_dir, &profile).await?;
 
     // Pre-launch API handling. Two things happen, and the difference between
     // them is the whole design:

@@ -7,7 +7,7 @@
     "src-tauri/src/instances/copy.rs": 51000,
     "src-tauri/src/plugins/install.rs": 50309,
     "src-tauri/src/instances/trial/mod.rs": 49591,
-    "src-tauri/src/launch/mod.rs": 44225,
+    "src-tauri/src/launch/mod.rs": 42944,
     "src/pages/InstanceDetailPage.tsx": 44110,
     "src-tauri/src/community_pack/tests.rs": 42193,
     "src-tauri/src/runtimes/mod.rs": 41735,

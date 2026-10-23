@@ -171,7 +171,13 @@ pub(crate) fn assert_inside_instances(root: &Path, dir: &Path) -> Result<(), Str
 /* ------------------------------ commands ------------------------------ */
 
 #[tauri::command]
-pub async fn list_instances(state: State<'_, PhlState>) -> Result<Vec<InstanceRecord>, String> {
+pub async fn list_instances(
+    state: State<'_, PhlState>,
+    processes: State<'_, Processes>,
+    registry: State<'_, crate::launch::Registry>,
+    locks: State<'_, crate::resources::ResourceLocks>,
+) -> Result<Vec<InstanceRecord>, String> {
+    snapshot::recover_pending_restores(&state.root(), &processes, &registry, &locks).await?;
     list_instances_inner(&state.root()).await
 }
 

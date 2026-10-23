@@ -36,7 +36,7 @@ pub(crate) enum SkipRule {
     Trial { skip_sessions: bool, depth: u8 },
     /// Restore staging (2026-09-29 review): the snapshot tree being placed
     /// must be plugins + configuration only — conversation data is *not*
-    /// rolled back. The live home's `sessions/` and `attachments/` move into
+    /// rolled back. The live home's `sessions/` and `attachments/` are copied into
     /// the staged copy before the swap (restore_snapshot_with), so copying
     /// the snapshot's own copies here would only be deleted again.
     Restore,
