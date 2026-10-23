@@ -467,8 +467,11 @@ fn read_string(hkey: usize, name: &str) -> Result<Option<String>, String> {
     }
     buf.truncate(size as usize);
     let units: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect();
     Ok(Some(
         String::from_utf16_lossy(&units)
