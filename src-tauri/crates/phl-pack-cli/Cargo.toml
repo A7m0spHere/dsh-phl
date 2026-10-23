@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "The `phl-pack` command-line tool: inspect / validate / unpack / build .phlpack archives on top of phl-pack-core (development spec §15, §30 P2-1)."
 authors = ["dsh-phl"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 
 [[bin]]
 name = "phl-pack"

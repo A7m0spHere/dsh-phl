@@ -48,6 +48,10 @@ npx tauri signer generate -w $env:USERPROFILE\.phl\updater.key --ci
 2. 流水线需要 `TAURI_SIGNING_PRIVATE_KEY` 这个 Secret，否则**不会产生** `latest.json` 与 `.sig`；
 3. 更新只能从**已带 updater 的版本**开始：装了 alpha.3 的用户能自动更新到 alpha.4，
    alpha.2 及更早的用户需要手动装一次 alpha.3。
+4. Windows 清单指向带 minisign 签名的原始 NSIS `.exe`。更新器已关闭 Tauri v1
+   压缩更新包的兼容功能，不接受 `.exe.zip` / `.msi.zip`；当前发布流程生成的 `.exe`
+   与 `.sig` 路径不变。CI 与发布流程共用 RustSec 审计，Rust 构建通过 `--locked`
+   使用已审计的 `src-tauri/Cargo.lock`。
 
 ## 已知限制
 

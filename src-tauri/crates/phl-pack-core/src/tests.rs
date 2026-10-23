@@ -190,6 +190,29 @@ fn refuses_traversal_and_absolute_entries() {
 }
 
 #[test]
+fn reads_legacy_cp437_entry_names_during_zip_migration() {
+    let name = "assets/cafe.txt";
+    let mut files = base_files();
+    files.push((name.to_string(), b"sample".to_vec()));
+    let mut bytes = build_zip(files, &[]).into_inner();
+    // Old ZIPs may use CP437 names. Preserve this import behavior when moving
+    // from zip 2 to zip 9: 0x82 is e-acute, not a Unicode replacement character.
+    let offsets: Vec<_> = bytes
+        .windows(name.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == name.as_bytes()).then_some(offset))
+        .collect();
+    assert_eq!(offsets.len(), 2, "local and central filename headers");
+    for offset in offsets {
+        bytes[offset + "assets/caf".len()] = 0x82;
+    }
+    let size = bytes.len() as u64;
+    let pack = read_pack(Cursor::new(bytes), size).expect("CP437 pack");
+    assert!(pack.entries.contains(&"assets/café.txt".to_string()));
+    assert_eq!(pack.assets, vec!["café.txt".to_string()]);
+}
+
+#[test]
 fn refuses_symlink_entries() {
     let mut cur = build_zip(base_files(), &[("embedded/escape", "/etc/passwd")]);
     let size = cur.get_ref().len() as u64;

@@ -83,7 +83,7 @@ pub(crate) fn open_pack(path: &Path) -> Result<OpenedPack, String> {
     let mut manifest_candidates: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| e.to_string())?.into_owned();
         if !name.ends_with(".json") || name.contains('/') {
             continue;
         }
@@ -131,12 +131,14 @@ fn read_root_json(
     archive: &mut zip::ZipArchive<std::io::BufReader<std::fs::File>>,
     name: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let found = (0..archive.len()).find(|i| {
-        archive
-            .by_index(*i)
-            .map(|e| e.name() == name)
-            .unwrap_or(false)
-    });
+    let mut found = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        if entry.name().map_err(|e| e.to_string())? == name {
+            found = Some(i);
+            break;
+        }
+    }
     let Some(index) = found else {
         return Ok(None);
     };
@@ -298,7 +300,7 @@ pub(crate) fn build_preview(path: &Path) -> Result<CommunityPackPreview, String>
         std::collections::BTreeMap::new();
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| e.to_string())?.into_owned();
         if entry.is_dir() {
             continue;
         }

@@ -266,7 +266,10 @@ where
         let mut entry = archive
             .by_index(index)
             .map_err(|e| PackError::Unreadable(e.to_string()))?;
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|e| PackError::Unreadable(e.to_string()))?
+            .into_owned();
         let path = normalize_entry(&raw_name)?;
 
         // Symlink / directory special entries: a pack must not smuggle links.
@@ -388,11 +391,13 @@ fn verify_integrity<R: Read + std::io::Seek, F: Fn() -> bool + ?Sized>(
     let mut index_of: HashMap<PathBuf, usize> = HashMap::new();
     for i in 0..archive.len() {
         ensure_not_cancelled(cancel)?;
-        if let Ok(entry) = archive.by_index(i) {
-            if let Ok(norm) = normalize_entry(entry.name()) {
-                index_of.insert(norm, i);
-            }
-        }
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| PackError::Unreadable(e.to_string()))?;
+        let name = entry
+            .name()
+            .map_err(|e| PackError::Unreadable(e.to_string()))?;
+        index_of.insert(normalize_entry(&name)?, i);
     }
     for (name, want) in integrity {
         ensure_not_cancelled(cancel)?;

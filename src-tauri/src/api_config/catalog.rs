@@ -281,7 +281,7 @@ fn lookup<'a>(entries: &'a [Entry], id: &str, hints: &[String]) -> Match<'a> {
         .skip(1)
         .find(|p| entries.iter().any(|e| e.provider == **p))
         .copied();
-    let allowed = |e: &&Entry| explicit.map_or(true, |p| e.provider == p);
+    let allowed = |e: &&Entry| explicit.is_none_or(|p| e.provider == p);
     for split in 1..parts.len() {
         let suffix = parts[split..].join("/");
         let stripped: Vec<_> = entries

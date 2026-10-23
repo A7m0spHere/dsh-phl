@@ -212,7 +212,7 @@ pub(crate) async fn install_inner(
                 }
                 let name = {
                     let entry = archive.by_index(i).map_err(|e| e.to_string())?;
-                    entry.name().to_string()
+                    entry.name().map_err(|e| e.to_string())?.into_owned()
                 };
                 let namespace = if name.starts_with("overrides/") {
                     "overrides"

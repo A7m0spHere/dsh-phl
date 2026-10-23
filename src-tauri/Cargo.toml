@@ -5,7 +5,7 @@ description = "PHL — DSH Instance & Runtime Manager"
 authors = ["dsh-phl"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 
 # This manifest is the Cargo workspace root (P2-1): the desktop crate plus the
 # extracted Pack Core and its CLI share one lockfile and one `target/` dir.
@@ -32,7 +32,10 @@ tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
 # In-app updates: the updater verifies a minisign signature against the pubkey
 # in tauri.conf.json before installing; process is only needed to relaunch.
-tauri-plugin-updater = "2"
+# PHL publishes signed NSIS .exe files, not Tauri v1 compressed updater
+# bundles. Keep TLS and system proxies, without the legacy `zip` feature
+# that otherwise pulls the vulnerable zip 4.x dependency into Windows builds.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -47,7 +50,7 @@ futures-util = "0.3"
 tar = "0.4"
 flate2 = "1"
 # Node 的 Windows 发行包是 .zip（其余平台是 .tar.gz），运行时安装两边都要能解。
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
@@ -60,7 +63,7 @@ fs2 = "0.4"
 # frames natively. `ruzstd` (pure Rust) decodes DSH's frames; `zstd` encodes,
 # and its output was verified to decompress under Node's `zlib.zstdDecompressSync`
 # — the exact decoder the running DSH uses — so a copied session still boots.
-ruzstd = "0.8.2"
+ruzstd = "0.9.1"
 zstd = "0.14.0"
 # `.phlpack` format (P2-1): schema, validator, integrity, builder and unpack
 # live in a host-free crate shared with the `phl-pack` CLI — the desktop app

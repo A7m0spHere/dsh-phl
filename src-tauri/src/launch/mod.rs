@@ -138,7 +138,7 @@ impl Processes {
             .lock()
             .expect("processes lock")
             .get(instance_id)
-            .map_or(true, |entry| entry.pid == pid)
+            .is_none_or(|entry| entry.pid == pid)
     }
 
     pub(crate) fn entry_of(&self, instance_id: &str) -> Option<ProcessEntry> {

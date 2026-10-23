@@ -121,7 +121,7 @@ pub(crate) async fn latest_launch_log(logs_dir: &Path) -> Option<PathBuf> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("launch-")
             && name.ends_with(".log")
-            && best.as_ref().map_or(true, |(n, _)| &name > n)
+            && best.as_ref().is_none_or(|(n, _)| &name > n)
         {
             best = Some((name, entry.path()));
         }

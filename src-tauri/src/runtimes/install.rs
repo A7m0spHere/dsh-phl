@@ -374,7 +374,10 @@ pub(crate) async fn extract_zip<F: Fn(f64) + Send + Sync>(
                 let mut entry = archive
                     .by_index(index)
                     .map_err(|e| format!("zip 条目读取失败: {e}"))?;
-                let Some(relative) = strip_first(Path::new(entry.name())) else {
+                let name = entry
+                    .name()
+                    .map_err(|e| format!("zip 条目名称读取失败: {e}"))?;
+                let Some(relative) = strip_first(Path::new(name.as_ref())) else {
                     continue;
                 };
                 if relative.as_os_str().is_empty() {

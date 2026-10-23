@@ -82,7 +82,11 @@ where
         if entry.is_dir() || entry.is_symlink() {
             continue;
         }
-        let rel = crate::normalize_entry(entry.name())?;
+        let name = entry
+            .name()
+            .map_err(|e| PackError::Unreadable(e.to_string()))?
+            .into_owned();
+        let rel = crate::normalize_entry(&name)?;
         let Some((dest, root)) = map(&rel) else {
             continue;
         };
@@ -96,7 +100,7 @@ where
         // hostile archive can under-declare `size`), and removing the partial
         // file if any read/write step fails so the caller never sees a
         // half-written payload.
-        let archive_name = entry.name().replace('\\', "/");
+        let archive_name = name.replace('\\', "/");
         let written = stream_entry_to_file(&mut entry, &confined, &mut total_written, cancel)
             .inspect_err(|_| {
                 // A partial write must not survive: drop the half-written file.

@@ -4,4 +4,5 @@
 //! must never be swept into it. Each lane documents its own opt-in switch.
 
 pub(crate) mod real_dsh;
+pub(crate) mod real_https;
 pub(crate) mod real_runtime;

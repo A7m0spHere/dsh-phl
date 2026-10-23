@@ -39,7 +39,6 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | alloc-stdlib 0.2.4 | BSD-3-Clause |
 | android_system_properties 0.1.6 | 未在本地缓存中找到（cargo about 可补全） |
 | anyhow 1.0.104 | MIT OR Apache-2.0 |
-| arbitrary 1.4.2 | 未在本地缓存中找到（cargo about 可补全） |
 | async-compression 0.4.43 | MIT OR Apache-2.0 |
 | atk 0.18.2 | 未在本地缓存中找到（cargo about 可补全） |
 | atk-sys 0.18.2 | 未在本地缓存中找到（cargo about 可补全） |
@@ -100,7 +99,6 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | defmt-macros 1.1.1 | MIT OR Apache-2.0 |
 | defmt-parser 1.0.0 | MIT OR Apache-2.0 |
 | deranged 0.5.8 | MIT OR Apache-2.0 |
-| derive_arbitrary 1.4.2 | 未在本地缓存中找到（cargo about 可补全） |
 | derive_more 2.1.1 | MIT |
 | derive_more-impl 2.1.1 | MIT |
 | digest 0.10.7 | MIT OR Apache-2.0 |
@@ -235,6 +233,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | ndk 0.9.0 | 未在本地缓存中找到（cargo about 可补全） |
 | ndk-sys 0.6.0+11769913 | 未在本地缓存中找到（cargo about 可补全） |
 | new_debug_unreachable 1.0.6 | MIT |
+| nix 0.31.3 | MIT |
 | num-conv 0.2.2 | MIT OR Apache-2.0 |
 | num-traits 0.2.19 | MIT OR Apache-2.0 |
 | num_enum 0.7.6 | 未在本地缓存中找到（cargo about 可补全） |
@@ -286,7 +285,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | proc-macro2 1.0.107 | MIT OR Apache-2.0 |
 | quick-xml 0.41.0 | MIT |
 | quinn 0.11.11 | MIT OR Apache-2.0 |
-| quinn-proto 0.11.17 | MIT OR Apache-2.0 |
+| quinn-proto 0.11.19 | MIT OR Apache-2.0 |
 | quinn-udp 0.5.15 | MIT OR Apache-2.0 |
 | quote 1.0.47 | MIT OR Apache-2.0 |
 | r-efi 5.3.0 | 未在本地缓存中找到（cargo about 可补全） |
@@ -310,10 +309,11 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | rustc-hash 2.1.3 | Apache-2.0 OR MIT |
 | rustc_version 0.4.1 | MIT OR Apache-2.0 |
 | rustix 1.1.4 | 未在本地缓存中找到（cargo about 可补全） |
-| rustls 0.23.43 | Apache-2.0 OR ISC OR MIT |
+| rustls 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types 1.15.1 | MIT OR Apache-2.0 |
-| rustls-webpki 0.103.15 | ISC |
+| rustls-webpki 0.103.16 | ISC |
 | rustversion 1.0.23 | 未在本地缓存中找到（cargo about 可补全） |
+| ruzstd 0.9.1 | MIT |
 | ryu 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | same-file 1.0.6 | Unlicense/MIT |
 | schemars 0.8.22 | MIT |
@@ -411,6 +411,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | tracing-core 0.1.36 | MIT |
 | tray-icon 0.24.2 | MIT OR Apache-2.0 |
 | try-lock 0.2.5 | MIT |
+| typed-path 0.12.4 | MIT OR Apache-2.0 |
 | typeid 1.0.3 | MIT OR Apache-2.0 |
 | typenum 1.20.1 | MIT OR Apache-2.0 |
 | unic-char-property 0.9.0 | MIT/Apache-2.0 |
@@ -446,7 +447,8 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | web_atoms 0.2.6 | MIT OR Apache-2.0 |
 | webkit2gtk 2.0.2 | 未在本地缓存中找到（cargo about 可补全） |
 | webkit2gtk-sys 2.0.2 | 未在本地缓存中找到（cargo about 可补全） |
-| webpki-roots 1.0.9 | CDLA-Permissive-2.0 |
+| webpki-root-certs 1.0.10 | CDLA-Permissive-2.0 |
+| webpki-roots 1.0.10 | CDLA-Permissive-2.0 |
 | webview2-com 0.38.2 | MIT |
 | webview2-com-macros 0.8.1 | MIT |
 | webview2-com-sys 0.38.2 | MIT |
@@ -458,7 +460,6 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | windows 0.61.3 | MIT OR Apache-2.0 |
 | windows-collections 0.2.0 | MIT OR Apache-2.0 |
 | windows-core 0.61.2 | MIT OR Apache-2.0 |
-| windows-core 0.62.2 | 未在本地缓存中找到（cargo about 可补全） |
 | windows-future 0.2.1 | MIT OR Apache-2.0 |
 | windows-implement 0.60.2 | MIT OR Apache-2.0 |
 | windows-interface 0.59.3 | MIT OR Apache-2.0 |
@@ -529,7 +530,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | zerotrie 0.2.5 | Unicode-3.0 |
 | zerovec 0.11.8 | Unicode-3.0 |
 | zerovec-derive 0.11.6 | Unicode-3.0 |
-| zip 2.4.2 | MIT |
+| zip 9.0.5 | MIT |
 | zlib-rs 0.6.7 | Zlib |
 | zmij 1.0.23 | MIT |
 | zopfli 0.8.3 | Apache-2.0 |
