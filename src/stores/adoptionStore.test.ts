@@ -164,7 +164,10 @@ it('admits and reloads the instance list on a successful commit', async () => {
 
 it('the picker lazily lists the source home and tracks toggles', async () => {
   useAdoptionStore.setState({ selectedId: 'dsh-abc' })
-  mocks.listHomeSessions.mockResolvedValue([session('a'), session('b')])
+  mocks.listHomeSessions.mockResolvedValue({
+    sessions: [session('a'), session('b')],
+    unreadable: [],
+  })
   useAdoptionStore.getState().setSessionStrategy('selected')
   await vi.waitFor(() =>
     expect(useAdoptionStore.getState().sourceSessions?.length).toBe(2),
@@ -179,7 +182,10 @@ it('the picker lazily lists the source home and tracks toggles', async () => {
 
 it('select-all fills and empties the picker in one click', async () => {
   useAdoptionStore.setState({ selectedId: 'dsh-abc' })
-  mocks.listHomeSessions.mockResolvedValue([session('a'), session('b'), session('c')])
+  mocks.listHomeSessions.mockResolvedValue({
+    sessions: [session('a'), session('b'), session('c')],
+    unreadable: [],
+  })
   useAdoptionStore.getState().setSessionStrategy('selected')
   await vi.waitFor(() => expect(useAdoptionStore.getState().sourceSessions?.length).toBe(3))
   useAdoptionStore.getState().setSessionDirs(useAdoptionStore.getState().sourceSessions!.map((s) => s.sessionDir))

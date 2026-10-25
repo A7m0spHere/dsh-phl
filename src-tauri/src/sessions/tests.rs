@@ -88,9 +88,9 @@ async fn copies_into_a_managed_target_and_reports_the_fork() {
     assert!(out[0].new_id.starts_with("session-"));
     assert_ne!(out[0].new_id, "session-src");
     let landed = r.join("instances").join("dst").join("dsh-home");
-    let (list, _) = super::list_in_home(&landed);
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].parent.as_deref(), Some("session-src"));
+    let listed = super::list_in_home(&landed);
+    assert_eq!(listed.sessions.len(), 1);
+    assert_eq!(listed.sessions[0].parent.as_deref(), Some("session-src"));
     let _ = std::fs::remove_dir_all(&r);
 }
 
@@ -242,9 +242,9 @@ async fn multi_target_fanout_copies_to_each() {
     // Two distinct new ids, one per target, both children of the same source.
     assert_ne!(out[0].new_id, out[1].new_id);
     for t in ["a", "b"] {
-        let (list, _) = super::list_in_home(&r.join("instances").join(t).join("dsh-home"));
-        assert_eq!(list.len(), 1, "one fork landed in {t}");
-        assert_eq!(list[0].parent.as_deref(), Some("session-src"));
+        let listed = super::list_in_home(&r.join("instances").join(t).join("dsh-home"));
+        assert_eq!(listed.sessions.len(), 1, "one fork landed in {t}");
+        assert_eq!(listed.sessions[0].parent.as_deref(), Some("session-src"));
     }
     let _ = std::fs::remove_dir_all(&r);
 }
@@ -261,12 +261,16 @@ async fn list_and_inspect_roundtrip() {
         &r.join("instances").join("src").join("dsh-home"),
         "session-bbb",
     );
-    let (list, skipped) = super::list_in_home(&r.join("instances").join("src").join("dsh-home"));
-    assert_eq!(list.len(), 2);
-    assert_eq!(skipped, 0);
-    assert!(list.iter().all(|s| s.id.starts_with("session-")));
+    let listed = super::list_in_home(&r.join("instances").join("src").join("dsh-home"));
+    assert_eq!(listed.sessions.len(), 2);
     assert!(
-        list.iter().all(|s| s.format_version == 0),
+        listed.unreadable.is_empty(),
+        "both fixtures are readable: {:?}",
+        listed.unreadable
+    );
+    assert!(listed.sessions.iter().all(|s| s.id.starts_with("session-")));
+    assert!(
+        listed.sessions.iter().all(|s| s.format_version == 0),
         "the seeded fixtures are generation 0"
     );
     let _ = std::fs::remove_dir_all(&r);
@@ -321,9 +325,14 @@ async fn list_reports_every_generation_from_its_highest_artifact() {
     )
     .unwrap();
 
-    let (list, skipped) = super::list_in_home(&home);
-    assert_eq!(skipped, 0, "both sessions are readable: {list:?}");
-    assert_eq!(list.len(), 2);
+    let listed = super::list_in_home(&home);
+    assert!(
+        listed.unreadable.is_empty(),
+        "both sessions are readable: {:?}",
+        listed.unreadable
+    );
+    assert_eq!(listed.sessions.len(), 2);
+    let list = &listed.sessions;
     let v3_only = list
         .iter()
         .find(|s| s.id == "session-v3only")
@@ -373,13 +382,18 @@ async fn subagent_child_sessions_are_listed_from_their_bare_uuid_directory() {
     // silently, so it must be neither listed nor counted as broken.
     std::fs::create_dir_all(home.join("sessions").join("--P--").join("attachments")).unwrap();
 
-    let (list, skipped) = super::list_in_home(&home);
-    assert_eq!(
-        skipped, 0,
+    let listed = super::list_in_home(&home);
+    assert!(
+        listed.unreadable.is_empty(),
         "an artifact-less directory is not a broken session"
     );
-    assert_eq!(list.len(), 1, "the subagent child must be listed: {list:?}");
-    let child = &list[0];
+    assert_eq!(
+        listed.sessions.len(),
+        1,
+        "the subagent child must be listed: {:?}",
+        listed.sessions
+    );
+    let child = &listed.sessions[0];
     assert_eq!(child.session_dir, "3996cc7d-be3f-4a5a-bb24-93258dbe037c");
     assert_eq!(child.parent.as_deref(), Some("session-parent"));
     assert!(child.origin_subagent);
@@ -414,13 +428,115 @@ async fn a_home_that_mixes_encodings_never_resolves_both_directories() {
     )
     .unwrap();
 
-    let (list, skipped) = super::list_in_home(&home);
+    let listed = super::list_in_home(&home);
     assert_eq!(
-        list.len(),
+        listed.sessions.len(),
         1,
-        "only one encoding can be the home's: {list:?}"
+        "only one encoding can be the home's: {:?}",
+        listed.sessions
     );
-    assert_eq!(skipped, 1, "the other directory is reported as unreadable");
+    assert_eq!(
+        listed.unreadable.len(),
+        1,
+        "the other directory is reported as unreadable"
+    );
+    assert_eq!(
+        listed.unreadable[0].kind, "encoding-mismatch",
+        "the reported reason names the encoding fault"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// #6: DSH's catalog is at `currentVersion: 4`. A v4 session (same physical
+/// header contract as v2/v3, fork marker in the body) must be **listed** —
+/// read-only header support — while staying un-migratable like every v2+.
+#[tokio::test]
+async fn v4_sessions_are_listed_read_only() {
+    let r = root("list-v4");
+    make_instance(&r, "src", MM::ManagedCopy, None).await;
+    let home = r.join("instances").join("src").join("dsh-home");
+    let sess = home.join("sessions").join("--P--").join("session-v4");
+    std::fs::create_dir_all(&sess).unwrap();
+    let header = json!({
+        "type": "session", "version": 4, "id": "session-v4", "createdAt": 11u64,
+        "cwd": "C:/v4", "isSeeded": true, "delegationDepth": 0
+    })
+    .to_string();
+    std::fs::write(
+        sess.join(codec::generation_filename(4, codec::LogEncoding::Zstd)),
+        zstd::encode_all(format!("{header}\n").as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    let listed = super::list_in_home(&home);
+    assert!(listed.unreadable.is_empty(), "{:?}", listed.unreadable);
+    assert_eq!(listed.sessions.len(), 1);
+    let info = &listed.sessions[0];
+    assert_eq!(info.format_version, 4);
+    assert_eq!(info.cwd.as_deref(), Some("C:/v4"));
+    // Read support never widens the copy gate: the header-fork rule still
+    // refuses anything above v1.
+    assert!(copy::unsupported_copy_reason(4).is_some());
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// #6: a generation this build cannot read (a future v5) is no longer folded
+/// into a silent skip count — it is reported with a stable kind, the version
+/// its filename declared, and an explainable reason. A corrupt artifact is
+/// reported the same way, under its own kind.
+#[tokio::test]
+async fn unreadable_sessions_are_reported_not_hidden() {
+    let r = root("list-unreadable");
+    make_instance(&r, "src", MM::ManagedCopy, None).await;
+    let home = r.join("instances").join("src").join("dsh-home");
+
+    // A future generation: header claims v5, filename agrees — both sides of
+    // the pair are self-consistent, only PHL cannot read it yet.
+    let future = home.join("sessions").join("--P--").join("session-v5");
+    std::fs::create_dir_all(&future).unwrap();
+    let header = json!({
+        "type": "session", "version": 5, "id": "session-v5", "createdAt": 1u64,
+        "cwd": "C:/p", "isSeeded": false, "delegationDepth": 0
+    })
+    .to_string();
+    std::fs::write(
+        future.join(codec::generation_filename(5, codec::LogEncoding::Zstd)),
+        zstd::encode_all(format!("{header}\n").as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    // A corrupt artifact: canonical name of generation 0, garbage bytes.
+    let corrupt = home.join("sessions").join("--P--").join("session-broken");
+    std::fs::create_dir_all(&corrupt).unwrap();
+    std::fs::write(
+        corrupt.join("session.jsonl.zstd"),
+        b"\x28\xb5\x2f\xfdnot-a-frame",
+    )
+    .unwrap();
+
+    let listed = super::list_in_home(&home);
+    assert!(
+        listed.sessions.is_empty(),
+        "neither fixture is readable: {:?}",
+        listed.sessions
+    );
+    assert_eq!(listed.unreadable.len(), 2, "{:?}", listed.unreadable);
+    let by_dir: std::collections::HashMap<_, _> = listed
+        .unreadable
+        .iter()
+        .map(|u| (u.session_dir.as_str(), u))
+        .collect();
+    let future = by_dir["session-v5"];
+    assert_eq!(future.kind, "unsupported-version");
+    assert_eq!(future.format_version, Some(5));
+    assert!(
+        future.reason.contains("v5"),
+        "the reason names the version: {}",
+        future.reason
+    );
+    let broken = by_dir["session-broken"];
+    assert_eq!(broken.kind, "corrupt");
+    assert_eq!(broken.format_version, Some(0));
     let _ = std::fs::remove_dir_all(&r);
 }
 

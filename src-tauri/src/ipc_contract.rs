@@ -40,7 +40,7 @@ fn manifest(id: &str, name: &str) -> crate::instances::InstanceManifest {
         "runtimeId": "node-22",
         "port": 8080,
         "autoPort": true,
-        "profile": "default",
+        "profile": "web",
         "createdAt": "2026-09-09T00:00:00Z"
     }))
     .expect("the wire manifest parses")
@@ -178,7 +178,7 @@ fn manifest_round_trip_keeps_adoption_fields_and_defaults_v1() {
         "runtimeId": "node-22",
         "port": 8080,
         "autoPort": true,
-        "profile": "default",
+        "profile": "web",
         "createdAt": "2026-09-09T00:00:00Z"
     }))
     .expect("v1 parses");

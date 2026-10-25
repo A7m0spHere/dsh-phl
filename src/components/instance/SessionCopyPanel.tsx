@@ -20,6 +20,7 @@ import {
   type RemoteSessionCopyOutcome,
   type RemoteSessionInfo,
   type RemoteSessionProgress,
+  type RemoteUnreadableSession,
 } from '@/lib/desktop'
 import { isDesktop } from '@/lib/desktopCore'
 import { formatDateTime } from '@/lib/format'
@@ -53,6 +54,10 @@ export function SessionCopyPanel({
   const toast = useUIStore((s) => s.toast)
 
   const [sessions, setSessions] = useState<RemoteSessionInfo[] | null>(null)
+  /** Conversations that exist on disk but cannot be read (#6): kept beside the
+   * readable list so the panel can say "另有 N 条无法读取" instead of silently
+   * hiding them behind a smaller count. */
+  const [unreadable, setUnreadable] = useState<RemoteUnreadableSession[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [targets, setTargets] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -64,9 +69,14 @@ export function SessionCopyPanel({
   useEffect(() => {
     let alive = true
     setSessions(null)
+    setUnreadable([])
     if (isDesktop) {
       listSessions(instanceId)
-        .then((list) => alive && setSessions(list))
+        .then((listing) => {
+          if (!alive) return
+          setSessions(listing.sessions)
+          setUnreadable(listing.unreadable)
+        })
         .catch((e) => alive && setError(parseThrownError(e).message))
     } else {
       setSessions([])
@@ -146,8 +156,26 @@ export function SessionCopyPanel({
       </div>
     )
   }
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && unreadable.length === 0) {
     return <p className="text-xs text-ink-faint">该实例暂无可迁移的历史对话。</p>
+  }
+  if (sessions.length === 0 && unreadable.length > 0) {
+    // Every conversation exists but none could be read — "无会话" here would
+    // be a lie about the data (the exact #6 failure mode).
+    return (
+      <div className="mt-2 space-y-1 rounded-lg bg-surface-sunken p-2.5 ring-1 ring-inset ring-line">
+        <p className="text-xs font-medium text-warn">
+          该实例的 {unreadable.length} 条对话均无法读取，因此不可选择迁移。
+        </p>
+        <ul className="space-y-0.5">
+          {unreadable.map((u) => (
+            <li key={`${u.project}/${u.sessionDir}`} className="truncate text-xs text-ink-faint">
+              {u.sessionDir} — {u.reason}
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
   }
   if (selectable.length === 0) {
     return (
@@ -214,11 +242,36 @@ export function SessionCopyPanel({
               </label>
             )
           })}
+          {unreadable.map((u) => (
+            <div
+              key={`${u.project}/${u.sessionDir}`}
+              title={u.reason}
+              className="flex cursor-not-allowed items-center gap-2 text-sm opacity-60"
+            >
+              <Checkbox
+                checked={false}
+                disabled
+                onChange={() => {}}
+                aria-label={`不可读取的会话 ${u.sessionDir}`}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                <span className="block truncate text-ink">{u.sessionDir}</span>
+                <span className="block truncate text-xs text-ink-faint">{u.reason}</span>
+              </span>
+              <Badge tone="danger">无法读取</Badge>
+            </div>
+          ))}
         </div>
         {blocked > 0 && (
           <p className="mt-1 text-xs text-ink-faint">
-            其中 {blocked} 条是较新的格式（v2/v3），继承前缀在日志体内，只能由 DSH 自己分叉，PHL
+            其中 {blocked} 条是较新的格式（v2 及以上），继承前缀在日志体内，只能由 DSH 自己分叉，PHL
             无法安全迁移 —— 它们照常可用，只是不能复制到别的实例。
+          </p>
+        )}
+        {unreadable.length > 0 && (
+          <p className="mt-1 text-xs text-warn">
+            另有 {unreadable.length} 条对话存在于磁盘但无法读取（格式过新、损坏或读取失败），已如实列出、
+            不参与迁移；它们仍保留在该实例中，不受影响。
           </p>
         )}
       </div>

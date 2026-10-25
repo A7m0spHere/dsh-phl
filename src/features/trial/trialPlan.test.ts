@@ -67,6 +67,7 @@ function preview(overrides: Partial<TrialPreview> = {}): TrialPreview {
     workspace: 'fresh',
     estimatedBytes: 1024,
     sessionCount: null,
+    sessionsUnreadable: [],
     sessionCwds: [],
     pendingDownloads: [],
     conflicts: [],

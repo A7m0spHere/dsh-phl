@@ -254,7 +254,13 @@ pub(crate) async fn import_instance_bundle_inner(
     manifest.hue = bundle.instance.hue;
     manifest.version_id = bundle.instance.version_id;
     manifest.runtime_id = bundle.instance.runtime_id;
-    manifest.profile = bundle.instance.profile;
+    // PHL only launches `dsh web`, so an imported tree always binds the web
+    // profile — a legacy format-1 bundle's `default` string describes where
+    // the EXPORTER's files lived, not a launch choice this import can honor
+    // (and the persistence gate would refuse it). The tree is built fresh
+    // here, so rebinding orphans nothing; the pack installer applies the
+    // same rule.
+    manifest.profile = super::manifest::LAUNCH_PROFILE.to_string();
     manifest.note = Some("从 Bundle 导入".into());
     // Credential values never cross the bundle boundary — not even from a
     // format-1 file whose exporter predates the rule. Ordinary variables keep

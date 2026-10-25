@@ -31,6 +31,28 @@ export interface RemoteSessionInfo {
   formatVersion: number
 }
 
+/**
+ * Mirrors the Rust `UnreadableSession` — a session that exists on disk but
+ * cannot be read. Surfaced instead of silently skipped (#6): a compatibility
+ * refusal must show as "N 条无法读取（原因）", never as "无会话".
+ */
+export interface RemoteUnreadableSession {
+  sessionDir: string
+  project: string
+  /** `unsupported-version` | `encoding-mismatch` | `io` | `corrupt`. */
+  kind: 'unsupported-version' | 'encoding-mismatch' | 'io' | 'corrupt'
+  /** Human-readable explanation from the backend codec. */
+  reason: string
+  /** The generation the artifact filename declared, when known. */
+  formatVersion: number | null
+}
+
+/** Mirrors the Rust `SessionListing`: the readable half AND the refused half. */
+export interface RemoteSessionListing {
+  sessions: RemoteSessionInfo[]
+  unreadable: RemoteUnreadableSession[]
+}
+
 /** Mirrors the Rust `SessionDetail` (inspect). */
 export interface RemoteSessionDetail {
   info: RemoteSessionInfo
@@ -53,10 +75,12 @@ export interface RemoteSessionProgress {
   newSessionDir: string
 }
 
-/** List the sessions one instance's DSH_HOME holds. Read-only, browser-safe. */
-export async function listSessions(instanceId: string): Promise<RemoteSessionInfo[]> {
-  if (!isDesktop) return []
-  return invoke<RemoteSessionInfo[]>('list_sessions', { id: instanceId })
+/** List the sessions one instance's DSH_HOME holds. Read-only, browser-safe.
+ * The listing carries the unreadable half too, so the UI can distinguish
+ * "没有会话" from "有 N 条存在但读不出来". */
+export async function listSessions(instanceId: string): Promise<RemoteSessionListing> {
+  if (!isDesktop) return { sessions: [], unreadable: [] }
+  return invoke<RemoteSessionListing>('list_sessions', { id: instanceId })
 }
 
 /**
@@ -65,9 +89,9 @@ export async function listSessions(instanceId: string): Promise<RemoteSessionInf
  * path (must classify as a DSH home); in a browser this throws like the rest
  * of the desktop surface.
  */
-export async function listHomeSessions(sourceHome: string): Promise<RemoteSessionInfo[]> {
+export async function listHomeSessions(sourceHome: string): Promise<RemoteSessionListing> {
   if (!isDesktop) throw new Error('会话迁移仅在桌面端可用')
-  return invoke<RemoteSessionInfo[]>('list_adoption_sessions', { path: sourceHome })
+  return invoke<RemoteSessionListing>('list_adoption_sessions', { path: sourceHome })
 }
 
 /** Inspect one session (header + stored event count). */

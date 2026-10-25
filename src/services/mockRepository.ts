@@ -526,6 +526,7 @@ class MockRepository implements PhlRepository {
       workspace: req.workspace,
       estimatedBytes: 318_000_000,
       sessionCount: req.scope === 'config+sessions' ? 3 : null,
+      sessionsUnreadable: [],
       sessionCwds: [],
       pendingDownloads: [],
       conflicts: [],

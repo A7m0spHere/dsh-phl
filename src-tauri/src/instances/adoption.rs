@@ -231,6 +231,18 @@ pub async fn preview_adoption(req: AdoptionRequest) -> Result<AdoptionPreview, S
                         conflict.message
                     ));
                 }
+                // `dsh web` boots the `web` profile and is the only entry PHL
+                // can steer a port onto; a home whose only profile is another
+                // name would be adopted into a permanently unlaunchable state
+                // (the manifest write refuses it — same rule as the edit
+                // form). Say it here so the wizard dead-ends visibly, not at
+                // commit.
+                if name != "web" {
+                    warns.push(format!(
+                        "源 DSH 未找到 web profile（检测到的是「{name}」）。PHL 仅支持以 \
+                         `dsh web` 启动，无法接入该环境；如需接入请先在源 DSH 中使用 web profile"
+                    ));
+                }
                 (
                     name.clone(),
                     count,
@@ -584,7 +596,7 @@ fn copy_session_tree(src: &Path, dst: &Path) -> Result<(), String> {
 #[tauri::command]
 pub async fn list_adoption_sessions(
     path: String,
-) -> Result<Vec<crate::sessions::SessionInfo>, String> {
+) -> Result<crate::sessions::SessionListing, String> {
     let raw = path.trim();
     if raw.is_empty() {
         return Err("未选择 DSH 目录".into());
@@ -596,7 +608,10 @@ pub async fn list_adoption_sessions(
     if inspect::classify_home(&home) == Confidence::Invalid {
         return Err(format!("该目录不是一个 DSH 数据目录: {}", home.display()));
     }
-    let listed = tokio::task::spawn_blocking(move || crate::sessions::list_in_home(&home).0)
+    // The full listing (readable + unreadable-with-reason), not just the
+    // readable half: the wizard's "选择对话" step must be able to say which
+    // conversations exist but cannot travel instead of silently omitting them.
+    let listed = tokio::task::spawn_blocking(move || crate::sessions::list_in_home(&home))
         .await
         .map_err(|e| format!("列举会话失败: {e}"))?;
     Ok(listed)

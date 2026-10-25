@@ -14,6 +14,7 @@ import {
   type RemoteAdoptionPreview,
   type RemoteDshCandidate,
   type RemoteSessionInfo,
+  type RemoteUnreadableSession,
 } from '@/lib/desktop'
 import { instanceFromRecord, newInstanceId } from '@/services/tauriInstances'
 import { useCatalogStore } from './catalogStore'
@@ -59,6 +60,10 @@ interface AdoptionState {
   // and the session dir names the user checked. Only read when the strategy
   // is `selected`.
   sourceSessions: RemoteSessionInfo[] | null
+  /** Conversations the source home holds but PHL cannot read (#6) — kept with
+   * their reasons so the picker can say "另有 N 条无法读取" instead of
+   * silently narrowing what the user believes exists. */
+  sourceSessionsUnreadable: RemoteUnreadableSession[]
   sourceSessionsError: string | null
   selectedSessionDirs: string[]
 
@@ -106,6 +111,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
   sessionStrategy: 'all',
   versionId: '',
   sourceSessions: null,
+  sourceSessionsUnreadable: [],
   sourceSessionsError: null,
   selectedSessionDirs: [],
   preview: null,
@@ -128,6 +134,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       sessionStrategy: 'all',
       versionId: '',
       sourceSessions: null,
+      sourceSessionsUnreadable: [],
       sourceSessionsError: null,
       selectedSessionDirs: [],
       preview: null,
@@ -192,6 +199,7 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
       set({
         selectedId: id,
         sourceSessions: null,
+        sourceSessionsUnreadable: [],
         sourceSessionsError: null,
         selectedSessionDirs: [],
         versionId: '',
@@ -232,10 +240,10 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
   async loadSourceSessions() {
     const candidate = get().selected()
     if (!candidate) return
-    set({ sourceSessions: null, sourceSessionsError: null })
+    set({ sourceSessions: null, sourceSessionsUnreadable: [], sourceSessionsError: null })
     try {
-      const sessions = await listHomeSessions(candidate.dshHome)
-      set({ sourceSessions: sessions })
+      const listing = await listHomeSessions(candidate.dshHome)
+      set({ sourceSessions: listing.sessions, sourceSessionsUnreadable: listing.unreadable })
     } catch (err) {
       set({
         sourceSessionsError: parseThrownError(err).message,

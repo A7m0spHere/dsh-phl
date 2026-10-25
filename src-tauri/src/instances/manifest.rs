@@ -157,15 +157,35 @@ pub(crate) fn profile_root_of(dir: &Path, manifest: &InstanceManifest) -> PathBu
 /// Deliberately narrow: it re-applies the *same* segment/version invariants the
 /// create and adopt paths already enforce (so a legitimate pre-existing
 /// manifest re-saves unchanged), plus the port bound and the external-home
-/// sanity `home_of` assumes. It does not second-guess `version_id` — the
+/// sanity `home_of` assumes. The one *semantic* rule it adds beyond shape is
+/// [`LAUNCH_PROFILE`]: a profile that cannot boot is refused like a profile
+/// that can escape the home. It does not second-guess `version_id` — the
 /// caller has already run `canonicalize_version_binding`, which repairs or
 /// empties an unsafe binding rather than rejecting the whole manifest, so
 /// legacy instances keep loading.
+/// The one profile name every launch goes through: `dsh web` is the only DSH
+/// entry with a `--port` flag (see `launch/mod.rs`), so a manifest bound to any
+/// other profile can be saved but never started — the exact state this
+/// validation exists to keep off disk.
+pub(crate) const LAUNCH_PROFILE: &str = "web";
+
 pub(crate) fn validate_instance_manifest_for_persistence(
     manifest: &InstanceManifest,
 ) -> Result<(), String> {
     crate::paths::sanitize_segment(&manifest.id, "实例 id")?;
     crate::paths::sanitize_segment(&manifest.profile, "profile")?;
+    // A non-web profile passes the segment whitelist yet is unlaunchable
+    // (`run_launch` refuses it), and plugin reads/writes would resolve into a
+    // profile `dsh web` never loads. Refuse at the single write choke point so
+    // no path (create / save / adopt / pack import) can persist one; a
+    // historical broken instance is repaired by saving `web` back.
+    if manifest.profile != LAUNCH_PROFILE {
+        return Err(format!(
+            "PHL 仅支持 web 面启动（--port 只在 `dsh web` 上解析），profile 必须是 \
+            「{LAUNCH_PROFILE}」，当前为「{}」；请在实例详情把 Profile 改回 web",
+            manifest.profile
+        ));
+    }
     // An unset runtime is allowed ("" = no runtime yet, shown as 未绑定); a set
     // one must be a filesystem-safe id like the version segments.
     if !manifest.runtime_id.is_empty() {
@@ -518,6 +538,16 @@ mod tests {
         // A trailing-dot profile (collides after Windows trimming) is refused.
         let mut m = sample_manifest();
         m.profile = "web.".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // A non-web profile is unlaunchable by construction (`dsh web` is the
+        // only --port entry) — refused at the write boundary, not at launch.
+        let mut m = sample_manifest();
+        m.profile = "test".into();
+        assert!(validate_instance_manifest_for_persistence(&m).is_err());
+        // The empty→`default` the edit form used to synthesize is equally
+        // unlaunchable; only `web` passes.
+        let mut m = sample_manifest();
+        m.profile = "default".into();
         assert!(validate_instance_manifest_for_persistence(&m).is_err());
         // An invalid runtime id is refused.
         let mut m = sample_manifest();

@@ -288,6 +288,8 @@ export {
 } from './desktopSessions'
 export type {
   RemoteSessionInfo,
+  RemoteUnreadableSession,
+  RemoteSessionListing,
   RemoteSessionDetail,
   RemoteSessionCopyOutcome,
   RemoteSessionProgress,

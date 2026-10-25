@@ -479,6 +479,7 @@ function DSHVersionCard({ candidate }: { candidate: RemoteDshCandidate }) {
  */
 function SessionPicker() {
   const sessions = useAdoptionStore((s) => s.sourceSessions)
+  const unreadable = useAdoptionStore((s) => s.sourceSessionsUnreadable)
   const error = useAdoptionStore((s) => s.sourceSessionsError)
   const selected = useAdoptionStore((s) => s.selectedSessionDirs)
   const toggle = useAdoptionStore((s) => s.toggleSessionDir)
@@ -501,10 +502,10 @@ function SessionPicker() {
           <Spinner size={13} /> 正在列出历史对话…
         </div>
       )}
-      {!error && sessions !== null && sessions.length === 0 && (
+      {!error && sessions !== null && sessions.length === 0 && unreadable.length === 0 && (
         <p className="text-xs text-ink-faint">源目录中没有可迁移的历史对话。</p>
       )}
-      {!error && sessions !== null && sessions.length > 0 && (
+      {!error && sessions !== null && (sessions.length > 0 || unreadable.length > 0) && (
         <>
           <div className="mb-1 flex items-center justify-between gap-2">
             <p className="text-xs font-medium text-ink-muted">
@@ -512,18 +513,20 @@ function SessionPicker() {
             </p>
             {/* 全选/取消全选 — a long conversation list must not cost one
                 click per row (same affordance as the detail page panel). */}
-            <button
-              className="text-xs text-accent hover:underline"
-              onClick={() =>
-                setDirs(
-                  selected.length === sessions.length
-                    ? []
-                    : sessions.map((s) => s.sessionDir),
-                )
-              }
-            >
-              {selected.length === sessions.length ? '取消全选' : `全选（${sessions.length}）`}
-            </button>
+            {sessions.length > 0 && (
+              <button
+                className="text-xs text-accent hover:underline"
+                onClick={() =>
+                  setDirs(
+                    selected.length === sessions.length
+                      ? []
+                      : sessions.map((s) => s.sessionDir),
+                  )
+                }
+              >
+                {selected.length === sessions.length ? '取消全选' : `全选（${sessions.length}）`}
+              </button>
+            )}
           </div>
           <div className="max-h-44 space-y-1 overflow-y-auto">
             {sessions.map((s) => (
@@ -544,7 +547,35 @@ function SessionPicker() {
                 {s.originSubagent && <Badge tone="neutral">子代理</Badge>}
               </label>
             ))}
+            {/* Unreadable conversations stay visible with their reason (#6):
+                the user is choosing what to carry over, and a picker that
+                shrinks the list silently misstates what the source holds. */}
+            {unreadable.map((u) => (
+              <div
+                key={`${u.project}/${u.sessionDir}`}
+                title={u.reason}
+                className="flex cursor-not-allowed items-center gap-2 text-sm opacity-60"
+              >
+                <Checkbox
+                  checked={false}
+                  disabled
+                  onChange={() => {}}
+                  aria-label={`不可读取的会话 ${u.sessionDir}`}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="block truncate text-ink">{u.sessionDir}</span>
+                  <span className="block truncate text-xs text-ink-faint">{u.reason}</span>
+                </span>
+                <Badge tone="danger">无法读取</Badge>
+              </div>
+            ))}
           </div>
+          {unreadable.length > 0 && (
+            <p className="mt-1 text-xs text-warn">
+              另有 {unreadable.length} 条对话无法读取（格式过新、损坏或读取失败），无法选择迁移；
+              以「全部对话」方式接入时它们仍会随目录整体复制。
+            </p>
+          )}
         </>
       )}
     </div>

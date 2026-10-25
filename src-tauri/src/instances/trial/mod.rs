@@ -108,6 +108,11 @@ pub struct TrialPreview {
     pub estimated_bytes: u64,
     /// Session count for `config+sessions`; `None` for `config`.
     pub session_count: Option<usize>,
+    /// Sessions that exist in the source but cannot be read (a format this
+    /// build refuses, corruption, IO failure) — one entry with its reason.
+    /// Reported instead of silently shrinking `session_count`: a preview that
+    /// hides them would misstate the copy's data scope (#6).
+    pub session_unreadable: Vec<String>,
     /// Distinct cwds the sessions reference — copying never rewrites them,
     /// and the preview must say so (M3 §9.2).
     pub session_cwds: Vec<String>,
@@ -173,15 +178,21 @@ pub(crate) async fn build_preview(
     // session bodies are never parsed for a preview.
     if scope_wants_sessions(&req.scope) {
         let home = super::home_of(&source_dir, &manifest);
-        let sessions = tokio::task::spawn_blocking(move || crate::sessions::list_in_home(&home).0)
+        let listing = tokio::task::spawn_blocking(move || crate::sessions::list_in_home(&home))
             .await
             .map_err(|e| e.to_string())?;
-        let cwds: BTreeSet<String> = sessions
+        let cwds: BTreeSet<String> = listing
+            .sessions
             .iter()
             .filter_map(|s| s.cwd.clone())
             .filter(|c| !c.trim().is_empty())
             .collect();
-        preview.session_count = Some(sessions.len());
+        preview.session_count = Some(listing.sessions.len());
+        preview.session_unreadable = listing
+            .unreadable
+            .iter()
+            .map(|u| format!("{}: {}", u.session_dir, u.reason))
+            .collect();
         preview.session_cwds = cwds.into_iter().collect();
     }
 
@@ -302,6 +313,7 @@ async fn preview_shell(
         workspace: req.workspace.clone(),
         estimated_bytes: 0,
         session_count: None,
+        session_unreadable: Vec::new(),
         session_cwds: Vec::new(),
         pending_downloads: pending,
         conflicts,

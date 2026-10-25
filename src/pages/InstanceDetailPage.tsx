@@ -49,6 +49,7 @@ import {
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell, PanelStat } from '@/components/layout/Panel'
 import { InstanceTile, LaunchTimeline, StatusPill, useInstanceActions } from '@/components/instance'
+import { ProfileRepairNotice, ProfileRowValue } from '@/components/instance/ProfileRepairNotice'
 import { SessionCopyPanel } from '@/components/instance/SessionCopyPanel'
 import { ApiBindingCard } from '@/components/instance/ApiBindingCard'
 import { RuntimeBindingConvert } from '@/features/runtime/RuntimeBindingConvert'
@@ -174,12 +175,12 @@ export function InstanceDetailPage({ id }: { id: string }) {
   // Editing the pinned environment is a deliberate, explicit act — the whole
   // point of an instance is that its version does not drift on its own.
   const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [edit, setEdit] = useState({
     versionId: '',
     runtimeId: '',
     port: 3080,
     autoPort: false,
-    profile: '',
   })
 
   const beginEdit = () => {
@@ -191,13 +192,12 @@ export function InstanceDetailPage({ id }: { id: string }) {
       runtimeId: instance.runtimeId,
       port: instance.port,
       autoPort: instance.autoPort,
-      profile: instance.profile,
     })
     setEditing(true)
   }
 
-  const saveEdit = () => {
-    if (!instance) return
+  const saveEdit = async () => {
+    if (!instance || saving) return
     // The number input's min/max only style the spinner: a cleared field is
     // Number('') === 0 and the browser hands it through. The create wizard
     // gates this at its own port field; the edit form used to persist
@@ -210,13 +210,20 @@ export function InstanceDetailPage({ id }: { id: string }) {
       })
       return
     }
-    update(instance.id, {
+    setSaving(true)
+    // Persisted-confirmed, not fire-and-forget: `updateInstance` is an
+    // optimistic queue whose write lands asynchronously, and a failure used
+    // to arrive after this toast had already claimed success (#5). Only the
+    // awaited result may announce or close anything; on failure the edit
+    // stays open with the user's input intact for a retry.
+    const ok = await update(instance.id, {
       versionId: edit.versionId,
       runtimeId: edit.runtimeId,
       port: edit.port,
       autoPort: edit.autoPort,
-      profile: edit.profile.trim() || 'default',
     })
+    setSaving(false)
+    if (!ok) return
     setEditing(false)
     toast({
       kind: 'success',
@@ -458,8 +465,8 @@ export function InstanceDetailPage({ id }: { id: string }) {
                   <Button size="xs" variant="ghost" onClick={() => setEditing(false)}>
                     取消
                   </Button>
-                  <Button size="xs" variant="primary" onClick={saveEdit}>
-                    保存
+                  <Button size="xs" variant="primary" disabled={saving} onClick={() => void saveEdit()}>
+                    {saving ? '保存中…' : '保存'}
                   </Button>
                 </>
               ) : (
@@ -534,12 +541,11 @@ export function InstanceDetailPage({ id }: { id: string }) {
                     </Select>
                   </Field>
 
-                  <Field label="Profile">
-                    <Input
-                      value={edit.profile}
-                      onChange={(e) => setEdit({ ...edit, profile: e.target.value })}
-                      placeholder="default"
-                    />
+                  <Field
+                    label="Profile"
+                    hint="PHL 以 `dsh web` 启动实例，Profile 固定为 web，不可修改"
+                  >
+                    <Input value="web" readOnly disabled />
                   </Field>
 
                   <Field label="端口" hint={edit.autoPort ? '启动时自动选择空闲端口' : undefined}>
@@ -607,7 +613,8 @@ export function InstanceDetailPage({ id }: { id: string }) {
                     </span>
                   }
                 />
-                <DataRow label="Profile" value={instance.profile} />
+                <DataRow label="Profile" value={<ProfileRowValue profile={instance.profile} />} />
+                {instance.profile !== 'web' && <ProfileRepairNotice instance={instance} />}
                 {isLegacyRuntimeId(instance.runtimeId) && (
                   <div className="mt-2">
                     <RuntimeBindingConvert instanceId={instance.id} />

@@ -72,6 +72,37 @@ pub struct SessionDetail {
     pub event_count: usize,
 }
 
+/// Why one session directory could not be read, kept (not silently skipped)
+/// so the UI can say "N 条存在但无法读取" instead of "无会话" (#6). A
+/// compatibility refusal is data truth, and hiding it makes migration
+/// decisions on false numbers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadableSession {
+    /// The encoded session directory name, same handle shape as `SessionInfo`.
+    pub session_dir: String,
+    pub project: String,
+    /// Stable machine kind for UI affordances:
+    /// `unsupported-version` (newer format than this build reads),
+    /// `encoding-mismatch` (DSH would refuse the whole home),
+    /// `io` (the file could not be read at all), `corrupt` (decode failure).
+    pub kind: &'static str,
+    /// Human-readable explanation (from the codec, no error-code prefix).
+    pub reason: String,
+    /// The generation the artifact filename declared, when an artifact was
+    /// resolved at all — the "v4/v5" a version refusal is about.
+    pub format_version: Option<u64>,
+}
+
+/// The result of walking one home's sessions: what could be read, and what
+/// exists but could not. Both halves are the truth; neither may be dropped.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListing {
+    pub sessions: Vec<SessionInfo>,
+    pub unreadable: Vec<UnreadableSession>,
+}
+
 /// What one copy produced, per target, so a multi-target fan-out can report
 /// partial results honestly.
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +176,25 @@ fn home_encoding(home: &Path) -> codec::LogEncoding {
     copy::home_session_encoding(home).unwrap_or(codec::LogEncoding::Zstd)
 }
 
+/// Why `read_header` failed, with the generation the artifact filename had
+/// declared (known for every error after the artifact was resolved; `None`
+/// for the resolution errors themselves).
+struct SessionReadFailure {
+    err: codec::CodecError,
+    generation: Option<u64>,
+}
+
+impl SessionReadFailure {
+    fn kind(&self) -> &'static str {
+        match &self.err {
+            codec::CodecError::UnsupportedVersion { .. } => "unsupported-version",
+            codec::CodecError::EncodingMismatch(_) => "encoding-mismatch",
+            codec::CodecError::Io(_) => "io",
+            _ => "corrupt",
+        }
+    }
+}
+
 /// Read one session directory. `Ok(None)` means it holds no canonical artifact
 /// at all — DSH walks *every* directory under a project and skips one with
 /// nothing to read, so that is not a broken session and must not be reported as
@@ -157,12 +207,21 @@ fn read_header(
     session_dir: &Path,
     project: &str,
     encoding: codec::LogEncoding,
-) -> Result<Option<SessionInfo>, codec::CodecError> {
-    let Some((path, generation)) = artifact_path(session_dir, encoding)? else {
+) -> Result<Option<SessionInfo>, SessionReadFailure> {
+    let Some((path, generation)) =
+        artifact_path(session_dir, encoding).map_err(|err| SessionReadFailure {
+            err,
+            generation: None,
+        })?
+    else {
         return Ok(None);
     };
-    let buf = std::fs::read(&path).map_err(|e| codec::CodecError::FrameDecode(e.to_string()))?;
-    let log = codec::decode(&buf, generation)?;
+    let fail = |err: codec::CodecError| SessionReadFailure {
+        err,
+        generation: Some(generation),
+    };
+    let buf = std::fs::read(&path).map_err(|e| fail(codec::CodecError::Io(e.to_string())))?;
+    let log = codec::decode(&buf, generation).map_err(fail)?;
     Ok(Some(info_from(&log.header, session_dir, project)))
 }
 
@@ -192,15 +251,20 @@ fn info_from(header: &SessionHeaderRecord, session_dir: &Path, project: &str) ->
 }
 
 /// Walk `<home>/sessions/<project>/<session-dir>` collecting every readable
-/// session. Blocking filesystem work; callers run it off the async thread.
-/// `pub(crate)` also for the adoption wizard, which lists a *source* home's
-/// conversations (it is not yet an instance) for the "选择对话" step.
-pub(crate) fn list_in_home(home: &Path) -> (Vec<SessionInfo>, usize) {
+/// session — and every *unreadable* one, with its reason, instead of folding
+/// the failures into a silent count. Blocking filesystem work; callers run it
+/// off the async thread. `pub(crate)` also for the adoption wizard, which lists
+/// a *source* home's conversations (it is not yet an instance) for the
+/// "选择对话" step, and for the trial preview's session estimate.
+pub(crate) fn list_in_home(home: &Path) -> SessionListing {
     let root = home.join("sessions");
     let mut out = Vec::new();
-    let mut skipped = 0usize;
+    let mut unreadable = Vec::new();
     let Ok(projects) = std::fs::read_dir(&root) else {
-        return (out, 0);
+        return SessionListing {
+            sessions: out,
+            unreadable,
+        };
     };
     // One encoding per home — DSH configures it for the backend, and every
     // session directory in a home must agree with it.
@@ -217,12 +281,23 @@ pub(crate) fn list_in_home(home: &Path) -> (Vec<SessionInfo>, usize) {
             if !sess.path().is_dir() {
                 continue;
             }
+            let dir_name = sess
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             match read_header(&sess.path(), &project_name, encoding) {
                 Ok(Some(info)) => out.push(info),
                 // No canonical artifact: not a session directory (DSH skips it
                 // silently too), so it is neither listed nor counted as broken.
                 Ok(None) => continue,
-                Err(_) => skipped += 1,
+                Err(failure) => unreadable.push(UnreadableSession {
+                    session_dir: dir_name,
+                    project: project_name.clone(),
+                    kind: failure.kind(),
+                    reason: failure.err.explain(),
+                    format_version: failure.generation,
+                }),
             }
         }
     }
@@ -231,7 +306,11 @@ pub(crate) fn list_in_home(home: &Path) -> (Vec<SessionInfo>, usize) {
             .cmp(&a.created_at_ms)
             .then_with(|| a.session_dir.cmp(&b.session_dir))
     });
-    (out, skipped)
+    unreadable.sort_by(|a, b| a.session_dir.cmp(&b.session_dir));
+    SessionListing {
+        sessions: out,
+        unreadable,
+    }
 }
 
 /// Resolve an instance id to a copy endpoint (managed copy or, for a source,
@@ -250,15 +329,17 @@ async fn endpoint(root: &Path, id: &str) -> Result<SessionEndpoint, String> {
 
 // ─────────────────────────────── commands ──────────────────────────────── //
 
-/// List the sessions one instance's DSH_HOME holds. Read-only.
+/// List the sessions one instance's DSH_HOME holds, read-only — readable ones
+/// plus the ones that exist but cannot be read (with per-session reasons), so
+/// a newer format generation shows as "N 条无法读取" rather than vanishing.
 #[tauri::command]
 pub async fn list_sessions(
     state: State<'_, PhlState>,
     id: String,
-) -> Result<Vec<SessionInfo>, String> {
+) -> Result<SessionListing, String> {
     let root = state.root();
     let ep = endpoint(&root, &id).await?;
-    tokio::task::spawn_blocking(move || list_in_home(&ep.home).0)
+    tokio::task::spawn_blocking(move || list_in_home(&ep.home))
         .await
         .map_err(|e| e.to_string())
 }

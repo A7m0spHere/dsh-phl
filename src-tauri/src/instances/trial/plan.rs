@@ -195,10 +195,11 @@ pub(crate) async fn source_fingerprint(
     // Sessions scope: the count the copy would carry is part of the plan.
     if scope_wants_sessions(scope) {
         let home = crate::instances::home_of(source_dir, manifest);
-        let count =
-            tokio::task::spawn_blocking(move || crate::sessions::list_in_home(&home).0.len())
-                .await
-                .unwrap_or(0);
+        let count = tokio::task::spawn_blocking(move || {
+            crate::sessions::list_in_home(&home).sessions.len()
+        })
+        .await
+        .unwrap_or(0);
         feed(count.to_string().as_bytes());
     }
 

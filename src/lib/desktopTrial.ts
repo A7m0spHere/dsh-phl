@@ -43,6 +43,13 @@ export interface TrialPreview {
   workspace: string
   estimatedBytes: number
   sessionCount: number | null
+  /**
+   * Sessions that exist in the source but cannot be read (format too new,
+   * corruption, IO failure), each entry carrying its reason (#6). The count
+   * above only covers what a copy could carry — these are named so the
+   * preview never misstates the source's data scope.
+   */
+  sessionsUnreadable: string[]
   sessionCwds: string[]
   pendingDownloads: string[]
   conflicts: string[]

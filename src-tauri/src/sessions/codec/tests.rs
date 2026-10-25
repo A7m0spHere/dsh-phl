@@ -553,6 +553,55 @@ fn the_copy_rewrite_is_refused_for_generations_without_a_header_marker() {
     let v3 = super::decode(&zstd_all(&[&header_line_v(3, "session-n3", Map::new())]), 3).unwrap();
     assert!(!v3.header.supports_header_fork());
     assert!(rewrite_header_line(&v3.header, &reid("session-N4", "session-n3", 0)).is_err());
+
+    let v4 = super::decode(&zstd_all(&[&header_line_v(4, "session-n4", Map::new())]), 4).unwrap();
+    assert!(!v4.header.supports_header_fork());
+    assert!(rewrite_header_line(&v4.header, &reid("session-N5", "session-n4", 0)).is_err());
+}
+
+/// v4 (the catalog's `currentVersion`) shares the v2/v3 physical contract —
+/// `assertReleasedV4Header` requires exactly
+/// `version/id/createdAt/isSeeded/delegationDepth` and allows only
+/// `cwd/parentSession/origin/agentPreset` beside them. Read support means the
+/// header decodes with its real fields intact; the fork marker still lives in
+/// the event body, so header-fork support stays v0/v1-only.
+#[test]
+fn legal_v4_headers_decode_under_the_official_contract() {
+    let plain = header_line_v(4, "session-v4", Map::new());
+    let log = super::decode(&zstd_all(&[&plain]), 4).unwrap();
+    assert_eq!(log.header.id, "session-v4");
+    assert_eq!(log.header.generation, 4);
+    assert!(!log.header.supports_header_fork());
+
+    // The exact whitelist DSH enforces: every allowed optional key parses, and
+    // a key outside the set is a corrupt header (same rule as v2/v3).
+    let mut extra = Map::new();
+    extra.insert("parentSession".into(), json!("session-p"));
+    extra.insert("origin".into(), json!("subagent"));
+    extra.insert("agentPreset".into(), json!("preset-a"));
+    let full = header_line_v(4, "session-v4b", extra);
+    let log = super::decode(&zstd_all(&[&full]), 4).unwrap();
+    assert_eq!(log.header.parent(), Some("session-p"));
+
+    let mut bad = Map::new();
+    bad.insert("seedLength".into(), json!(2));
+    let stamped = header_line_v(4, "session-v4c", bad);
+    let err = super::decode(&zstd_all(&[&stamped]), 4).unwrap_err();
+    assert!(
+        matches!(err, CodecError::MalformedHeader(ref m) if m.contains("seedLength")),
+        "a v4 header carrying seedLength must be refused, got {err:?}"
+    );
+
+    let hand_rolled = json!({
+        "type": "session", "version": 4, "id": "session-v4d",
+        "createdAt": 1_700_000_000_000u64, "cwd": "D:\\work\\proj", "delegationDepth": 0
+    })
+    .to_string();
+    let err = super::decode(&zstd_all(&[&hand_rolled]), 4).unwrap_err();
+    assert!(
+        matches!(err, CodecError::MalformedHeader(ref m) if m.contains("isSeeded")),
+        "v4 without isSeeded must be refused, got {err:?}"
+    );
 }
 
 /// A generation newer than the installed catalog is a compatibility refusal —

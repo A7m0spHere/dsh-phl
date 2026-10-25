@@ -1296,7 +1296,7 @@ mod tests {
             runtime_id: "node-22".into(),
             port: 8080,
             auto_port: true,
-            profile: "default".into(),
+            profile: "web".into(),
             created_at: now_iso(),
             last_run_at: None,
             total_runtime: 0,
@@ -1427,7 +1427,7 @@ mod tests {
         assert!(dir
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("node_modules")
             .exists());
         assert_eq!(record.dsh_home, dir.join("dsh-home").to_string_lossy());
@@ -1654,7 +1654,7 @@ mod tests {
             .join("scan-0001")
             .join("dsh-home")
             .join("profiles")
-            .join("default");
+            .join("web");
         let modules = profile.join("node_modules");
 
         // A scoped package, an unscoped one, and the installer's staging dir.
@@ -1720,7 +1720,7 @@ mod tests {
             .join("oob-0001")
             .join("dsh-home")
             .join("profiles")
-            .join("default");
+            .join("web");
         let modules = profile.join("node_modules");
 
         // What a hand fix leaves behind (pnpm into the profile + insert
@@ -1799,7 +1799,7 @@ mod tests {
             .join("bundle-0001")
             .join("dsh-home")
             .join("profiles")
-            .join("default");
+            .join("web");
         let modules = profile.join("node_modules");
         let bundle = "dsh-feiyufm-core";
         let bundle_dir = modules.join(bundle);
@@ -2539,7 +2539,7 @@ mod tests {
         let versions_nm = root.join("versions").join("v1").join("node_modules");
         std::fs::create_dir_all(versions_nm.join("dep")).unwrap();
         std::fs::write(versions_nm.join("dep").join("index.js"), b"module").unwrap();
-        let link = home.join("profiles").join("default").join("node_modules");
+        let link = home.join("profiles").join("web").join("node_modules");
         // The instance skeleton already created `node_modules` as a real
         // directory; `install-deps` is what replaces it with junctions.
         let _ = std::fs::remove_dir_all(&link);
@@ -2551,7 +2551,7 @@ mod tests {
         // dependency-bearing plugin unclonable, the same defect one level down.
         let plugin_nm = home
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("plugins")
             .join("node_modules");
         let store = plugin_nm
@@ -2579,7 +2579,7 @@ mod tests {
             .join("cln-b2bb")
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("node_modules");
         assert!(
             std::fs::symlink_metadata(&cloned_link)
@@ -2601,7 +2601,7 @@ mod tests {
             .join("cln-b2bb")
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("plugins")
             .join("node_modules")
             .join("pnpm-dep");
@@ -2641,7 +2641,7 @@ mod tests {
             .join(&snap.id)
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("node_modules");
         assert!(
             std::fs::symlink_metadata(&snap_link)
@@ -2653,11 +2653,7 @@ mod tests {
 
         // Restore copies the link-bearing snapshot back over the live home:
         // the same engine, the same guarantee — the tree comes back wired.
-        std::fs::write(
-            home.join("profiles").join("default").join("marker.txt"),
-            b"x",
-        )
-        .unwrap();
+        std::fs::write(home.join("profiles").join("web").join("marker.txt"), b"x").unwrap();
         snapshot::restore_snapshot_inner(&root, "src-a1aa", &snap.id, &Processes::default())
             .await
             .expect("restoring a link-bearing snapshot must succeed");
@@ -2689,7 +2685,7 @@ mod tests {
         assert!(
             !home
                 .join("profiles")
-                .join("default")
+                .join("web")
                 .join("marker.txt")
                 .exists(),
             "post-snapshot changes are gone, as restore promises"
@@ -2727,7 +2723,7 @@ mod tests {
             .join("dlt-a1aa")
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("node_modules");
         std::fs::create_dir_all(&nm).unwrap();
         copy::recreate_link(&nm.join("dep"), &versions_dep, true).unwrap();
@@ -2910,7 +2906,7 @@ mod tests {
             .join("ipc-1")
             .join("dsh-home")
             .join("profiles")
-            .join("default")
+            .join("web")
             .join("node_modules");
         std::fs::create_dir_all(modules.join("solo")).unwrap();
         std::fs::write(

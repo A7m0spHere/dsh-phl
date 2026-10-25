@@ -78,3 +78,64 @@ describe('optimistic persistence', () => {
     await f.queue.flush()
   })
 })
+
+describe('enqueue outcome reporting (#5: no success toast before persistence)', () => {
+  it('resolves true when every write in the batch persisted', async () => {
+    const f = fixture()
+    const first = f.queue.enqueue({ name: 'first' })
+    const second = f.queue.enqueue({ favorite: true })
+    f.writes[0].resolve()
+    await Promise.resolve() // let the drain advance to the second write
+    f.writes[1].resolve()
+    expect(await first).toBe(true)
+    expect(await second).toBe(true)
+  })
+
+  it('resolves false when the write failed, alongside onError', async () => {
+    const f = fixture()
+    const done = f.queue.enqueue({ name: 'doomed' })
+    f.writes[0].reject(new Error('disk full'))
+    expect(await done).toBe(false)
+    expect(f.onError).toHaveBeenCalledTimes(1)
+    // The published value rolled back to the last confirmed state.
+    expect(f.read().name).toBe('original')
+  })
+
+  it('reports the failure to every waiter of the same batch', async () => {
+    const f = fixture()
+    const a = f.queue.enqueue({ name: 'a' })
+    const b = f.queue.enqueue({ favorite: true })
+    f.writes[0].reject(new Error('nope'))
+    await Promise.resolve() // let the drain advance to the second write
+    f.writes[1].resolve()
+    expect(await a).toBe(false)
+    expect(await b).toBe(false)
+  })
+
+  it('does not poison the next batch with an earlier failure', async () => {
+    const f = fixture()
+    const failed = f.queue.enqueue({ name: 'failed' })
+    f.writes[0].reject(new Error('transient'))
+    await failed
+    const retried = f.queue.enqueue({ name: 'retried' })
+    f.writes[1].resolve()
+    expect(await retried).toBe(true)
+    expect(f.read().name).toBe('retried')
+  })
+
+  it('a failed first write keeps the queued second edit honest', async () => {
+    // Rapid consecutive edits: the second edit rides the same batch, and a
+    // failure of the first write must make BOTH waiters report failure — the
+    // UI that closed its form on the second enqueue would otherwise claim a
+    // success whose value was never persisted.
+    const f = fixture()
+    const first = f.queue.enqueue({ name: 'first' })
+    f.writes[0].reject(new Error('locked'))
+    const second = f.queue.enqueue({ name: 'second' })
+    await Promise.resolve() // let the drain advance to the second write
+    f.writes[1].resolve()
+    expect(await first).toBe(false)
+    expect(await second).toBe(false)
+    expect(f.read().name).toBe('second')
+  })
+})

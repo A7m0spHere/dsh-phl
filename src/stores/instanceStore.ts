@@ -100,7 +100,14 @@ export interface InstanceState {
   cloneInstance: (id: string, name: string) => Promise<Instance | null>
   /** Registers an instance created outside the create flow (bundle import). */
   admitInstance: (instance: Instance) => void
-  updateInstance: (id: string, patch: Partial<Instance>) => void
+  /**
+   * Persist a patch through the optimistic queue. The returned promise settles
+   * with whether the write actually landed — `true` only after the backend
+   * confirmed persistence. Callers that announce success (toasts, closing an
+   * edit form) MUST await it: firing it off means the failure toast comes from
+   * the queue's `onError` and nothing else.
+   */
+  updateInstance: (id: string, patch: Partial<Instance>) => Promise<boolean>
   deleteInstance: (id: string) => Promise<void>
   toggleFavorite: (id: string) => void
   dismissError: (id: string) => void
@@ -351,7 +358,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => {
 
   updateInstance(id, patch) {
     const before = get().byId(id)
-    if (!before) return
+    if (!before) return Promise.resolve(false)
     const publish = (changes: Partial<Instance>) => set({
       instances: get().instances.map((i) => i.id === id ? { ...i, ...changes } : i),
     })
@@ -362,7 +369,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => {
       Object.assign(derivedFields.has(key) ? derived : persisted, { [key]: patch[key] })
     }
     publish(derived)
-    if (!Object.keys(persisted).length) return
+    if (!Object.keys(persisted).length) return Promise.resolve(true)
     let writer = instanceWriters.get(id)
     if (!writer) {
       writer = createOptimisticQueue({
@@ -375,7 +382,7 @@ export const useInstanceStore = create<InstanceState>()((set, get) => {
       })
       instanceWriters.set(id, writer)
     }
-    writer.enqueue(persisted)
+    return writer.enqueue(persisted)
   },
 
   async deleteInstance(id) {

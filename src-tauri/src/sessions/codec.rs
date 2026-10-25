@@ -13,7 +13,7 @@
 //! - A session's **format generation** is named by its artifact file
 //!   (`session.jsonl` = v0, `session.vN.jsonl` = vN, plus `.zstd`), and DSH
 //!   agrees the filename with the header's own `version` — a mismatch is
-//!   refused outright. DSH's installed catalog carries codecs v0..v3 with the
+//!   refused outright. DSH's installed catalog carries codecs v0..v4 with the
 //!   adjacent migration chain, so those are readable here too
 //!   ([`MAX_READABLE_GENERATION`]); anything newer is a compatibility refusal,
 //!   never a guess.
@@ -42,10 +42,16 @@ use std::io::Read;
 use serde_json::{Map, Value};
 
 /// The newest Session format generation this build reads. DSH's installed
-/// catalog (`dsh-session-format-catalog`) wires codecs v0..v3 with the adjacent
-/// migration chain and `currentVersion: 3`, so every generation up to 3 is
+/// catalog (`dsh-session-format-catalog`) wires codecs v0..v4 with the adjacent
+/// migration chain and `currentVersion: 4`, so every generation up to 4 is
 /// decodable; a newer one is a compatibility refusal, never a guess.
-pub(crate) const MAX_READABLE_GENERATION: u64 = 3;
+///
+/// v4 keeps the v2/v3 physical header contract (`assertReleasedV4Header`:
+/// required `version/id/createdAt/isSeeded/delegationDepth`, optional
+/// `cwd/parentSession/origin/agentPreset` — the wire line still carries
+/// `type:"session"`), and its fork marker still lives in the event body, so
+/// copy support is unchanged: listed, never migrated.
+pub(crate) const MAX_READABLE_GENERATION: u64 = 4;
 
 /// The generations whose fork marker lives in the *header* line — the only ones
 /// a copy can re-identify without writing an event body.
@@ -169,6 +175,8 @@ fn is_absolute_path(path: &str) -> bool {
 ///
 /// v0/v1: `dsh-session-format-v0-to-v1::PHYSICAL_HEADER_REQUIRED/OPTIONAL`.
 /// v2/v3: `dsh-session-persistence-jsonl::HEADER_REQUIRED_KEYS/HEADER_OPTIONAL_KEYS`.
+/// v4: `dsh-session-format-v3-to-v4::assertReleasedV4Header` — the same key
+/// set as v2/v3, so it shares the branch below.
 fn header_contract(generation: u64) -> (&'static [&'static str], &'static [&'static str]) {
     const V0_REQUIRED: &[&str] = &["type", "version", "id", "createdAt", "delegationDepth"];
     const V0_OPTIONAL: &[&str] = &[
@@ -231,19 +239,24 @@ pub(crate) enum CodecError {
     MalformedHeader(String),
     /// The artifact is not decodable text at all.
     UnsupportedEncoding(String),
+    /// The artifact file itself could not be read from disk (permission,
+    /// sharing violation, vanished mid-scan). Distinct from decode problems:
+    /// the bytes were never seen, so no codec verdict applies.
+    Io(String),
 }
 
 impl CodecError {
-    /// A `coded` error string for the command layer (compatibility failures use
-    /// `ErrCode::State`; decode problems are data, not a busy resource).
-    pub(crate) fn to_command_error(&self) -> String {
-        let detail = match self {
+    /// The human-readable explanation without the command-layer error-code
+    /// prefix — what a listing surfaces per unreadable session (#6: the
+    /// refusal itself must be visible, not folded into a silent skip count).
+    pub(crate) fn explain(&self) -> String {
+        match self {
             CodecError::MissingHeader => "会话日志为空或被截断，缺少 header 行".to_string(),
             CodecError::NotASessionLog => {
                 "首条记录不是 session header，可能不是 DSH 会话文件".to_string()
             }
             CodecError::UnsupportedVersion { found } => format!(
-                "会话格式版本 {found} 超出当前支持的 v{MAX_READABLE_GENERATION}，为避免损坏已拒绝复制"
+                "会话格式版本 v{found} 超出 PHL 当前支持的 v{MAX_READABLE_GENERATION}，已按只读拒绝列出"
             ),
             CodecError::GenerationMismatch { filename, header } => format!(
                 "会话文件名标识 v{filename}，但 header 自称 v{header}：DSH 会直接拒绝该会话"
@@ -255,8 +268,14 @@ impl CodecError {
             CodecError::RowShape(e) => format!("会话事件行无法用于计算继承长度: {e}"),
             CodecError::MalformedHeader(e) => format!("header 解析失败: {e}"),
             CodecError::UnsupportedEncoding(e) => format!("会话日志编码不支持: {e}"),
-        };
-        crate::errors::coded(crate::errors::ErrCode::State, detail)
+            CodecError::Io(e) => format!("读取会话文件失败: {e}"),
+        }
+    }
+
+    /// A `coded` error string for the command layer (compatibility failures use
+    /// `ErrCode::State`; decode problems are data, not a busy resource).
+    pub(crate) fn to_command_error(&self) -> String {
+        crate::errors::coded(crate::errors::ErrCode::State, self.explain())
     }
 }
 

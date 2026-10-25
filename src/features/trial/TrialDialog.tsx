@@ -436,6 +436,27 @@ export function TrialDialog() {
                           `会话引用原工作目录（如 ${preview.sessionCwds[0]}）；副本不会自动执行任何任务。`}
                       </Notice>
                     )}
+                    {/* #6: sessions that exist but cannot be read are named,
+                        not folded into a smaller count — the user is deciding
+                        whether to trust this copy with their history. */}
+                    {preview.sessionsUnreadable?.length > 0 && (
+                      <Notice tone="warn">
+                        <p className="font-medium">
+                          源实例另有 {preview.sessionsUnreadable.length} 条会话无法读取，未计入上数：
+                        </p>
+                        <ul className="mt-1 list-disc pl-5">
+                          {preview.sessionsUnreadable.slice(0, 3).map((entry) => (
+                            <li key={entry} className="break-all">{entry}</li>
+                          ))}
+                          {preview.sessionsUnreadable.length > 3 && (
+                            <li>……等 {preview.sessionsUnreadable.length} 项</li>
+                          )}
+                        </ul>
+                        <p className="mt-1">
+                          目录级复制仍会原样带上这些文件，但 PHL 无法核对其内容；请在 DSH 中确认。
+                        </p>
+                      </Notice>
+                    )}
                     {workspace === 'shared' && (
                       <Notice tone="warn">两个实例会操作同一批项目文件，请确认这是你想要的。</Notice>
                     )}
