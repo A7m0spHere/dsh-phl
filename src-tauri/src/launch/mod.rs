@@ -41,17 +41,15 @@ pub(crate) use registry::{
 };
 
 pub(crate) use process::{
-    allocate_port, build_command, confirm_exit, kill_tree, log_tail, node_binary,
-    read_web_url_once, resolve_node, runtime_bin_dir, terminate_tree, TERM_GRACE,
+    allocate_port, build_command, confirm_exit, kill_tree, log_tail, node_binary, parse_web_url,
+    read_web_url_once, redact_web_token, resolve_node, runtime_bin_dir, terminate_tree, TERM_GRACE,
 };
 // Only defined (and only referenced, at `creation_flags` call sites) on
 // Windows; an unconditional re-export breaks `cargo check` on macOS.
 #[cfg(windows)]
 pub(crate) use process::CREATE_NO_WINDOW;
 #[cfg(test)]
-pub(crate) use process::{
-    check_kill_output, parse_web_url, port_free, redact_web_token, MIN_WEB_PORT,
-};
+pub(crate) use process::{check_kill_output, port_free, MIN_WEB_PORT};
 
 /// Emitted when a launched DSH process exits for any reason — crash, manual
 /// stop, normal shutdown. The frontend folds this into the instance's UI

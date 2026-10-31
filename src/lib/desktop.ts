@@ -146,6 +146,9 @@ export type { RemoteVersionMeta, InstalledVersionInfo, DownloadArgs } from './de
 export {
   listDshPlugins,
   installPlugin,
+  installedPluginCompat,
+  pluginHealthCheck,
+  pluginHealthRepair,
   pluginLatestVersion,
   setPluginEnabled,
   uninstallPlugin,
@@ -156,6 +159,8 @@ export type {
   PluginProgressStage,
   RemotePluginCatalog,
   InstallPluginArgs,
+  PluginHealthFinding,
+  PluginHealthReport,
 } from './desktopPlugins'
 
 /* ------------------------------ runtimes ------------------------------ */
@@ -218,8 +223,17 @@ export type {
 export {
   previewTrial,
   createTrial,
+  trialUpgradeReport,
 } from './desktopTrial'
-export type { TrialRequest, TrialScope, TrialWorkspace, TrialPreview, TrialOutcome } from './desktopTrial'
+export type {
+  TrialRequest,
+  TrialScope,
+  TrialWorkspace,
+  TrialPreview,
+  TrialOutcome,
+  TrialUpgradeReport,
+  TrialSessionSummary,
+} from './desktopTrial'
 
 /* ------------------------------- launch ------------------------------- */
 // §M2: launch IPC moved to `desktopLaunch.ts`; re-exported verbatim.

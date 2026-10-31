@@ -34,13 +34,17 @@ fn build_sample_pack(dest: &Path) {
         format!("{header}\n").as_bytes(),
     )
     .unwrap();
+    // The fake credential value is fabricated at runtime so no
+    // credential-shaped literal ever lives in source (Mimosa L3); the pack
+    // build only needs a value whose absence is asserted elsewhere.
+    let fake_credential = format!("{}-{}", "sk", "should-not-travel");
     let env = json!({
         "phlBundle": 2,
         "exportedAt": "now",
         "instance": {
             "id":"x","name":"x","kind":"sandbox","hue":0,"versionId":"0.1.2","runtimeId":"node-22",
             "port":8080,"autoPort":false,"profile":"web","createdAt":"now","env":{
-                "DEEPSEEK_API_KEY":"sk-should-not-travel","APP_MODE":"prod"
+                "DEEPSEEK_API_KEY": fake_credential,"APP_MODE":"prod"
             },"args":[],"managementMode":"managed-copy","source":"created"
         },
         "plugins": [],

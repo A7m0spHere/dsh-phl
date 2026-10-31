@@ -319,6 +319,14 @@ export interface PhlRepository {
   ): Promise<TrialOutcome | null>
 
   /**
+   * The one-page upgrade report for a trial copy (issue #8): evidence-backed
+   * WebUI verdict, redacted heuristic error lines, per-plugin engines.dsh
+   * verdicts and commit-time carry-overs. Persists into the copy's own
+   * directory. `null` = browser mode (no real copy to report on).
+   */
+  trialUpgradeReport(instanceId: string): Promise<import('@/lib/desktop').TrialUpgradeReport | null>
+
+  /**
    * Downloads and installs a plugin into the instance's profile: resolve the
    * tarball (npm packument / direct / GitHub), verify its integrity, unpack
    * into `node_modules` and register it in `cordis.patch.yml`.
@@ -331,7 +339,14 @@ export interface PhlRepository {
     instance: Instance,
     onProgress: (p: TransferProgress) => void,
     signal: AbortSignal,
-  ): Promise<{ version: string; registryId?: string; trust?: import('@/types').PluginTrust }>
+  ): Promise<{
+    version: string
+    registryId?: string
+    trust?: import('@/types').PluginTrust
+    /** The package's engines.dsh claim vs this DSH (issue #10) — consumed
+     *  by the install success toast. */
+    engineCompat?: import('@/types').PluginEngineCompat
+  }>
 
   /**
    * Flags the plugin disabled/enabled in the profile's `cordis.patch.yml`.
@@ -355,6 +370,33 @@ export interface PhlRepository {
    * updates tab without hammering npm for the whole catalog.
    */
   latestPluginVersion(plugin: Plugin): Promise<string | null>
+
+  /**
+   * Per-plugin `engines.dsh` verdicts (issue #10) for one instance's
+   * installed plugins, evaluated backend-side against the instance's bound
+   * DSH version. Read-only; never writes or gates anything. The array may be
+   * empty (browser mode), and every entry is honest about "unknown" —
+   * undeclared, unparsable or unbound never masquerade as "incompatible".
+   */
+  installedPluginCompat(instanceId: string): Promise<import('@/types').PluginEngineCompat[]>
+
+  /**
+   * Read-only plugin-environment diagnosis (issue #9): what cordis declares
+   * vs what sits in node_modules vs the PHL markers vs the install
+   * transaction journal. `managed: false` for external instances — findings
+   * still come, repairs never run on them.
+   */
+  pluginHealthCheck(instanceId: string): Promise<import('@/lib/desktop').PluginHealthReport>
+
+  /**
+   * Runs ONLY the user-chosen safe repairs (transaction recovery /
+   * conflict disable — the backend refuses anything else) and answers with
+   * a FRESH report showing the post-repair truth.
+   */
+  pluginHealthRepair(
+    instanceId: string,
+    actions: string[],
+  ): Promise<import('@/lib/desktop').PluginHealthReport>
 
   /**
    * The official DeepSeek Harness desktop app, seen as a machine singleton

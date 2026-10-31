@@ -40,6 +40,7 @@ pub(crate) mod dependencies;
 pub(crate) mod download;
 pub(crate) mod extract;
 pub(crate) mod install;
+pub(crate) mod range;
 
 pub(crate) use catalog::parse_semver;
 pub(crate) use dependencies::{
@@ -65,6 +66,7 @@ pub(crate) use dependencies::{
 };
 #[cfg(test)]
 pub(crate) use install::{check_version_health, InstallMarker};
+pub(crate) use range::parse_npm_range;
 
 /* ----------------------------- wire types ----------------------------- */
 

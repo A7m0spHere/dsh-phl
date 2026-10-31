@@ -53,9 +53,11 @@ pub async fn install_plugin(
     // bound runtime (see `deps`), so the manifest is read for that binding.
     // `writable_profile_dir` already proved the manifest loads.
     let instance_dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
-    let runtime_id = crate::instances::manifest::load_manifest(&instance_dir, &instance_id)
-        .await?
-        .runtime_id;
+    let manifest = crate::instances::manifest::load_manifest(&instance_dir, &instance_id).await?;
+    let runtime_id = manifest.runtime_id.clone();
+    // engines.dsh verdicts (issue #10) evaluate against the instance's own
+    // DSH binding; an unbound/unparseable one stays "unknown", never a guess.
+    let dsh = crate::plugins::engines::bare_dsh_version(&manifest.version_id);
     let deps = DependencyEnv::new(&phl.root(), &runtime_id, Some(&registry_base));
     // A committed install changes the tree the disk-usage cache measured.
     let profile_for_cache = profile.clone();
@@ -81,6 +83,7 @@ pub async fn install_plugin(
                 &registry_base,
                 &profile,
                 &deps,
+                dsh,
                 &on_progress,
             )
             .await
@@ -104,6 +107,7 @@ async fn run_plugin_install(
     registry_base: &str,
     instance_root: &Path,
     deps: &DependencyEnv,
+    dsh: Option<semver::Version>,
     on_progress: &Channel<PluginProgressEvent>,
 ) -> Result<PluginInstallOutcome, String> {
     if instance_root.as_os_str().is_empty() {
@@ -285,10 +289,26 @@ async fn run_plugin_install(
     recover_profile_transaction(instance_root).await?;
     let _ = tokio::fs::remove_file(&part_path).await;
 
+    // engines.dsh claim of the freshly installed package (issue #10),
+    // evaluated AFTER the commit against what actually landed on disk.
+    // Advisory only: the install is never gated on it.
+    let engine_range = super::engines::package_engine_range(&dest).await;
+    let (engine_verdict, engine_reason) =
+        super::engines::evaluate(engine_range.as_deref(), dsh.as_ref());
+    let engine_registry_id = registry_id.clone();
+
     Ok(PluginInstallOutcome {
-        version: resolved.version,
+        version: resolved.version.clone(),
         registry_id,
         trust: trust.to_string(),
+        engine_compat: super::engines::PluginEngineCompat {
+            plugin_id: plugin_id.to_string(),
+            registry_id: engine_registry_id,
+            installed_version: resolved.version,
+            engine_range,
+            verdict: engine_verdict.as_str().to_string(),
+            reason: engine_reason,
+        },
     })
 }
 
@@ -441,6 +461,39 @@ async fn read_transaction(profile: &Path) -> Result<PluginTransaction, String> {
         return Err("不支持的插件事务，已保留备份".into());
     }
     Ok(transaction)
+}
+
+/// Read-only residue probe for the plugin health check (issue #9): does this
+/// profile carry an unfinished install transaction, and can the EXISTING
+/// recovery entry actually read it? Three states on purpose:
+///
+/// * `None` — no journal, nothing to do;
+/// * `Recoverable(id)` — the journal parses and validates, so
+///   `recover_profile_transaction` (the repair the health check offers) will
+///   accept it;
+/// * `Unreadable` — a journal file exists that this build refuses (unknown
+///   version, corrupt, path-unsafe id): the health check must surface this
+///   as its OWN finding with a keep-the-scene suggestion instead of offering
+///   a repair button that is guaranteed to fail.
+///
+/// Deliberately does NOT recover: 修复由用户明确选择。
+pub(crate) enum TransactionResidue {
+    None,
+    Recoverable(String),
+    Unreadable,
+}
+
+pub(crate) async fn transaction_residue(profile: &Path) -> TransactionResidue {
+    if tokio::fs::metadata(transaction_dir(profile).join("journal.json"))
+        .await
+        .is_err()
+    {
+        return TransactionResidue::None;
+    }
+    match read_transaction(profile).await {
+        Ok(t) => TransactionResidue::Recoverable(t.registry_id),
+        Err(_) => TransactionResidue::Unreadable,
+    }
 }
 
 async fn begin_transaction(profile: &Path, registry_id: &str) -> Result<(), String> {

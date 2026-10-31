@@ -27,6 +27,7 @@ export const KIND_LABEL: Record<string, string> = {
   'plugin-install': '安装插件',
   'plugin-uninstall': '卸载插件',
   'plugin-toggle': '插件开关',
+  'plugin-health-repair': '插件体检修复',
   'instance-create': '创建实例',
   'instance-save': '保存实例',
   'instance-delete': '删除实例',

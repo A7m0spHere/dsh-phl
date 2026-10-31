@@ -73,6 +73,7 @@ function preview(overrides: Partial<TrialPreview> = {}): TrialPreview {
     conflicts: [],
     blocked: [],
     mismatchedPackages: [],
+    pluginCompat: [],
     planId: 'a'.repeat(64),
     targetId: 'trial-daily-1',
     sourceFingerprint: 'b'.repeat(64),

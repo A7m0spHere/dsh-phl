@@ -25,7 +25,9 @@ import {
   type PluginTransferState,
 } from '@/stores'
 import { useShallow } from 'zustand/react/shallow'
-import { latestRelease, type Plugin } from '@/types'
+import { latestRelease, type Plugin, type PluginEngineCompat } from '@/types'
+import type { PluginHealthReport } from '@/lib/desktop'
+import { repository } from '@/services'
 import { Button, Chip, Dropdown, EmptyState, Input } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
@@ -266,6 +268,64 @@ export function PluginsPage() {
     return 'unknown' as const
   }
 
+  // engines.dsh verdicts (issue #10): read-only backend evaluation of every
+  // installed package's own claim against this instance's DSH binding. The
+  // list is keyed by registry id — the id the marker and cordis.patch.yml
+  // agree on — so rows join without guessing from display names.
+  const [engineCompat, setEngineCompat] = useState<PluginEngineCompat[]>([])
+  useEffect(() => {
+    if (!instance) {
+      setEngineCompat([])
+      return
+    }
+    let alive = true
+    void repository.installedPluginCompat(instance.id).then((rows) => {
+      if (alive) setEngineCompat(rows)
+    })
+    return () => {
+      alive = false
+    }
+    // Depends on the instance OBJECT, not just its id: an install/uninstall
+    // swaps the store's instance record, and the verdicts must follow without
+    // a scope round-trip (review R6).
+  }, [instance])
+  const compatByRegistry = useMemo(() => {
+    const map = new Map<string, PluginEngineCompat>()
+    for (const row of engineCompat) map.set(row.registryId, row)
+    return map
+  }, [engineCompat])
+
+  // 插件环境体检 (issue #9): read-only diagnosis on demand, refreshed after
+  // each user-chosen repair with the fresh post-repair report.
+  const [health, setHealth] = useState<PluginHealthReport | null>(null)
+  const [healthBusy, setHealthBusy] = useState(false)
+  const runHealthCheck = useCallback(async () => {
+    if (!instance) return
+    setHealthBusy(true)
+    try {
+      setHealth(await repository.pluginHealthCheck(instance.id))
+    } catch {
+      setHealth(null)
+    } finally {
+      setHealthBusy(false)
+    }
+  }, [instance?.id])
+  const runHealthRepair = useCallback(
+    async (actions: string[]) => {
+      if (!instance) return
+      setHealthBusy(true)
+      try {
+        setHealth(await repository.pluginHealthRepair(instance.id, actions))
+      } catch {
+        // The backend refuses anything but the two safe entry points; a
+        // failure leaves the current findings on screen untouched.
+      } finally {
+        setHealthBusy(false)
+      }
+    },
+    [instance?.id],
+  )
+
   const registry = useMemo(() => {
     const q = deferredQuery.trim().toLowerCase()
     const filtered = plugins.filter((p) => {
@@ -355,12 +415,13 @@ export function PluginsPage() {
           outdated,
           check,
           compat: meta ? compatibility(meta, ip.version) : ('unknown' as const),
+          engine: compatByRegistry.get(ip.registryId ?? ''),
         }
       })
       .filter((p) => !q || p.name.toLowerCase().includes(q))
     // `compatibility` closes over the scoped instance deliberately.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instance, plugins, latestVersions, query])
+  }, [instance, plugins, latestVersions, query, compatByRegistry])
 
   // Update-check health across the instance's checkable plugins (§R5), driven
   // by the explicit state — used for the re-check affordance and to stop the
@@ -542,6 +603,10 @@ export function PluginsPage() {
           onGoUpdates={() => setTab('updates')}
           onGoRegistry={() => setTab('registry')}
           onRecheck={() => void recheckLatest(instance.id)}
+          health={health}
+          healthBusy={healthBusy}
+          onHealthCheck={() => void runHealthCheck()}
+          onHealthRepair={(actions) => void runHealthRepair(actions)}
         />
       )}
         </motion.div>

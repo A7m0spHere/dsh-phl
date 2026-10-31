@@ -19,6 +19,7 @@
     "test:alpha": "node scripts/alpha-gate.mjs",
     "test:e2e:core": "node scripts/e2e-gate.mjs core",
     "test:e2e:smoke": "node scripts/e2e-gate.mjs smoke",
+    "test:real-dsh": "node scripts/real-dsh-acceptance.mjs",
     "test:desktop": "node scripts/alpha-desktop.mjs",
     "test:trial-cdp": "node e2e/trial-copy-cdp.mjs",
     "test:dep-retry": "node e2e/dependency-retry-cdp.mjs",

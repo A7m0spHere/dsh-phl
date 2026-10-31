@@ -84,7 +84,12 @@ async function installPlugin(
   instance: Instance,
   onProgress: (p: TransferProgress) => void,
   signal: AbortSignal,
-): Promise<{ version: string; registryId?: string; trust: PluginTrust }> {
+): Promise<{
+  version: string
+  registryId?: string
+  trust: PluginTrust
+  engineCompat?: import('@/types').PluginEngineCompat
+}> {
   const transferId = newTransferId(`p:${instance.id}:${plugin.id}`)
   // `addEventListener('abort')` never fires on an already-aborted signal, so
   // a cancel that lands before this call would otherwise be ignored outright.
@@ -103,7 +108,14 @@ async function installPlugin(
     // `trust` arrives on the outcome and was previously dropped here — the
     // row's badge then showed the PREVIOUS install's trust level (or none)
     // until a full disk reload.
-    return { version: outcome.version, registryId: outcome.registryId, trust: asPluginTrust(outcome.trust) }
+    // `engineCompat` (issue #10) rides along so the success toast can warn
+    // about the package's own engines.dsh claim right at install time.
+    return {
+      version: outcome.version,
+      registryId: outcome.registryId,
+      trust: asPluginTrust(outcome.trust),
+      engineCompat: outcome.engineCompat,
+    }
   } catch (err) {
     if (parseThrownError(err).message === 'cancelled') throw new Cancelled()
     throw err instanceof Error ? err : new Error(String(err))
@@ -117,14 +129,46 @@ async function latestPluginVersion(plugin: Plugin): Promise<string | null> {
   return version
 }
 
+/** Read-only engines.dsh verdicts (issue #10) — straight from the backend. */
+async function installedPluginCompat(instanceId: string) {
+  try {
+    return await desktop.installedPluginCompat(instanceId)
+  } catch (err) {
+    // A read-only diagnostic must never take the plugin page down with it:
+    // an empty list falls the rows back to the legacy catalog-list badge.
+    console.warn('[phl] installed_plugin_compat unavailable:', parseThrownError(err).message)
+    return []
+  }
+}
+
+/** Read-only plugin-environment diagnosis (issue #9). */
+async function pluginHealthCheck(instanceId: string) {
+  return desktop.pluginHealthCheck(instanceId)
+}
+
+/** User-chosen safe repairs (issue #9); answers with the fresh report. */
+async function pluginHealthRepair(instanceId: string, actions: string[]) {
+  return desktop.pluginHealthRepair(instanceId, actions)
+}
+
 /** The repository overrides, spread into the desktop repository selection. */
 export const tauriPluginOverrides: Pick<
   PhlRepository,
-  'listPlugins' | 'installPlugin' | 'setPluginEnabled' | 'uninstallPlugin' | 'latestPluginVersion'
+  | 'listPlugins'
+  | 'installPlugin'
+  | 'setPluginEnabled'
+  | 'uninstallPlugin'
+  | 'latestPluginVersion'
+  | 'installedPluginCompat'
+  | 'pluginHealthCheck'
+  | 'pluginHealthRepair'
 > = {
   listPlugins,
   installPlugin,
   latestPluginVersion,
+  installedPluginCompat,
+  pluginHealthCheck,
+  pluginHealthRepair,
   setPluginEnabled: async (instance, installed, enabled) => {
     await desktop.setPluginEnabled(instance.id, fallbackRegistryId(installed), enabled)
   },

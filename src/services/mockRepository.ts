@@ -13,10 +13,12 @@ import type {
   LaunchPhase,
   OfficialDesktopInfo,
   Plugin,
+  PluginEngineCompat,
   PluginTrust,
   Runtime,
   Snapshot,
 } from '@/types'
+import type { PluginHealthReport } from '@/lib/desktop'
 import { LAUNCH_PHASES } from '@/types'
 import type {
   EnvironmentDiff,
@@ -532,6 +534,9 @@ class MockRepository implements PhlRepository {
       conflicts: [],
       blocked: [],
       mismatchedPackages: [],
+      // No real package.json in browser mode — an empty list keeps the
+      // preview honest instead of fabricating engines.dsh verdicts.
+      pluginCompat: [],
       // A mock preview issues no executable plan, and it cannot: createTrial
       // refuses in browser mode. The empty identity is what disables the
       // dialog's create button instead of pretending a plan exists.
@@ -648,12 +653,45 @@ class MockRepository implements PhlRepository {
     void installed
   }
 
+  /** Browser mode has no real copy or launch log to report on (issue #8). */
+  async trialUpgradeReport(instanceId: string) {
+    await sleep(120)
+    void instanceId
+    return null
+  }
+
+  /** Browser mode has no real profile to scan (issue #9) — a clean report. */
+  async pluginHealthCheck(instanceId: string): Promise<PluginHealthReport> {
+    await sleep(160)
+    return { instanceId, managed: true, generatedAt: new Date().toISOString(), findings: [] }
+  }
+
+  async pluginHealthRepair(
+    instanceId: string,
+    actions: string[],
+  ): Promise<PluginHealthReport> {
+    await sleep(200)
+    void actions
+    return { instanceId, managed: true, generatedAt: new Date().toISOString(), findings: [] }
+  }
+
   async latestPluginVersion(plugin: Plugin): Promise<string | null> {
     await sleep(160)
     // GitHub-source plugins have no npm dist-tags to consult — the real
     // bridge returns null for them too.
     if (plugin.source.kind !== 'npm') return null
     return plugin.releases[0]?.version ?? null
+  }
+
+  /**
+   * Browser mode has no real package.json on disk to read (issue #10), so
+   * the mock returns an empty list — the installed rows fall back to the
+   * legacy catalog-list badge instead of a fabricated engines verdict.
+   */
+  async installedPluginCompat(instanceId: string): Promise<PluginEngineCompat[]> {
+    await sleep(120)
+    void instanceId
+    return []
   }
 
   /**

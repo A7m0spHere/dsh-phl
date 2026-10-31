@@ -17,6 +17,15 @@
 //! PHL_REAL_DSH=1 cargo test --lib real_dsh -- --ignored --nocapture --test-threads=1
 //! ```
 //!
+//! Issue #7 adds the 0.2.x leg: `real_dsh_02x_compatibility_matrix` pins one
+//! npm-confirmed 0.2.x release and walks the full per-platform step list
+//! (upstream catalog → install → 目录识别 → instance → launch → token URL
+//! 握手 → sessions read → plugin list & enable/disable → trial preview →
+//! restart-adoption core → stop/port free). The repeatable entry points are
+//! `npm run test:real-dsh` and the manual-only workflow
+//! `.github/workflows/real-dsh-matrix.yml`; neither is a CI gate (flaky
+//! upstream networks must not block every push — issue #7's own caveat).
+//!
 //! Without `PHL_REAL_DSH=1` the test prints a SKIP line and returns, so an
 //! accidental `--ignored` sweep cannot reach the network.
 //!
@@ -37,6 +46,12 @@ use super::super::release_e2e::fixtures::NodeInfo;
 pub(super) const TARGET_VERSION: &str = "0.1.7-rc.2";
 const OLD_VERSION: &str = "0.1.5-rc.3";
 pub(super) const REGISTRY: &str = "https://registry.npmjs.org";
+
+/// Issue #7's 0.2.x matrix pin. Confirmed 2026-10-31 on
+/// `https://registry.npmjs.org/@deepseek-ai/dsh`: `0.2.1-rc.5` is published
+/// AND carries the `latest` dist-tag — npm-installable, not GitHub-only.
+/// Bump it deliberately (with a fresh npm check), never to a floating tag.
+pub(super) const MATRIX_VERSION: &str = "0.2.1-rc.5";
 
 pub(super) fn opted_in() -> bool {
     std::env::var("PHL_REAL_DSH").ok().as_deref() == Some("1")
@@ -562,6 +577,341 @@ async fn real_dsh_webui_auth_probe() {
             }
         }
         session.terminate("probe-a").await;
+    })
+    .await;
+}
+
+/// Issue #7's 0.2.x matrix leg: ONE npm-confirmed 0.2.x release through the
+/// whole PHL pipeline, leg by leg, each printed with a stable `[matrix]`
+/// marker so a real-machine run translates 1:1 into the acceptance matrix
+/// (`internal/acceptance/…issue-7…/MATRIX.md`). Failure messages carry the
+/// issue's failure classification inline (网络/镜像故障 vs 上游包不可用 vs
+/// PHL 兼容性失败), because a red CI row must say WHICH kind of red it is.
+///
+/// Boundaries, stated: this leg covers the PHL machinery against real 0.2.x
+/// layout — plugin enable/disable runs through the real cordis path on a
+/// fixture package (no third-party download in the default matrix), the
+/// trial leg is the read-only preview, and the adoption leg is the real
+/// probe+decide core (`adopt_processes` itself needs a Tauri AppHandle).
+#[tokio::test]
+#[ignore = "real-upstream acceptance: needs network + npm; opt-in via PHL_REAL_DSH=1"]
+async fn real_dsh_02x_compatibility_matrix() {
+    if !opted_in() {
+        println!(
+            "SKIP real_dsh_02x_compatibility_matrix: set PHL_REAL_DSH=1 to run \
+             (downloads {MATRIX_VERSION} from {REGISTRY} and starts a real DSH 0.2.x server)"
+        );
+        return;
+    }
+    let Some(node) = NodeInfo::discover() else {
+        panic!(
+            "real DSH matrix: no `node` on PATH — the lane drives real DSH with the host Node \
+             (分类: 环境不满足, not a PHL failure)"
+        );
+    };
+    println!(
+        "real DSH matrix: host node {} ({})",
+        node.version,
+        node.exe.display()
+    );
+
+    let session = Session::fresh("real-dsh-matrix");
+    with_cleanup(&session, async {
+        // ---- leg 1/9: 上游目录（区分网络故障与上游包不可用）--------------
+        let catalog = match crate::versions::list_dsh_versions(REGISTRY.to_string()).await {
+            Ok(catalog) => catalog,
+            Err(e) => panic!(
+                "[matrix leg 1/9 上游目录] FAILED（分类: 网络/镜像故障 — catalog 无法访问）: {e}"
+            ),
+        };
+        let entry = catalog
+            .iter()
+            .find(|v| v.name == MATRIX_VERSION)
+            .unwrap_or_else(|| {
+                panic!(
+                    "[matrix leg 1/9 上游目录] FAILED（分类: 上游包不可用 — {MATRIX_VERSION} \
+                     不在已发布目录中；若它应已发布，属上游/镜像问题）"
+                )
+            });
+        let src = entry.source.as_ref().unwrap_or_else(|| {
+            panic!("[matrix leg 1/9 上游目录] FAILED（分类: 上游包不可用 — 无 tarball）")
+        });
+        println!(
+            "[matrix leg 1/9] OK: {MATRIX_VERSION} in catalog -> {} (integrity {})",
+            src.tarball,
+            src.integrity.is_some()
+        );
+
+        // ---- leg 2/9: 真实安装 + 目录识别（marker / 入口 / 依赖树）-------
+        install_real(
+            &session,
+            &node.exe,
+            MATRIX_VERSION,
+            &src.tarball,
+            src.integrity.as_deref(),
+        )
+        .await;
+        let version_dir = session.root().join("versions").join(MATRIX_VERSION);
+        assert!(
+            version_dir.join("phl-install.json").exists(),
+            "[matrix leg 2/9 版本安装/目录识别] FAILED: phl-install.json 不存在（分类: PHL 兼容性失败）"
+        );
+        assert!(
+            crate::versions::read_marker(&version_dir).await.is_some(),
+            "[matrix leg 2/9 版本安装/目录识别] FAILED: marker 无法解析（分类: PHL 兼容性失败）"
+        );
+        assert!(
+            version_dir.join("lib").join("bin.js").exists(),
+            "[matrix leg 2/9 版本安装/目录识别] FAILED: lib/bin.js 入口缺失（分类: PHL 兼容性失败 — \
+             0.2.x 的包布局可能已变化）"
+        );
+        println!("[matrix leg 2/9] OK: install + 目录识别 (marker/entry/deps)");
+
+        // ---- leg 3/9: 实例创建 ------------------------------------------
+        create_real_instance(&session, "matrix-a", &format!("dsh-{MATRIX_VERSION}")).await;
+        let instance_dir = session.root().join("instances").join("matrix-a");
+        let manifest =
+            crate::instances::load_manifest(&instance_dir, "matrix-a").await.expect(
+                "[matrix leg 3/9 实例创建] FAILED: manifest 无法读回（分类: PHL 兼容性失败）",
+            );
+        let home = crate::instances::home_of(&instance_dir, &manifest);
+        let profile = crate::instances::profile_dir(&session.root(), "matrix-a")
+            .await
+            .expect("[matrix leg 3/9 实例创建] FAILED: profile 目录无法解析");
+        println!("[matrix leg 3/9] OK: instance matrix-a @ {}", home.display());
+
+        // ---- leg 4/9: 启动 + token URL 握手 -----------------------------
+        let held = crate::release_e2e::driver::lock_instance(&session.locks, "matrix-a");
+        let launched = launch(
+            &session,
+            &held,
+            "matrix-launch",
+            "matrix-a",
+            MATRIX_VERSION,
+            "node-system",
+            REGISTRY,
+            0,
+            true,
+            HashMap::new(),
+            Vec::new(),
+            "web",
+            &crate::release_e2e::journeys::progress_channel(),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[matrix leg 4/9 启动/握手] FAILED: {e}（分类: 需读日志区分 — PHL 兼容性失败或 \
+                 DSH 本体缺陷；latest_launch_log 会保留 DSH 的输出）"
+            )
+        });
+        let port = launched.outcome.port;
+        let pid = launched.outcome.pid;
+        let url = launched
+            .outcome
+            .web_url
+            .clone()
+            .expect("[matrix leg 4/9 启动/握手] FAILED: 未取得 token URL（分类: PHL 兼容性失败 — \
+             0.2.x 的 dsh web 输出格式可能变化）");
+        let auth = web_authenticated(&url).await;
+        assert_eq!(
+            auth.handshake_status, 303,
+            "[matrix leg 4/9 启动/握手] FAILED（分类: DSH 本体缺陷或 0.2.x 认证行为变化）"
+        );
+        assert!(
+            auth.cookie_name.starts_with("dsh-auth-"),
+            "[matrix leg 4/9 启动/握手] FAILED（分类: DSH 本体缺陷或 0.2.x 认证行为变化）"
+        );
+        assert_eq!(
+            auth.status, 200,
+            "[matrix leg 4/9 启动/握手] FAILED（分类: DSH 本体缺陷或 0.2.x 认证行为变化）"
+        );
+        assert_eq!(
+            auth.without_cookie_status, 401,
+            "[matrix leg 4/9 启动/握手] FAILED（分类: DSH 本体缺陷或 0.2.x 认证行为变化）"
+        );
+        println!(
+            "[matrix leg 4/9] OK: {MATRIX_VERSION} on :{port} -> handshake {} -> 200 ({} bytes), \
+             no-cookie {}",
+            auth.handshake_status, auth.body_bytes, auth.without_cookie_status
+        );
+
+        // ---- leg 5/9: 会话只读检查 --------------------------------------
+        let listing = tokio::task::spawn_blocking({
+            let home = home.clone();
+            move || crate::sessions::list_in_home(&home)
+        })
+        .await
+        .expect("[matrix leg 5/9 会话只读] FAILED: blocking 任务失败");
+        println!(
+            "[matrix leg 5/9] OK: sessions read — {} readable / {} unreadable (fresh home)",
+            listing.sessions.len(),
+            listing.unreadable.len()
+        );
+
+        // ---- leg 6/9: 插件列表 + 真实 cordis 启停（合成注册，无第三方下载）
+        let plugins = crate::instances::scan_plugins(&profile).await;
+        assert!(
+            plugins.iter().all(|p| !p.manageable),
+            "[matrix leg 6/9 插件列表] FAILED: 全新 0.2.x profile 出现受管插件（分类: PHL 兼容性失败）: {plugins:?}"
+        );
+        let fixture = profile.join("node_modules").join("dsh-matrix-fixture");
+        tokio::fs::create_dir_all(&fixture).await.unwrap();
+        tokio::fs::write(
+            fixture.join("package.json"),
+            br#"{"name":"dsh-matrix-fixture","version":"0.0.1"}"#,
+        )
+        .await
+        .unwrap();
+        let task = crate::resources::Tasks::default()
+            .begin(
+                crate::resources::TaskInfo::new(
+                    "matrix-plugin".into(),
+                    "plugin-install",
+                    "matrix fixture".into(),
+                    &[],
+                ),
+                None,
+            )
+            .unwrap();
+        let marker = serde_json::json!({
+            "installedAt": crate::versions::now_iso(),
+            "pluginId": "matrix/dsh-matrix-fixture",
+            "version": "0.0.1",
+            "kind": "npm",
+            "registryId": "dsh-matrix-fixture",
+            "trust": "unverified",
+        });
+        crate::plugins::install::commit_install(
+            &fixture,
+            &marker,
+            &profile,
+            "dsh-matrix-fixture",
+            &task,
+            None,
+            &crate::plugins::deps::DependencyEnv::new(std::path::Path::new(""), "node-system", None),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[matrix leg 6/9 插件启停] FAILED: 合成插件注册失败（分类: PHL 兼容性失败 — \
+                 0.2.x 的 cordis.patch.yml 格式可能变化）: {e}"
+            )
+        });
+        let after = crate::instances::scan_plugins(&profile).await;
+        assert!(
+            after
+                .iter()
+                .any(|p| p.registry_id == "dsh-matrix-fixture" && p.manageable && p.enabled),
+            "[matrix leg 6/9 插件列表] FAILED: 注册后的插件未出现在扫描结果中: {after:?}"
+        );
+        crate::plugins::cordis::set_plugin_disabled(&profile, "dsh-matrix-fixture", true)
+            .await
+            .unwrap_or_else(|e| panic!("[matrix leg 6/9 插件启停] FAILED（停用）: {e}"));
+        assert!(
+            crate::plugins::disabled_plugin_ids(&profile)
+                .await
+                .contains("dsh-matrix-fixture"),
+            "[matrix leg 6/9 插件启停] FAILED: 停用未生效"
+        );
+        crate::plugins::cordis::set_plugin_disabled(&profile, "dsh-matrix-fixture", false)
+            .await
+            .unwrap_or_else(|e| panic!("[matrix leg 6/9 插件启停] FAILED（重新启用）: {e}"));
+        assert!(
+            !crate::plugins::disabled_plugin_ids(&profile)
+                .await
+                .contains("dsh-matrix-fixture"),
+            "[matrix leg 6/9 插件启停] FAILED: 重新启用未生效"
+        );
+        // #10 wiring rides along: the package's own engines.dsh claim evaluated
+        // against the real 0.2.x binding (undeclared → unknown, honestly).
+        let compat_range = crate::plugins::engines::package_engine_range(&fixture).await;
+        let (verdict, reason) = crate::plugins::engines::evaluate(
+            compat_range.as_deref(),
+            crate::plugins::engines::bare_dsh_version(&format!("dsh-{MATRIX_VERSION}")).as_ref(),
+        );
+        println!(
+            "[matrix leg 6/9] OK: scan {}→{} entries, disable/enable round-trip, engines.dsh={} ({reason})",
+            plugins.len(),
+            after.len(),
+            verdict.as_str()
+        );
+
+        // ---- leg 7/9: 试用预览（只读；创建复用既有拷贝管线，不在矩阵联网）-
+        let req = crate::instances::trial::TrialRequest {
+            source_id: "matrix-a".into(),
+            target_version: crate::versions::install::bound_id_for_version("0.1.5-rc.3")
+                .unwrap_or_else(|| "0.1.5-rc.3".into())
+                .trim_start_matches("dsh-")
+                .to_string(),
+            target_runtime_id: "node-system".into(),
+            name: "matrix trial preview".into(),
+            scope: "config".into(),
+            workspace: "fresh".into(),
+            plan_id: String::new(),
+            target_id: String::new(),
+            source_fingerprint: String::new(),
+        };
+        let preview = crate::instances::trial::build_preview(
+            &session.root(),
+            &crate::launch::Processes::default(),
+            &req,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("[matrix leg 7/9 试用预览] FAILED（分类: PHL 兼容性失败）: {e}")
+        });
+        println!(
+            "[matrix leg 7/9] OK: trial preview — target {} installed={}, pending {:?}, \
+             plan {} (blocked: {:?})",
+            preview.target_version,
+            preview.target_installed,
+            preview.pending_downloads,
+            preview.plan_id,
+            preview.blocked
+        );
+
+        // ---- leg 8/9: 重启接管核心（真实 probe + decide；命令壳需要 AppHandle）-
+        let probe = crate::launch::probe_process(pid);
+        assert!(
+            probe.state == crate::launch::ProcessState::Alive,
+            "[matrix leg 8/9 重启接管] FAILED: probe 报告 {:?}（分类: 环境/PHL 兼容性失败）",
+            probe.state
+        );
+        let exe = node
+            .exe
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("[matrix leg 8/9 重启接管] FAILED: node.exe 无法规范化: {e}"));
+        let record = crate::launch::registry::PersistedProcess {
+            instance_id: "matrix-a".into(),
+            pid,
+            port,
+            started_at_ms: crate::versions::now_millis() as i64,
+            exe_path: exe.to_string_lossy().into_owned(),
+            process_start_token: None,
+        };
+        let adoption = crate::launch::registry::decide(&record, &probe);
+        assert!(
+            matches!(adoption, crate::launch::registry::Adoption::Adopt),
+            "[matrix leg 8/9 重启接管] FAILED: decide 拒绝 ({adoption:?}，分类: PHL 兼容性失败 — \
+             probe exe 与记录不一致或创建时间窗口不匹配)"
+        );
+        println!(
+            "[matrix leg 8/9] OK: probe(pid={pid}) Alive + exe 身份一致 → Adoption::Adopt"
+        );
+
+        // ---- leg 9/9: 停止 + 端口释放 -----------------------------------
+        session.terminate("matrix-a").await;
+        assert!(
+            crate::release_e2e::wait_until(10_000, || crate::launch::port_free(port)).await,
+            "[matrix leg 9/9 端口释放] FAILED: :{port} 停止后未释放（分类: PHL 兼容性失败）"
+        );
+        println!("[matrix leg 9/9] OK: stopped, :{port} free");
+        println!(
+            "[matrix] ALL LEGS PASSED on {MATRIX_VERSION} — record into \
+             internal/acceptance/2026-10-31-issue-7-dsh-matrix/MATRIX.md with node {} / {}",
+            node.version,
+            std::env::consts::OS
+        );
     })
     .await;
 }

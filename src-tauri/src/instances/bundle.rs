@@ -142,6 +142,22 @@ pub(crate) async fn export_instance_bundle_inner(
     tokio::fs::write(dest, body)
         .await
         .map_err(|e| format!("无法写入 Bundle: {e}"))?;
+    // Seal and re-open (issue #11): never hand the user an export file our
+    // own reader would refuse. Re-read from disk and re-parse before
+    // declaring success; any mismatch deletes the half-written file. The
+    // .phlpack exporter has done exactly this since day one — this closes
+    // the same gap for the plain Bundle path.
+    let written = tokio::fs::read(dest)
+        .await
+        .map_err(|e| format!("无法回读导出文件: {e}"))?;
+    let reopened = serde_json::from_slice::<InstanceBundle>(&written);
+    match reopened {
+        Ok(back) if back.credentials == partition.credentials && back.phl_bundle == 2 => {}
+        _ => {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err("回读校验失败：导出文件无法被 PHL 自身完整解析，已删除不完整的导出".into());
+        }
+    }
     Ok(BundleExportReport {
         credentials: partition.credentials,
         machine_only: partition.machine_only,
