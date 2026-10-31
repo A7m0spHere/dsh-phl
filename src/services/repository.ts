@@ -374,6 +374,24 @@ export interface PhlRepository {
   installedPluginCompat(instanceId: string): Promise<import('@/types').PluginEngineCompat[]>
 
   /**
+   * Read-only plugin-environment diagnosis (issue #9): what cordis declares
+   * vs what sits in node_modules vs the PHL markers vs the install
+   * transaction journal. `managed: false` for external instances — findings
+   * still come, repairs never run on them.
+   */
+  pluginHealthCheck(instanceId: string): Promise<import('@/lib/desktop').PluginHealthReport>
+
+  /**
+   * Runs ONLY the user-chosen safe repairs (transaction recovery /
+   * conflict disable — the backend refuses anything else) and answers with
+   * a FRESH report showing the post-repair truth.
+   */
+  pluginHealthRepair(
+    instanceId: string,
+    actions: string[],
+  ): Promise<import('@/lib/desktop').PluginHealthReport>
+
+  /**
    * The official DeepSeek Harness desktop app, seen as a machine singleton
    * PHL helps operate (planning input 2026-09-29 §8): one install per
    * machine, owned by its own installer/updater. Read-only operations on the

@@ -6,6 +6,7 @@ import { useMotion } from '@/lib/motion'
 import { useUIStore, type PluginTransferState } from '@/stores'
 import type { InstalledPlugin, Plugin, PluginEngineCompat } from '@/types'
 import type { LatestVersionState } from '@/stores/catalogStore'
+import type { PluginHealthReport } from '@/lib/desktop'
 import { Badge, Button, EmptyState, Notice, Switch, Tooltip } from '@/components/ui'
 import { STAGE_LABEL, SourceBadge, TransferInline, compatHint } from './visuals'
 
@@ -23,6 +24,22 @@ export type InstalledPluginRow = InstalledPlugin & {
    * declares the field; absent/undeclared falls back to the list badge.
    */
   engine?: PluginEngineCompat
+}
+
+/** Issue #9 finding labels — the kinds stay stable strings on the wire. */
+const HEALTH_KIND_LABEL: Record<string, string> = {
+  'half-registered': '半注册',
+  'declared-but-broken': '登记损坏',
+  'orphan-dir': '未登记残留',
+  'version-mismatch': '版本不一致',
+  'transaction-residue': '安装事务残留',
+  'known-conflict': '已知冲突',
+}
+
+const HEALTH_SEVERITY_TONE: Record<string, 'neutral' | 'warn' | 'danger'> = {
+  info: 'neutral',
+  warning: 'warn',
+  error: 'danger',
 }
 
 const TRUST_LABEL: Record<string, string> = {
@@ -72,6 +89,11 @@ export interface PluginInstalledViewProps {
   onGoUpdates: () => void
   onGoRegistry: () => void
   onRecheck: () => void
+  /** Issue #9: the health panel — findings stay read-only until repaired. */
+  health?: PluginHealthReport | null
+  healthBusy?: boolean
+  onHealthCheck?: () => void
+  onHealthRepair?: (actions: string[]) => void
 }
 
 /**
@@ -84,6 +106,7 @@ export interface PluginInstalledViewProps {
 export function PluginInstalledView(p: PluginInstalledViewProps) {
   const { stagger, riseItem } = useMotion()
   const [confirmUninstall, setConfirmUninstall] = useState<string | null>(null)
+  const [showHealth, setShowHealth] = useState(false)
   const { instance, rows, checkCounts, tab } = p
   const { id: instanceId } = instance
 
@@ -102,6 +125,77 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
         >
           更新只作用于当前实例，其他实例仍保持原有版本。
         </Notice>
+      )}
+
+      {/* Issue #9: the read-only environment check + its two safe repairs. */}
+      {tab === 'installed' && p.onHealthCheck && (
+        <div className="mb-3 flex items-center justify-end gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={p.healthBusy}
+            onClick={() => {
+              if (!showHealth && !p.health) p.onHealthCheck?.()
+              setShowHealth((v) => !v)
+            }}
+          >
+            插件体检
+            {p.health && p.health.findings.length > 0 && (
+              <Badge tone="warn">{p.health.findings.length}</Badge>
+            )}
+          </Button>
+        </div>
+      )}
+      {tab === 'installed' && showHealth && p.health && (
+        <div className="mb-4 space-y-2 rounded-lg bg-surface p-3.5 ring-1 ring-inset ring-line">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm font-medium text-ink">插件环境体检</span>
+            <span className="text-xs text-ink-faint">
+              只读诊断；仅「恢复安装事务」「停用冲突插件」提供修复按钮
+            </span>
+          </div>
+          {p.health.findings.length === 0 ? (
+            <p className="text-sm text-ink-muted">
+              cordis 登记、node_modules、安装记录与事务日志一致，未发现问题。
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {p.health.findings.map((finding, i) => (
+                <li
+                  key={`${finding.kind}-${finding.plugin}-${i}`}
+                  className="rounded-lg bg-surface-sunken/60 p-2.5"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone={HEALTH_SEVERITY_TONE[finding.severity] ?? 'neutral'}>
+                      {HEALTH_KIND_LABEL[finding.kind] ?? finding.kind}
+                    </Badge>
+                    <span className="text-sm text-ink">{finding.plugin}</span>
+                  </div>
+                  <p className="mt-1 text-sm text-ink-muted">{finding.evidence}</p>
+                  <p className="text-sm text-ink-faint">影响：{finding.impact}</p>
+                  <p className="text-sm text-ink-faint">建议：{finding.suggestion}</p>
+                  {finding.repairable && finding.action && p.health?.managed && p.onHealthRepair && (
+                    <div className="mt-1.5">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={p.healthBusy}
+                        onClick={() => p.onHealthRepair?.([finding.action!])}
+                      >
+                        {finding.action === 'recover-transaction' ? '恢复安装事务' : '停用冲突插件'}
+                      </Button>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {!p.health.managed && (
+            <p className="text-xs text-ink-faint">
+              原地接入的实例由你自己管理，PHL 只读诊断，不提供修复操作。
+            </p>
+          )}
+        </div>
       )}
 
       {tab === 'updates' && (

@@ -18,6 +18,7 @@ import type {
   Runtime,
   Snapshot,
 } from '@/types'
+import type { PluginHealthReport } from '@/lib/desktop'
 import { LAUNCH_PHASES } from '@/types'
 import type {
   EnvironmentDiff,
@@ -657,6 +658,21 @@ class MockRepository implements PhlRepository {
     await sleep(120)
     void instanceId
     return null
+  }
+
+  /** Browser mode has no real profile to scan (issue #9) — a clean report. */
+  async pluginHealthCheck(instanceId: string): Promise<PluginHealthReport> {
+    await sleep(160)
+    return { instanceId, managed: true, generatedAt: new Date().toISOString(), findings: [] }
+  }
+
+  async pluginHealthRepair(
+    instanceId: string,
+    actions: string[],
+  ): Promise<PluginHealthReport> {
+    await sleep(200)
+    void actions
+    return { instanceId, managed: true, generatedAt: new Date().toISOString(), findings: [] }
   }
 
   async latestPluginVersion(plugin: Plugin): Promise<string | null> {

@@ -463,6 +463,21 @@ async fn read_transaction(profile: &Path) -> Result<PluginTransaction, String> {
     Ok(transaction)
 }
 
+/// Read-only residue probe for the plugin health check (issue #9): does this
+/// profile carry an unfinished install transaction? Returns the stalled
+/// registry id when a journal exists and parses; `None` = no residue (or a
+/// journal this build cannot read — which the caller surfaces as its own
+/// finding rather than pretending the profile is clean). Deliberately does
+/// NOT recover: 修复由用户明确选择，走 `recover_profile_transaction`。
+pub(crate) async fn transaction_residue(profile: &Path) -> Option<String> {
+    let raw = tokio::fs::read(transaction_dir(profile).join("journal.json"))
+        .await
+        .ok()?;
+    serde_json::from_slice::<PluginTransaction>(&raw)
+        .ok()
+        .map(|t| t.registry_id)
+}
+
 async fn begin_transaction(profile: &Path, registry_id: &str) -> Result<(), String> {
     let registration_before = plugin_registration_state(profile, registry_id).await?;
     let dir = transaction_dir(profile);

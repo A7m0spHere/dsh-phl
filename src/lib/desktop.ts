@@ -147,6 +147,8 @@ export {
   listDshPlugins,
   installPlugin,
   installedPluginCompat,
+  pluginHealthCheck,
+  pluginHealthRepair,
   pluginLatestVersion,
   setPluginEnabled,
   uninstallPlugin,
@@ -157,6 +159,8 @@ export type {
   PluginProgressStage,
   RemotePluginCatalog,
   InstallPluginArgs,
+  PluginHealthFinding,
+  PluginHealthReport,
 } from './desktopPlugins'
 
 /* ------------------------------ runtimes ------------------------------ */

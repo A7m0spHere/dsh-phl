@@ -257,6 +257,8 @@ macro_rules! phl_command_handler {
             plugins::catalog::list_dsh_plugins,
             plugins::install::install_plugin,
             plugins::engines::installed_plugin_compat,
+            plugins::health::plugin_health_check,
+            plugins::health::plugin_health_repair,
             plugins::catalog::plugin_latest_version,
             plugins::cordis::set_plugin_enabled,
             plugins::cordis::uninstall_plugin,

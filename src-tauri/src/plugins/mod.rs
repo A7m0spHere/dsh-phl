@@ -21,6 +21,7 @@ pub(crate) mod conflicts;
 pub(crate) mod cordis;
 pub(crate) mod deps;
 pub(crate) mod engines;
+pub(crate) mod health;
 pub(crate) mod install;
 pub(crate) mod resolve;
 pub(crate) mod security;

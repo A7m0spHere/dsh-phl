@@ -121,6 +121,48 @@ export async function installedPluginCompat(instanceId: string): Promise<PluginE
   return invoke<PluginEngineCompat[]>('installed_plugin_compat', { instanceId })
 }
 
+/** Mirrors the Rust `PluginHealthFinding` (issue #9). */
+export interface PluginHealthFinding {
+  kind: string
+  severity: 'info' | 'warning' | 'error'
+  plugin: string
+  evidence: string
+  impact: string
+  suggestion: string
+  repairable: boolean
+  action: string | null
+}
+
+/** Mirrors the Rust `PluginHealthReport` (issue #9). */
+export interface PluginHealthReport {
+  instanceId: string
+  /** False for external instances: the UI hides every repair button. */
+  managed: boolean
+  generatedAt: string
+  findings: PluginHealthFinding[]
+}
+
+/** Issue #9: read-only plugin-environment diagnosis for one instance. */
+export async function pluginHealthCheck(instanceId: string): Promise<PluginHealthReport> {
+  if (!isDesktop) {
+    return { instanceId, managed: false, generatedAt: '', findings: [] }
+  }
+  return invoke<PluginHealthReport>('plugin_health_check', { instanceId })
+}
+
+/**
+ * Issue #9: run ONLY the repairs the user explicitly chose (the two safe
+ * entry points); the backend refuses anything else and returns a FRESH
+ * report so the panel shows the post-repair truth.
+ */
+export async function pluginHealthRepair(
+  instanceId: string,
+  actions: string[],
+): Promise<PluginHealthReport> {
+  if (!isDesktop) throw new Error('插件体检修复仅在桌面应用内可用')
+  return invoke<PluginHealthReport>('plugin_health_repair', { instanceId, actions })
+}
+
 export async function pluginLatestVersion(
   source: RemotePluginSource,
   registryBase: string,

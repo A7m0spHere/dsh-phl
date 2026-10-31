@@ -26,6 +26,7 @@ import {
 } from '@/stores'
 import { useShallow } from 'zustand/react/shallow'
 import { latestRelease, type Plugin, type PluginEngineCompat } from '@/types'
+import type { PluginHealthReport } from '@/lib/desktop'
 import { repository } from '@/services'
 import { Button, Chip, Dropdown, EmptyState, Input } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
@@ -290,6 +291,37 @@ export function PluginsPage() {
     for (const row of engineCompat) map.set(row.registryId, row)
     return map
   }, [engineCompat])
+
+  // 插件环境体检 (issue #9): read-only diagnosis on demand, refreshed after
+  // each user-chosen repair with the fresh post-repair report.
+  const [health, setHealth] = useState<PluginHealthReport | null>(null)
+  const [healthBusy, setHealthBusy] = useState(false)
+  const runHealthCheck = useCallback(async () => {
+    if (!instance) return
+    setHealthBusy(true)
+    try {
+      setHealth(await repository.pluginHealthCheck(instance.id))
+    } catch {
+      setHealth(null)
+    } finally {
+      setHealthBusy(false)
+    }
+  }, [instance?.id])
+  const runHealthRepair = useCallback(
+    async (actions: string[]) => {
+      if (!instance) return
+      setHealthBusy(true)
+      try {
+        setHealth(await repository.pluginHealthRepair(instance.id, actions))
+      } catch {
+        // The backend refuses anything but the two safe entry points; a
+        // failure leaves the current findings on screen untouched.
+      } finally {
+        setHealthBusy(false)
+      }
+    },
+    [instance?.id],
+  )
 
   const registry = useMemo(() => {
     const q = deferredQuery.trim().toLowerCase()
@@ -568,6 +600,10 @@ export function PluginsPage() {
           onGoUpdates={() => setTab('updates')}
           onGoRegistry={() => setTab('registry')}
           onRecheck={() => void recheckLatest(instance.id)}
+          health={health}
+          healthBusy={healthBusy}
+          onHealthCheck={() => void runHealthCheck()}
+          onHealthRepair={(actions) => void runHealthRepair(actions)}
         />
       )}
         </motion.div>

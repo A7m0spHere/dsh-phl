@@ -129,6 +129,16 @@ async function installedPluginCompat(instanceId: string) {
   }
 }
 
+/** Read-only plugin-environment diagnosis (issue #9). */
+async function pluginHealthCheck(instanceId: string) {
+  return desktop.pluginHealthCheck(instanceId)
+}
+
+/** User-chosen safe repairs (issue #9); answers with the fresh report. */
+async function pluginHealthRepair(instanceId: string, actions: string[]) {
+  return desktop.pluginHealthRepair(instanceId, actions)
+}
+
 /** The repository overrides, spread into the desktop repository selection. */
 export const tauriPluginOverrides: Pick<
   PhlRepository,
@@ -138,11 +148,15 @@ export const tauriPluginOverrides: Pick<
   | 'uninstallPlugin'
   | 'latestPluginVersion'
   | 'installedPluginCompat'
+  | 'pluginHealthCheck'
+  | 'pluginHealthRepair'
 > = {
   listPlugins,
   installPlugin,
   latestPluginVersion,
   installedPluginCompat,
+  pluginHealthCheck,
+  pluginHealthRepair,
   setPluginEnabled: async (instance, installed, enabled) => {
     await desktop.setPluginEnabled(instance.id, fallbackRegistryId(installed), enabled)
   },
