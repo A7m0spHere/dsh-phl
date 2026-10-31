@@ -62,7 +62,7 @@ pub(crate) fn http_client() -> reqwest::Client {
 /* ----------------------------- wire types ----------------------------- */
 
 /// Tagged exactly like the frontend `PluginSource` union.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PluginSourceWire {
     Npm {

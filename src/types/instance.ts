@@ -208,4 +208,8 @@ export interface InstanceDraft {
   /** Create-time API takeover: 'default' inherits the global library,
    * 'none' leaves the instance to its own DSH config. */
   apiInheritance: ApiInheritance
+  /** Template-created drafts carry the source's non-sensitive settings
+   * (issue #13); wizard drafts leave both empty. */
+  env?: Record<string, string>
+  args?: string[]
 }

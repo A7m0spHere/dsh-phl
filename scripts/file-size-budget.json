@@ -29,6 +29,6 @@
     "src-tauri/src/instances/manifest.rs": 27816,
     "src-tauri/src/discovery/mod.rs": 27666,
     "src-tauri/src/repair.rs": 27309,
-    "src/stores/instanceStore.ts": 19498
+    "src/stores/instanceStore.ts": 19900
   }
 }

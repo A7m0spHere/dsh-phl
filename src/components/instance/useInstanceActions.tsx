@@ -3,6 +3,7 @@ import { useCallback, useMemo } from 'react'
 import {
   ArrowUpRight,
   Copy,
+  FileOutput,
   FolderOpen,
   FlaskConical,
   GitCompare,
@@ -21,6 +22,7 @@ import type { MenuItem } from '@/components/ui'
 import {
   chooseSaveFile,
   exportInstanceBundle,
+  exportInstanceTemplate,
 
   openExternal,
   previewInstanceExport,
@@ -208,6 +210,44 @@ export function useInstanceActions(instance: Instance | undefined) {
     }
   }, [instance, ui])
 
+  /** Issue #13: distill this instance into a reusable environment template —
+   *  a reproduction list (versions, runtime, non-sensitive settings, the
+   *  managed plugin list), explicitly NOT a backup. */
+  const exportTemplate = useCallback(async () => {
+    if (!instance) return
+    try {
+      const ok = await ui.confirm({
+        title: `导出「${instance.name}」的实例模板`,
+        message:
+          '模板记录 DSH 版本、Runtime、非敏感设置与受管插件清单（精确版本与启停），创建时可按插件自述的 engines.dsh 预检兼容性。不包含插件文件、会话、附件、工作区与凭据值——它是复现清单，不是备份。',
+        confirmLabel: '导出',
+      })
+      if (!ok) return
+      const dest = await chooseSaveFile(
+        '导出实例模板',
+        `${instance.name}.phl-template.json`,
+        [{ name: 'PHL 实例模板', extensions: ['json'] }],
+      )
+      if (!dest) return
+      const file = await exportInstanceTemplate(instance.id, dest)
+      const omitted =
+        file.excludedPlugins.length > 0
+          ? `（未携带 ${file.excludedPlugins.length} 个非受管插件）`
+          : ''
+      ui.toast({
+        kind: 'success',
+        title: '已导出实例模板',
+        message: `${dest}${omitted}`,
+      })
+    } catch (err) {
+      ui.toast({
+        kind: 'error',
+        title: '导出实例模板失败',
+        message: parseThrownError(err).message,
+      })
+    }
+  }, [instance, ui])
+
   const menuItems = useMemo<MenuItem[]>(() => {
     if (!instance || !id) return []
     const status = store.stateOf(id).status
@@ -276,6 +316,12 @@ export function useInstanceActions(instance: Instance | undefined) {
         onSelect: () => useEnvCompareStore.getState().open(id),
       },
       { id: 'export', label: '导出 Bundle', icon: <Package size={13} />, onSelect: exportBundle },
+      {
+        id: 'export-template',
+        label: '导出实例模板',
+        icon: <FileOutput size={13} />,
+        onSelect: exportTemplate,
+      },
       {
         id: 'export-pack',
         label: '导出整合包',

@@ -23,8 +23,10 @@ function catalogBase(): string {
   return 'https://awesome-dsh-plugin.com'
 }
 
-/** Mirrors the version module's npm registry resolution. */
-function npmRegistryBase(): string {
+/** Mirrors the version module's npm registry resolution. Exported for the
+ * template service, which replays recorded install sources through the same
+ * registry (issue #13) — one resolution, not a second one. */
+export function npmRegistryBase(): string {
   const { source, customSource } = useSettingsStore.getState()
   if (source === 'mirror-cn') return 'https://registry.npmmirror.com'
   if (source === 'custom' && customSource.trim()) return customSource.trim()
