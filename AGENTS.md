@@ -139,6 +139,7 @@ TypeScript 开启了 `noUnusedLocals` / `noUnusedParameters`，提交前请确�
   三篇合一）、`docs/adoption-and-migration.md`（本机 DSH 接入、会话迁移、`.phlpack` 与 Pack Core/CLI，
   四篇合一）、`docs/model-metadata-enrichment.md`（模型信息补全）、`docs/privacy.md`、
   `docs/research/dsh-session-integration.md`（DSH 会话格式 spike，仍是事实源）、
+  `docs/research/official-desktop-boundary.md`（官方桌面端安全接口边界矩阵，Issue #14 研究交付）、
   `docs/skills/phl-export/SKILL.md`（面向 DSH 用户的导出 Skill）与本文件。
   `scripts/check-public-boundary.mjs` 以单条 `internal/**` 规则
   在发布副本与 CI 上拦住误入库的内部文档。

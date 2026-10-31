@@ -353,6 +353,21 @@ export type {
   RemoteBundleImportOutcome,
 } from './desktopBundles'
 
+// Issue #13: instance-environment templates — extract / read / preview.
+export {
+  exportInstanceTemplate,
+  readInstanceTemplate,
+  previewInstanceTemplate,
+  chooseTemplateFile,
+} from './desktopTemplates'
+export type {
+  InstanceTemplateFile,
+  InstanceTemplatePreview,
+  TemplateEnvEntry,
+  TemplatePluginEntry,
+  TemplatePluginPreview,
+} from './desktopTemplates'
+
 /* ------------------------------ verify + repair ----------------------- */
 
 // §M2: environment-health commands moved to `desktopVerify.ts`; re-exported.

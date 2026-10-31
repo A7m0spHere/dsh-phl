@@ -492,6 +492,8 @@ class MockRepository implements PhlRepository {
         system: false,
       },
       profile: 'web',
+      port: { state: 'known', value: '8000（自动分配）' },
+      envKeys: [{ key: 'HTTP_PROXY', valueDigest: '1a2b3c4d5e6f7a8b' }],
       pluginsAvailable: true,
       plugins: [],
       api: { inheritance: 'default', providers: [], hasDefaultModel: false, pendingCredentials: false },
@@ -566,10 +568,12 @@ class MockRepository implements PhlRepository {
       rightObservedAt: right.observedAt,
       hasUnknown: false,
       items: [
-        { key: 'dsh.binding', category: 'DSH', state: 'same', left: left.dsh.declared.value, right: right.dsh.declared.value, note: null },
-        { key: 'node.binding', category: 'Node', state: 'same', left: left.node.binding.value, right: right.node.binding.value, note: null },
-        { key: 'api', category: 'API 配置来源', state: 'same', left: '继承全部', right: '继承全部', note: null },
-        { key: 'workspace', category: '工作目录', state: 'different', left: left.workspace.value, right: right.workspace.value, note: '模拟数据' },
+        { key: 'dsh.binding', category: 'DSH', state: 'same', left: left.dsh.declared.value, right: right.dsh.declared.value, note: null, source: 'manifest' },
+        { key: 'node.binding', category: 'Node', state: 'same', left: left.node.binding.value, right: right.node.binding.value, note: null, source: 'manifest' },
+        { key: 'port', category: '端口', state: 'same', left: left.port.value, right: right.port.value, note: null, source: 'manifest' },
+        { key: 'env', category: '环境变量', state: 'same', left: `${left.envKeys.length} 个键`, right: `${right.envKeys.length} 个键`, note: '模拟数据：值以单向摘要比对，永不展示', source: 'manifest' },
+        { key: 'api', category: 'API 配置来源', state: 'same', left: '继承全部', right: '继承全部', note: null, source: 'manifest' },
+        { key: 'workspace', category: '工作目录', state: 'different', left: left.workspace.value, right: right.workspace.value, note: '模拟数据', source: 'manifest' },
       ],
     } as EnvironmentDiff
   }

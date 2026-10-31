@@ -31,6 +31,10 @@ export interface EnvironmentFacts {
     system: boolean
   }
   profile: string
+  /** The instance's WebUI port (issue #12) — display data. */
+  port: FactValue
+  /** Env-var KEYS with one-way value digests; values never travel (#12). */
+  envKeys: Array<{ key: string; valueDigest: string | null }>
   pluginsAvailable: boolean
   plugins: Array<{
     id: string
@@ -39,6 +43,10 @@ export interface EnvironmentFacts {
     trust: FactValue
     enabled: boolean | null
     order: number
+    /** `phl`（安装事务）| `linked`（本地链接）| `bundle`（DSH 管理）(#12). */
+    source: string
+    /** engines.dsh 判定 vs 本实例 DSH（#10 规则，#12 对比列）。 */
+    engine: FactValue
   }>
   api: {
     inheritance: string
@@ -58,6 +66,8 @@ export interface EnvironmentDiffItem {
   left: string | null
   right: string | null
   note: string | null
+  /** 该行事实的来源（#12）：manifest / profile / 安装记录 / 实测 / 派生。 */
+  source: string | null
 }
 
 export interface EnvironmentDiff {

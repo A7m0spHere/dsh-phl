@@ -30,6 +30,7 @@ import {
   PathPreview,
   CreatingOverlay,
 } from '@/features/create/sections'
+import { TemplateImportSection } from '@/features/create/TemplateImport'
 import { PageShell } from '@/components/layout/Page'
 import { PanelGroup, PanelShell } from '@/components/layout/Panel'
 
@@ -262,6 +263,7 @@ export function CreateInstancePage({ cloneFrom }: { cloneFrom?: string }) {
           className="flex flex-col items-start gap-3 lg:flex-row"
         >
           <motion.div variants={riseItem} className="w-full min-w-0 flex-1 space-y-3">
+            <TemplateImportSection />
             <VersionSection
               issue={issues.version}
               attempted={attempted}

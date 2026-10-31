@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { GitCompare, X } from 'lucide-react'
+import { ClipboardCopy, GitCompare, X } from 'lucide-react'
 import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { Badge, Button, Spinner } from '@/components/ui'
 import { useInstanceStore, useUIStore } from '@/stores'
@@ -18,7 +18,7 @@ const STATE_BADGE: Record<EnvironmentDiffItem['state'], { tone: 'neutral' | 'war
   unknown: { tone: 'danger', label: '未知' },
 }
 
-const CATEGORY_ORDER = ['DSH', 'Node', 'Profile', '插件', 'API 配置来源', '工作目录', '共享边界', '已知冲突']
+const CATEGORY_ORDER = ['DSH', 'Node', 'Profile', '端口', '环境变量', '插件', 'API 配置来源', '工作目录', '共享边界', '已知冲突']
 
 /**
  * Environment compare (R1 · M2): a modal, read-only diff of two instances'
@@ -90,6 +90,36 @@ export function EnvironmentCompareDialog() {
   }, [leftId, close, pushOverlay, popOverlay])
 
   const others = useMemo(() => instances.filter((i) => i.id !== leftId), [instances, leftId])
+
+  // Issue #12: one click, one redacted text summary. Everything in the diff
+  // is already safe by construction (values never enter the wire), so the
+  // clipboard text is assembled straight from the items.
+  const copySummary = () => {
+    if (!diff) return
+    const lines: string[] = [
+      'PHL 环境差异摘要（脱敏）',
+      `${diff.leftName} vs ${diff.rightName}`,
+      `检查时间：${diff.leftObservedAt} / ${diff.rightObservedAt}`,
+      '',
+    ]
+    for (const item of diff.items.filter((i) => i.state !== 'same')) {
+      const badge = STATE_BADGE[item.state]
+      lines.push(
+        `【${badge.label}】${item.category} · ${item.key}${item.source ? `（来源 ${item.source}）` : ''}`,
+      )
+      if (item.left) lines.push(`  左：${item.left}`)
+      if (item.right) lines.push(`  右：${item.right}`)
+      if (item.note) lines.push(`  注：${item.note}`)
+    }
+    lines.push('')
+    lines.push('环境变量值以单向摘要比对，密钥与变量值不在摘要中。')
+    void navigator.clipboard
+      .writeText(lines.join('\n'))
+      .then(() => useUIStore.getState().toast({ kind: 'success', title: '已复制脱敏差异摘要' }))
+      .catch(() =>
+        useUIStore.getState().toast({ kind: 'error', title: '复制失败', message: '剪贴板不可用' }),
+      )
+  }
 
   const grouped = useMemo(() => {
     if (!diff) return []
@@ -206,8 +236,11 @@ export function EnvironmentCompareDialog() {
                               key={item.key}
                               className="rounded-md bg-surface px-2.5 py-2 ring-1 ring-inset ring-line"
                             >
-                              <div className="flex items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <Badge tone={badge.tone}>{badge.label}</Badge>
+                                {item.source && (
+                                  <span className="text-xs text-ink-faint/80">来源 {item.source}</span>
+                                )}
                                 {item.note && <span className="text-sm text-ink-faint">{item.note}</span>}
                               </div>
                               <div className="mt-1.5 grid grid-cols-2 gap-2 text-sm">
@@ -236,6 +269,12 @@ export function EnvironmentCompareDialog() {
               <input type="checkbox" checked={showSame} onChange={(e) => setShowSame(e.target.checked)} />
               显示相同项
             </label>
+            {diff && diff.items.some((i) => i.state !== 'same') && (
+              <Button size="sm" variant="ghost" onClick={copySummary}>
+                <ClipboardCopy size={12} />
+                复制脱敏摘要
+              </Button>
+            )}
             <span className="ml-auto text-xs text-ink-faint">
               {isDesktop ? '只读比较，不修改任何实例' : '浏览器为模拟展示'}
             </span>

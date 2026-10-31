@@ -265,6 +265,17 @@ export const useInstanceStore = create<InstanceState>()((set, get) => {
   /* ---------------- CRUD ---------------- */
 
   async createInstance(draft) {
+    // S5 (review): the wizard and the template import are TWO entries into
+    // this one action; a concurrent second call would overwrite the module
+    // level createController and orphan the first run's cancel handle.
+    if (get().createProgress) {
+      useUIStore.getState().toast({
+        kind: 'info',
+        title: '已有创建任务进行中',
+        message: '等待当前实例创建完成后再试。',
+      })
+      return null
+    }
     const catalog = catalogState()
     const template = catalog.templates.find((t) => t.id === draft.templateId)
     createController = new AbortController()

@@ -99,6 +99,26 @@ pub struct PluginFact {
     /// The insert-block order in `cordis.patch.yml` — bundle-stack order is
     /// semantics and must survive comparisons (B03).
     pub order: usize,
+    /// Who owns the install: `phl`（PHL 安装事务）、`linked`（本地链接）、
+    /// `bundle`（DSH profile 管理的 bundle，PHL 不可控）。Issue #12 的
+    /// 「来源」维度。
+    pub source: String,
+    /// The package's own `engines.dsh` claim evaluated against THIS
+    /// instance's DSH binding (issue #10's rule, issue #12's comparison
+    /// column). Values read like `兼容（声明 ^0.1.0）` / `不兼容（声明 X）` /
+    /// `未知`; never a guess — undeclared or unparseable stays 未知.
+    pub engine: FactValue,
+}
+
+/// One environment-variable KEY (issue #12). The VALUE never crosses the
+/// wire — `value_digest` is a one-way SHA-256 prefix so a diff can say
+/// 「同名键的值不同」 without ever showing, or even hashing back, the value.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvKeyFact {
+    pub key: String,
+    /// Truncated SHA-256 of the value; `None` for an empty value.
+    pub value_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +148,11 @@ pub struct EnvironmentFacts {
     pub dsh: DshFacts,
     pub node: NodeFacts,
     pub profile: String,
+    /// The instance's WebUI port (issue #12): display data, nothing secret.
+    pub port: FactValue,
+    /// Environment-variable KEYS with one-way value digests — the values
+    /// themselves never cross this wire (issue #12: 只比键，值不展示).
+    pub env_keys: Vec<EnvKeyFact>,
     /// Empty when the whole profile could not be read — never silently "no
     /// plugins". `plugins_available: false` says why the list is empty.
     pub plugins_available: bool,
@@ -154,6 +179,10 @@ pub struct DiffItem {
     pub left: Option<String>,
     pub right: Option<String>,
     pub note: Option<String>,
+    /// Where the compared fact comes from（issue #12 的「显示来源」）:
+    /// `manifest` | `profile` | `marker` | `实测` | `派生`。`None` for rows
+    /// assembled from several sources.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,11 +328,41 @@ pub(crate) async fn collect_facts(
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => (Vec::new(), false),
             _ => {
                 let scanned = crate::instances::scan_plugins(&profile_dir).await;
-                // Sort by bundle order where the stack knows it; entries the
-                // stack does not mention keep a stable id order after them.
-                let mut facts: Vec<PluginFact> = scanned
-                    .into_iter()
-                    .map(|p| PluginFact {
+                // Issue #12: the package's own engines.dsh claim, evaluated
+                // against THIS instance's DSH binding — one column of the
+                // comparison, honest about unknown (issue #10's rule).
+                let dsh = crate::plugins::engines::bare_dsh_version(&manifest.version_id);
+                let mut facts: Vec<PluginFact> = Vec::new();
+                for p in scanned {
+                    let range = crate::plugins::engines::package_engine_range(
+                        &profile_dir.join("node_modules").join(&p.registry_id),
+                    )
+                    .await;
+                    let (verdict, reason) =
+                        crate::plugins::engines::evaluate(range.as_deref(), dsh.as_ref());
+                    let engine = match verdict {
+                        crate::plugins::engines::EngineVerdict::Unknown => known(&reason),
+                        other => {
+                            let label =
+                                if other == crate::plugins::engines::EngineVerdict::Compatible {
+                                    "兼容"
+                                } else {
+                                    "不兼容"
+                                };
+                            known(
+                                format!("{label}（声明 {}）", range.as_deref().unwrap_or("?"))
+                                    .as_str(),
+                            )
+                        }
+                    };
+                    let source = if !p.manageable {
+                        "bundle"
+                    } else if p.linked {
+                        "linked"
+                    } else {
+                        "phl"
+                    };
+                    facts.push(PluginFact {
                         order: order_index.get(&p.plugin_id).copied().unwrap_or(usize::MAX),
                         id: p.plugin_id.clone(),
                         registry_id: p.registry_id.clone(),
@@ -318,8 +377,10 @@ pub(crate) async fn collect_facts(
                             known(&p.trust)
                         },
                         enabled: Some(p.enabled),
-                    })
-                    .collect();
+                        source: source.into(),
+                        engine,
+                    });
+                }
                 facts.sort_by(|a, b| {
                     a.order
                         .cmp(&b.order)
@@ -349,6 +410,33 @@ pub(crate) async fn collect_facts(
         } else {
             unknown()
         };
+
+    // Issue #12: the port fact and the env-KEY list (values reduced to
+    // one-way digests — the wire never carries a value, not even hashed in
+    // a reversible form).
+    let port = known(&if manifest.auto_port {
+        format!("{}（自动分配）", manifest.port)
+    } else {
+        manifest.port.to_string()
+    });
+    let mut env_keys: Vec<EnvKeyFact> = manifest
+        .env
+        .iter()
+        .map(|(key, value)| {
+            let digest = if value.is_empty() {
+                None
+            } else {
+                let mut hasher = Sha256::new();
+                hasher.update(value.as_bytes());
+                Some(hex::encode(&hasher.finalize()[..8]))
+            };
+            EnvKeyFact {
+                key: key.clone(),
+                value_digest: digest,
+            }
+        })
+        .collect();
+    env_keys.sort_by(|a, b| a.key.cmp(&b.key));
     // PHL does not set DSH_AGENTS_HOME today, so every instance shares the
     // user's global agents home — recorded as the residual shared boundary
     // it is. (Trial copies flip this by setting the env var per instance.)
@@ -385,6 +473,8 @@ pub(crate) async fn collect_facts(
             system: manifest.runtime_id == "node-system",
         },
         profile: manifest.profile.clone(),
+        port,
+        env_keys,
         plugins_available,
         plugins,
         api,
@@ -413,6 +503,7 @@ fn fingerprint(facts: &EnvironmentFacts) -> String {
         facts.node.platform.value.as_deref().unwrap_or("∅"),
         facts.node.arch.value.as_deref().unwrap_or("∅"),
         &facts.profile,
+        facts.port.value.as_deref().unwrap_or("∅"),
         &facts.api.inheritance,
         &facts.api.providers.join(","),
         facts.workspace.value.as_deref().unwrap_or("∅"),
@@ -425,6 +516,14 @@ fn fingerprint(facts: &EnvironmentFacts) -> String {
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
+    // Env keys participate through the KEY and the one-way digest — the
+    // fingerprint can distinguish 「值变了」 without storing the value.
+    for k in &facts.env_keys {
+        for part in [&k.key, k.value_digest.as_deref().unwrap_or("∅")] {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+    }
     for p in &facts.plugins {
         for part in [
             &p.registry_id,
@@ -432,6 +531,8 @@ fn fingerprint(facts: &EnvironmentFacts) -> String {
             p.trust.value.as_deref().unwrap_or("∅"),
             &p.enabled.map(|b| b.to_string()).unwrap_or_default(),
             &p.order.to_string(),
+            &p.source,
+            p.engine.value.as_deref().unwrap_or("∅"),
         ] {
             hasher.update(part.as_bytes());
             hasher.update([0]);
@@ -468,6 +569,7 @@ fn value_of(v: &FactValue) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn item(
     key: &str,
     category: &str,
@@ -475,6 +577,7 @@ fn item(
     left: Option<String>,
     right: Option<String>,
     note: Option<String>,
+    source: &str,
 ) -> DiffItem {
     DiffItem {
         key: key.into(),
@@ -483,6 +586,7 @@ fn item(
         left,
         right,
         note,
+        source: Some(source.into()),
     }
 }
 
@@ -493,9 +597,9 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
 
     // DSH: declared binding and the actually installed build.
     let (state, l, r) = diff_pair(&left.dsh.declared, &right.dsh.declared);
-    items.push(item("dsh.binding", "DSH", state, l, r, None));
+    items.push(item("dsh.binding", "DSH", state, l, r, None, "manifest"));
     let (state, l, r) = diff_pair(&left.dsh.installed, &right.dsh.installed);
-    items.push(item("dsh.installed", "DSH", state, l, r, None));
+    items.push(item("dsh.installed", "DSH", state, l, r, None, "安装记录"));
     // Same declared binding but different install fingerprint → someone
     // reinstalled one side; worth its own row rather than a false "same".
     let integrity_state =
@@ -515,12 +619,13 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
         value_of(&left.dsh.integrity),
         value_of(&right.dsh.integrity),
         Some("安装指纹（npm integrity）".into()),
+        "安装记录",
     ));
 
     let (state, l, r) = diff_pair(&left.node.binding, &right.node.binding);
-    items.push(item("node.binding", "Node", state, l, r, None));
+    items.push(item("node.binding", "Node", state, l, r, None, "manifest"));
     let (state, l, r) = diff_pair(&left.node.actual, &right.node.actual);
-    items.push(item("node.actual", "Node", state, l, r, None));
+    items.push(item("node.actual", "Node", state, l, r, None, "实测"));
 
     let (state, l, r) = if left.profile == right.profile {
         (
@@ -535,7 +640,86 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
             Some(right.profile.clone()),
         )
     };
-    items.push(item("profile", "Profile", state, l, r, None));
+    items.push(item("profile", "Profile", state, l, r, None, "manifest"));
+
+    // Issue #12: the WebUI port — display data, one row.
+    let (port_state, port_l, port_r) = diff_pair(&left.port, &right.port);
+    items.push(item(
+        "port",
+        "端口",
+        port_state,
+        port_l,
+        port_r,
+        Some("端口不同时两个实例可以同时运行；同端口则互相排斥".into()),
+        "manifest",
+    ));
+
+    // Issue #12: environment-variable KEYS. Values never travel — a digest
+    // flags 「同名键的值不同」 without showing (or reversibly hashing) it.
+    let left_keys: BTreeMap<&str, &EnvKeyFact> =
+        left.env_keys.iter().map(|k| (k.key.as_str(), k)).collect();
+    let right_keys: BTreeMap<&str, &EnvKeyFact> =
+        right.env_keys.iter().map(|k| (k.key.as_str(), k)).collect();
+    let mut env_diffs = 0usize;
+    let mut env_ids: Vec<&str> = left_keys.keys().chain(right_keys.keys()).copied().collect();
+    env_ids.sort_unstable();
+    env_ids.dedup();
+    for key in &env_ids {
+        match (left_keys.get(*key), right_keys.get(*key)) {
+            (Some(l), Some(r)) => {
+                if l.value_digest != r.value_digest {
+                    env_diffs += 1;
+                    items.push(item(
+                        &format!("env.{key}"),
+                        "环境变量",
+                        "different".into(),
+                        Some("已设置（值不展示）".into()),
+                        Some("已设置（值不展示）".into()),
+                        Some("同名键的值不同；值本身永不进入对比或复制文本".into()),
+                        "manifest",
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                env_diffs += 1;
+                items.push(item(
+                    &format!("env.{key}"),
+                    "环境变量",
+                    "left-only".into(),
+                    Some("已设置（值不展示）".into()),
+                    Some("未设置".into()),
+                    None,
+                    "manifest",
+                ));
+            }
+            (None, Some(_)) => {
+                env_diffs += 1;
+                items.push(item(
+                    &format!("env.{key}"),
+                    "环境变量",
+                    "right-only".into(),
+                    Some("未设置".into()),
+                    Some("已设置（值不展示）".into()),
+                    None,
+                    "manifest",
+                ));
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    items.push(item(
+        "env",
+        "环境变量",
+        if env_diffs > 0 { "different" } else { "same" }.into(),
+        Some(format!("{} 个键", left.env_keys.len())),
+        Some(format!("{} 个键", right.env_keys.len())),
+        Some(if env_diffs > 0 {
+            format!("共 {env_diffs} 处键差异（仅比较键与值是否一致，值永不展示）")
+        } else {
+            "键集合与值均一致（值以单向摘要比对，永不展示）".to_string()
+        }),
+        "manifest",
+    ));
 
     /* ---- plugins: identity-keyed left/right merge ---- */
     let left_by_id: BTreeMap<&str, &PluginFact> =
@@ -551,6 +735,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
             (!left.plugins_available).then(|| "插件目录不可读取".into()),
             (!right.plugins_available).then(|| "插件目录不可读取".into()),
             Some("无法读取的一侧按未知呈现，不视作无插件".into()),
+            "实测",
         ));
     }
 
@@ -568,7 +753,15 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
                     l.version.value != r.version.value || l.version.state != r.version.state;
                 let enabled_differs = l.enabled != r.enabled;
                 let order_differs = l.order != r.order;
-                if version_differs || enabled_differs || order_differs {
+                let source_differs = l.source != r.source;
+                let engine_differs =
+                    l.engine.value != r.engine.value || l.engine.state != r.engine.state;
+                if version_differs
+                    || enabled_differs
+                    || order_differs
+                    || source_differs
+                    || engine_differs
+                {
                     let mut notes: Vec<String> = Vec::new();
                     if version_differs {
                         notes.push("版本".into());
@@ -579,6 +772,12 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
                     if order_differs {
                         notes.push("bundle 顺序".into());
                     }
+                    if source_differs {
+                        notes.push("来源".into());
+                    }
+                    if engine_differs {
+                        notes.push("engines.dsh 判定".into());
+                    }
                     items.push(item(
                         &format!("plugin.{id}"),
                         "插件",
@@ -586,6 +785,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
                         Some(plugin_display(l)),
                         Some(plugin_display(r)),
                         Some(notes.join("、")),
+                        "安装记录",
                     ));
                 }
             }
@@ -597,6 +797,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
                     Some(plugin_display(l)),
                     None,
                     None,
+                    "安装记录",
                 ));
             }
             (None, Some(r)) => {
@@ -607,6 +808,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
                     None,
                     Some(plugin_display(r)),
                     None,
+                    "安装记录",
                 ));
             }
             (None, None) => unreachable!(),
@@ -628,6 +830,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
         Some(api_display(&left.api)),
         Some(api_display(&right.api)),
         None,
+        "manifest",
     ));
 
     /* ---- workspace relation ---- */
@@ -635,7 +838,15 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
     let workspace_note = (state == "different").then(|| {
         "两个实例的工作目录不同；若其中一侧是共享目录，双方会操作同一批项目文件".to_string()
     });
-    items.push(item("workspace", "工作目录", state, l, r, workspace_note));
+    items.push(item(
+        "workspace",
+        "工作目录",
+        state,
+        l,
+        r,
+        workspace_note,
+        "manifest",
+    ));
 
     let agents_state = if left.agents_home_shared == right.agents_home_shared {
         "same"
@@ -649,6 +860,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
         Some(agents_display(left.agents_home_shared)),
         Some(agents_display(right.agents_home_shared)),
         Some("DSH 的 skill 扫描可能读取全局 agents 目录（DSH_AGENTS_HOME / ~/.agents）".into()),
+        "manifest",
     ));
 
     let conflicts_same = left.conflicts == right.conflicts;
@@ -663,6 +875,7 @@ pub(crate) fn build_diff(left: &EnvironmentFacts, right: &EnvironmentFacts) -> E
         Some(left.conflicts.join("；")),
         Some(right.conflicts.join("；")),
         None,
+        "profile",
     ));
 
     // Stable ordering: category first, then key — the frontend renders rows
@@ -693,13 +906,24 @@ fn plugin_display(p: &PluginFact) -> String {
         Some(false) => "停用",
         None => "未知",
     };
-    format!("{version} · {enabled} · 顺序 {}", {
+    let owner = match p.source.as_str() {
+        "bundle" => " · bundle",
+        "linked" => " · 本地链接",
+        _ => "",
+    };
+    let engine = p
+        .engine
+        .value
+        .clone()
+        .unwrap_or_else(|| p.engine.state.clone());
+    format!(
+        "{version} · {enabled} · 顺序 {}{owner} · engines.dsh {engine}",
         if p.order == usize::MAX {
             "—".to_string()
         } else {
             p.order.to_string()
         }
-    })
+    )
 }
 
 fn api_display(api: &ApiFacts) -> String {
