@@ -73,7 +73,18 @@ export function TemplateImportSection() {
     setBusy(true)
     setError(null)
     try {
-      const draft = templateToDraft(file, name.trim() || file.name)
+      // S6 (review): the wizard's duplicate-name gate must hold here too —
+      // two instances with the same display name are a silent UX trap.
+      const takenNames = new Set(
+        useInstanceStore.getState().instances.map((i) => i.name),
+      )
+      const finalName = name.trim() || file.name
+      if (takenNames.has(finalName)) {
+        setError(`已存在同名实例「${finalName}」，请改一个名字`)
+        setBusy(false)
+        return
+      }
+      const draft = templateToDraft(file, finalName)
       const instance = await useInstanceStore.getState().createInstance(draft)
       if (!instance) {
         setBusy(false)
@@ -101,6 +112,10 @@ export function TemplateImportSection() {
           controller.signal,
         )
         setInstallLine(null)
+        // M1 (review): the replay bypasses catalogPluginActions, so nothing
+        // patched the store — reload the list or the detail page shows 0
+        // plugins right after the toast claims success.
+        await useInstanceStore.getState().reload()
         const parts = [`已安装 ${outcome.installed} 个`]
         if (outcome.disabled > 0) parts.push(`其中 ${outcome.disabled} 个按模板停用`)
         if (outcome.skipped.length > 0) parts.push(`跳过 ${outcome.skipped.length} 个（缺来源记录）`)

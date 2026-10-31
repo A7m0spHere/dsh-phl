@@ -153,6 +153,16 @@ pub(crate) async fn export_template_inner(
     let scanned = crate::instances::scan_plugins(&profile).await;
     let mut plugins = Vec::new();
     let mut excluded = Vec::new();
+    // S4 (review): an unreadable node_modules must not silently produce a
+    // 0-plugin template — the file itself says the list may be incomplete.
+    match tokio::fs::read_dir(profile.join("node_modules")).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            excluded.push(format!(
+                "profile/node_modules 无法读取（{e}）：插件清单可能不完整"
+            ));
+        }
+        _ => {}
+    }
     for p in scanned {
         let pkg_dir = profile.join("node_modules").join(&p.registry_id);
         if !p.manageable || p.linked {
@@ -207,14 +217,12 @@ pub(crate) async fn export_template_inner(
     };
 
     if let Some(dest) = dest {
-        let body = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-        std::fs::write(&dest, &body).map_err(|e| format!("无法写入模板文件: {e}"))?;
-        // Seal and re-open (issue #11's rule, same as the Bundle exporter):
-        // never hand the user a file our own reader refuses.
-        let written = std::fs::read(&dest).map_err(|e| format!("无法回读模板文件: {e}"))?;
-        if serde_json::from_slice::<InstanceTemplateFile>(&written).is_err() {
-            let _ = std::fs::remove_file(&dest);
-            return Err("回读校验失败：导出的模板无法被 PHL 自身解析，已删除不完整的导出".into());
+        // Seal and re-open (issue #11's rule) through the SHARED helper —
+        // the Bundle exporter's identical inline copy was merged in review.
+        let back: InstanceTemplateFile =
+            crate::instances::write_json_sealed(Path::new(&dest), &file).await?;
+        if back.format_version != TEMPLATE_FORMAT_VERSION {
+            return Err("回读校验失败：写出的模板格式版本不一致".into());
         }
     }
     Ok(file)
@@ -330,6 +338,12 @@ pub(crate) async fn preview_template_inner(
             .notes
             .push("模板中的凭据载体与机器本地变量只保留了键名；创建后需重新配置值".into());
     }
+    // S7 (review): the API binding deliberately does not travel (credential
+    // boundary) — say so instead of silently reproducing a different shape.
+    preview.notes.push(
+        "模板不携带 API 绑定（凭据边界）：创建出的实例按默认策略继承全局库，凭据需在应用内重新配置"
+            .into(),
+    );
     Ok(preview)
 }
 
@@ -447,6 +461,22 @@ mod tests {
         write_manifest(&dir, &manifest(id)).await.unwrap();
         install_fixture(&root, id, "dsh-foo").await;
 
+        // S3 (review): a marker predating source recording — the export must
+        // honestly report "missing" instead of inventing an npm source.
+        let profile = crate::instances::profile_dir(&root, id).await.unwrap();
+        let old = profile.join("node_modules").join("dsh-old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("package.json"),
+            r#"{"name":"dsh-old","version":"0.9.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            old.join("phl-plugin.json"),
+            r#"{"pluginId":"x/dsh-old","registryId":"dsh-old","version":"0.9.0","kind":"npm","trust":"verified"}"#,
+        )
+        .unwrap();
+
         let file = super::export_template_inner(&root, id, None).await.unwrap();
 
         // Env: ordinary value travels; credential + machine-local keep only
@@ -481,6 +511,18 @@ mod tests {
         assert_eq!(plugin.source_status, "recorded");
         assert!(plugin.source.is_some());
         assert_eq!(plugin.engine_range.as_deref(), Some("^0.1.0"));
+
+        // S3 (review): the pre-source-recording marker exports as "missing"
+        // — and the preview turns that into a manual-install note.
+        let old = &file.plugins[1];
+        assert_eq!(old.registry_id, "dsh-old");
+        assert_eq!(old.source_status, "missing");
+        assert!(old.source.is_none());
+        let preview = super::preview_template_inner(&root, &file).await.unwrap();
+        assert!(preview
+            .notes
+            .iter()
+            .any(|n| n.contains("dsh-old") && n.contains("无法自动重装")));
 
         // args + kind ride along; the file names itself a template.
         assert_eq!(file.args, vec!["--verbose".to_string()]);

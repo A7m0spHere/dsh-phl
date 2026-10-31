@@ -757,6 +757,30 @@ pub(crate) fn is_external(manifest: &InstanceManifest) -> bool {
     manifest.management_mode == ManagementMode::External
 }
 
+/// The seal-and-reopen rule (issues #11/#13) in ONE place: write, read back,
+/// re-parse; any failure deletes the half-written file and reports. Callers
+/// that need more than "it parses" (the Bundle's credential-list equality)
+/// inspect the returned value.
+pub(crate) async fn write_json_sealed<T>(path: &Path, value: &T) -> Result<T, String>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let body = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    tokio::fs::write(path, &body)
+        .await
+        .map_err(|e| format!("无法写入导出文件: {e}"))?;
+    let written = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("无法回读导出文件: {e}"))?;
+    match serde_json::from_slice::<T>(&written) {
+        Ok(back) => Ok(back),
+        Err(_) => {
+            let _ = tokio::fs::remove_file(path).await;
+            Err("回读校验失败：导出文件无法被 PHL 自身解析，已删除不完整的导出".into())
+        }
+    }
+}
+
 /// `profile_dir` for callers about to *write* into the profile: resolves the
 /// path through the ungated read helper and clears the external-instance
 /// gate in one step, so no mutation command can forget to check it.
