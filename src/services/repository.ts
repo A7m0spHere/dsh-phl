@@ -319,6 +319,14 @@ export interface PhlRepository {
   ): Promise<TrialOutcome | null>
 
   /**
+   * The one-page upgrade report for a trial copy (issue #8): evidence-backed
+   * WebUI verdict, redacted heuristic error lines, per-plugin engines.dsh
+   * verdicts and commit-time carry-overs. Persists into the copy's own
+   * directory. `null` = browser mode (no real copy to report on).
+   */
+  trialUpgradeReport(instanceId: string): Promise<import('@/lib/desktop').TrialUpgradeReport | null>
+
+  /**
    * Downloads and installs a plugin into the instance's profile: resolve the
    * tarball (npm packument / direct / GitHub), verify its integrity, unpack
    * into `node_modules` and register it in `cordis.patch.yml`.

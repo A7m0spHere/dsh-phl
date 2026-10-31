@@ -22,6 +22,7 @@
 mod links;
 mod marker;
 mod plan;
+pub(crate) mod report;
 
 use links::retarget_version_links;
 

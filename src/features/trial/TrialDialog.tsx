@@ -9,7 +9,7 @@ import { formatBytes } from '@/lib/format'
 import { repository, Cancelled } from '@/services'
 import { parseThrownError } from '@/lib/errorCodes'
 import { resolveBoundVersion } from '@/lib/instanceVersion'
-import type { TrialOutcome, TrialPreview, TrialRequest } from '@/lib/desktop'
+import type { TrialOutcome, TrialPreview, TrialRequest, TrialUpgradeReport } from '@/lib/desktop'
 import { useEnvCompareStore } from '@/features/environment/compareStore'
 import { useTrialWizardStore } from './trialStore'
 import {
@@ -29,6 +29,14 @@ const READINESS_LABEL: Record<string, string> = {
   readyToLaunch: '副本资源齐备，可以启动',
 }
 
+/** Issue #8 — the report's overall verdict, stated without overclaiming. */
+const OVERALL_LABEL: Record<string, string> = {
+  pass: '通过（启动与 WebUI）',
+  partial: '部分验证',
+  fail: '发现疑似错误',
+  unverified: '未验证',
+}
+
 /**
  * 复制并试用新版 (R1 · M3). The backend owns the plan (this dialog only
  * edits the knobs the plan documents) and the commit; the dialog's job is
@@ -43,6 +51,7 @@ export function TrialDialog() {
   const stop = useInstanceStore((s) => s.stop)
   const reload = useInstanceStore((s) => s.reload)
   const stateOf = useInstanceStore((s) => s.stateOf)
+  const deleteInstance = useInstanceStore((s) => s.deleteInstance)
   const versions = useCatalogStore((s) => s.versions)
   const runtimes = useCatalogStore((s) => s.runtimes)
   const { pop, overlay } = useMotion()
@@ -65,6 +74,10 @@ export function TrialDialog() {
   const [replanNonce, setReplanNonce] = useState(0)
   const [progress, setProgress] = useState<{ progress: number; bytesDone: number; bytesTotal: number } | null>(null)
   const [outcome, setOutcome] = useState<TrialOutcome | null>(null)
+  /** Issue #8: the one-page upgrade report, generated on demand. */
+  const [report, setReport] = useState<TrialUpgradeReport | null>(null)
+  const [reportBusy, setReportBusy] = useState(false)
+  const [reportError, setReportError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
   const requestRef = useRef(0)
@@ -88,6 +101,9 @@ export function TrialDialog() {
     setName('')
     setProgress(null)
     setOutcome(null)
+    setReport(null)
+    setReportBusy(false)
+    setReportError(null)
     setError(null)
     setStopping(false)
   }, [sourceId])
@@ -270,6 +286,41 @@ export function TrialDialog() {
       }
     } finally {
       createControllerRef.current = null
+    }
+  }
+
+  /** Issue #8: the evidence-based one-pager, regenerated on demand. */
+  const generateReport = async () => {
+    if (!outcome) return
+    setReportBusy(true)
+    setReportError(null)
+    try {
+      const next = await repository.trialUpgradeReport(outcome.record.id)
+      if (next) setReport(next)
+      else setReportError('浏览器模式没有真实副本可生成报告')
+    } catch (err) {
+      setReportError(parseThrownError(err).message || '生成升级报告失败')
+    } finally {
+      setReportBusy(false)
+    }
+  }
+
+  /** Issue #8: keep the copy or remove it — the choice stays with the user,
+   *  and deleting the copy can never touch the source instance. */
+  const deleteCopy = async () => {
+    if (!outcome) return
+    const ok = await useUIStore.getState().confirm({
+      title: '删除这个测试副本？',
+      message: `「${outcome.record.name}」会从磁盘移除（含它的日志与升级报告）。源实例不受影响。`,
+      confirmLabel: '删除副本',
+      cancelLabel: '保留',
+    })
+    if (!ok) return
+    try {
+      await deleteInstance(outcome.record.id)
+      close()
+    } catch (err) {
+      setError(parseThrownError(err).message || '删除副本失败')
     }
   }
 
@@ -574,6 +625,85 @@ export function TrialDialog() {
                   ))}
                   <li className="text-ink-faint">原实例未被修改；插件加载与实际任务在启动后仍未验证。</li>
                 </ul>
+                {/* Issue #8: the upgrade report — evidence, indicators and
+                    unverified gaps on one page, regenerated on demand. */}
+                {(report || reportError) && (
+                  <div className="mt-3 space-y-2 rounded-lg bg-surface p-3 ring-1 ring-inset ring-line">
+                    {reportError && <Notice tone="warn">报告生成失败：{reportError}</Notice>}
+                    {report && (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <Badge
+                            tone={
+                              report.overall === 'pass'
+                                ? 'ok'
+                                : report.overall === 'fail'
+                                  ? 'danger'
+                                  : 'warn'
+                            }
+                          >
+                            {OVERALL_LABEL[report.overall] ?? report.overall}
+                          </Badge>
+                          <span className="text-xs text-ink-faint">
+                            对目标 dsh-{report.targetVersion} · {report.generatedAt}
+                          </span>
+                        </div>
+                        <ul className="space-y-1 text-sm text-ink-muted">
+                          <li>
+                            WebUI：{report.webuiDetail}（{report.exitNote}）
+                          </li>
+                          {report.errorLines.length > 0 && (
+                            <li className="text-warn">
+                              启动日志中 {report.errorLines.length}{' '}
+                              行疑似错误（启发式摘录，需人工判读，token 已脱敏）：
+                              <ul className="mt-1 list-disc pl-5">
+                                {report.errorLines.slice(0, 4).map((line, i) => (
+                                  <li key={i} className="break-all font-mono text-xs">{line}</li>
+                                ))}
+                                {report.errorLines.length > 4 && (
+                                  <li>……等 {report.errorLines.length} 行</li>
+                                )}
+                              </ul>
+                            </li>
+                          )}
+                          {report.linkFailures.length > 0 && (
+                            <li className="text-warn">
+                              提交时 {report.linkFailures.length} 个内部链接未能重定向（副本标记待补依赖）。
+                            </li>
+                          )}
+                          {report.mismatchedPackages.length > 0 && (
+                            <li className="text-warn">
+                              提交时 {report.mismatchedPackages.length}{' '}
+                              个包与目标版本不一致（处理记录见上方创建结果）。
+                            </li>
+                          )}
+                          {report.sessions && (
+                            <li>
+                              会话：{report.sessions.count} 个
+                              {report.sessions.unreadable.length > 0 &&
+                                `，另有 ${report.sessions.unreadable.length} 个不可读（未计入）`}
+                              。
+                            </li>
+                          )}
+                          {report.plugins.some((p) => p.engineRange) && (
+                            <li className="break-all">
+                              插件自述兼容性（engines.dsh）：
+                              {report.plugins
+                                .filter((p) => p.engineRange)
+                                .map((p) => ` ${p.registryId}=${p.verdict}`)
+                                .join('，')}
+                              。
+                            </li>
+                          )}
+                          <li className="text-ink-faint">{report.sourceNote}</li>
+                          {report.reportPath && (
+                            <li className="break-all text-ink-faint">报告已保存：{report.reportPath}</li>
+                          )}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -604,6 +734,12 @@ export function TrialDialog() {
             {step === 'result' && outcome && (
               <div className="ml-auto flex gap-2">
                 <Button variant="ghost" onClick={close}>关闭</Button>
+                <Button variant="ghost" onClick={() => void deleteCopy()}>
+                  删除副本
+                </Button>
+                <Button variant="secondary" disabled={reportBusy} onClick={() => void generateReport()}>
+                  {reportBusy ? '生成中…' : '生成升级报告'}
+                </Button>
                 <Button
                   variant="secondary"
                   onClick={() => {

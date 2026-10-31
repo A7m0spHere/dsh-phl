@@ -300,6 +300,7 @@ macro_rules! phl_command_handler {
             community_pack::install::prepare_pack_dependencies,
             instances::trial::preview_trial,
             instances::trial::create_trial,
+            instances::trial::report::trial_upgrade_report,
             environment::inspect_environment,
             environment::compare_environments,
             runtimes::list_node_runtimes,

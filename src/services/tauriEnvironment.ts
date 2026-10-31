@@ -1,6 +1,6 @@
 import * as desktop from '@/lib/desktop'
 import type { EnvironmentDiff, EnvironmentFacts } from '@/lib/desktop'
-import type { TrialOutcome, TrialPreview, TrialRequest } from '@/lib/desktop'
+import type { TrialOutcome, TrialPreview, TrialRequest, TrialUpgradeReport } from '@/lib/desktop'
 import { Cancelled, newTransferId, type TransferProgress } from './repository'
 import type { PhlRepository } from './repository'
 
@@ -64,6 +64,11 @@ async function preparePackDependencies(
   }
 }
 
+/** Issue #8: the one-page upgrade report for a trial copy. */
+async function trialUpgradeReport(instanceId: string): Promise<TrialUpgradeReport | null> {
+  return desktop.trialUpgradeReport(instanceId)
+}
+
 export const tauriEnvironmentOverrides: Pick<
   PhlRepository,
   | 'inspectEnvironment'
@@ -71,10 +76,12 @@ export const tauriEnvironmentOverrides: Pick<
   | 'previewTrial'
   | 'createTrial'
   | 'preparePackDependencies'
+  | 'trialUpgradeReport'
 > = {
   inspectEnvironment,
   compareEnvironments,
   previewTrial,
   createTrial,
   preparePackDependencies,
+  trialUpgradeReport,
 }

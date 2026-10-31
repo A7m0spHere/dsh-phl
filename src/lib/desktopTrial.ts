@@ -1,4 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core'
+import { isDesktop } from './desktopCore'
 import type { RemoteInstanceRecord } from './desktopInstances'
 import type { PluginEngineCompat } from '@/types'
 
@@ -100,4 +101,42 @@ export async function createTrial(
   const channel = new Channel<{ progress: number; bytesDone: number; bytesTotal: number }>()
   channel.onmessage = onProgress
   return invoke('create_trial', { transferId, req, onProgress: channel })
+}
+
+/** Mirrors the Rust `SessionSummary` (issue #8 report). */
+export interface TrialSessionSummary {
+  count: number
+  unreadable: string[]
+}
+
+/** Mirrors the Rust `TrialUpgradeReport` (issue #8): one honest page about a
+ *  trial copy — what is proven, what is merely an indicator, what was never
+ *  verified. `overall` is `pass | partial | fail | unverified`. */
+export interface TrialUpgradeReport {
+  trialId: string
+  sourceId: string | null
+  planId: string | null
+  targetVersion: string
+  targetRuntimeId: string
+  generatedAt: string
+  overall: 'pass' | 'partial' | 'fail' | 'unverified'
+  launchedEver: boolean
+  webui: 'pass' | 'partial' | 'unverified'
+  webuiDetail: string
+  /** Token-redacted heuristic lines — an indicator for a human, not a diagnosis. */
+  errorLines: string[]
+  exitNote: string
+  plugins: PluginEngineCompat[]
+  linkFailures: string[]
+  mismatchedPackages: string[]
+  sessions: TrialSessionSummary | null
+  sourceNote: string
+  reportPath: string | null
+}
+
+export async function trialUpgradeReport(instanceId: string): Promise<TrialUpgradeReport> {
+  if (!isDesktop) {
+    throw new Error('升级报告仅在桌面应用内可用（浏览器模式没有真实副本）')
+  }
+  return invoke<TrialUpgradeReport>('trial_upgrade_report', { instanceId })
 }

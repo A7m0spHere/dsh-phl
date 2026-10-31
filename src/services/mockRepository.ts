@@ -652,6 +652,13 @@ class MockRepository implements PhlRepository {
     void installed
   }
 
+  /** Browser mode has no real copy or launch log to report on (issue #8). */
+  async trialUpgradeReport(instanceId: string) {
+    await sleep(120)
+    void instanceId
+    return null
+  }
+
   async latestPluginVersion(plugin: Plugin): Promise<string | null> {
     await sleep(160)
     // GitHub-source plugins have no npm dist-tags to consult — the real
