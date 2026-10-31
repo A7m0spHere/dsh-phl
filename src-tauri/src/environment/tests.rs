@@ -274,3 +274,174 @@ async fn swapping_sides_swaps_added_and_removed() {
     assert_eq!(a2.management_mode, "external");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Issue #12: the port fact participates in the diff, and auto-allocated
+/// ports read as such.
+#[tokio::test]
+async fn port_fact_is_compared_and_labels_auto_allocation() {
+    let root = scratch("port");
+    seed_version(&root, "0.1.5-rc.3", "0.1.5-rc.3", "sha512-abc");
+    let left = base_manifest("left");
+    let mut right = base_manifest("right");
+    right.port = 8001;
+
+    let lf = facts_for(&root, "left", &left).await;
+    assert_eq!(lf.port.value.as_deref(), Some("8000"));
+    let rf = facts_for(&root, "right", &right).await;
+    let diff = build_diff(&lf, &rf);
+    let row = diff.items.iter().find(|i| i.key == "port").unwrap();
+    assert_eq!(row.state, "different");
+    assert_eq!(row.left.as_deref(), Some("8000"));
+    assert_eq!(row.right.as_deref(), Some("8001"));
+    assert_eq!(row.source.as_deref(), Some("manifest"));
+
+    let mut auto = base_manifest("auto");
+    auto.auto_port = true;
+    let af = facts_for(&root, "auto", &auto).await;
+    assert_eq!(af.port.value.as_deref(), Some("8000（自动分配）"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Issue #12: env KEY comparison. Keys are named, values NEVER travel —
+/// a same-key different-value pair is flagged through the one-way digest,
+/// and the serialized diff contains no trace of the value itself.
+#[tokio::test]
+async fn env_keys_are_compared_without_exposing_values() {
+    let root = scratch("envkeys");
+    seed_version(&root, "0.1.5-rc.3", "0.1.5-rc.3", "sha512-abc");
+    let mut left = base_manifest("left");
+    let mut right = base_manifest("right");
+    left.env
+        .insert("HTTP_PROXY".into(), "http://proxy:8080".into());
+    left.env.insert("PHL_ONLY_LEFT".into(), "left-value".into());
+    // Same key on both sides, different value → digest flags it.
+    right
+        .env
+        .insert("HTTP_PROXY".into(), "http://other:9090".into());
+    right
+        .env
+        .insert("PHL_ONLY_RIGHT".into(), "right-value".into());
+
+    let lf = facts_for(&root, "left", &left).await;
+    let rf = facts_for(&root, "right", &right).await;
+    // The facts wire itself must not carry any value…
+    let facts_json = serde_json::to_string(&lf).unwrap();
+    assert!(!facts_json.contains("http://proxy:8080"));
+    assert!(!facts_json.contains("left-value"));
+    // …only the key names and digests.
+    assert!(facts_json.contains("HTTP_PROXY"));
+
+    let diff = build_diff(&lf, &rf);
+    let diff_json = serde_json::to_string(&diff).unwrap();
+    assert!(!diff_json.contains("http://proxy:8080"));
+    assert!(!diff_json.contains("left-value"));
+    assert!(!diff_json.contains("right-value"));
+
+    let by_key = |k: &str| diff.items.iter().find(|i| i.key == k).unwrap();
+    let proxy = by_key("env.HTTP_PROXY");
+    assert_eq!(proxy.state, "different", "same key, different value");
+    assert!(proxy.note.as_deref().unwrap().contains("值不同"));
+    assert_eq!(by_key("env.PHL_ONLY_LEFT").state, "left-only");
+    assert_eq!(by_key("env.PHL_ONLY_RIGHT").state, "right-only");
+    // The summary row counts all three.
+    let summary = by_key("env");
+    assert!(
+        summary.note.as_deref().unwrap().contains("3 处"),
+        "{}",
+        summary.note.clone().unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Issue #12: plugins carry their owner (source) and their own engines.dsh
+/// verdict evaluated against THIS instance's DSH — the same claim evaluates
+/// differently per side, and that difference is its own note.
+#[tokio::test]
+async fn plugin_source_and_engine_verdicts_join_the_diff() {
+    let root = scratch("pluginse");
+    // The SAME engines.dsh claim (`^0.1.0`) evaluated against two DIFFERENT
+    // DSH bindings: the prerelease `0.1.5-rc.3` fails npm's prerelease gate
+    // (exactly issue #10's rule), the stable `0.1.5` passes.
+    seed_version(&root, "0.1.5-rc.3", "0.1.5-rc.3", "sha512-abc");
+    seed_version(&root, "0.1.5", "0.1.5", "sha512-new");
+    let left = base_manifest("left");
+    let mut right = base_manifest("right");
+    right.version_id = "dsh-0.1.5".into();
+
+    for (id, manifest) in [("left", &left), ("right", &right)] {
+        let dir = crate::instances::instance_dir(&root, id).unwrap();
+        let profile = crate::instances::profile_root_of(&dir, manifest);
+        let pkg = profile.join("node_modules").join("dsh-foo");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"dsh-foo","version":"1.0.0","engines":{"dsh":"^0.1.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("phl-plugin.json"),
+            r#"{"pluginId":"x/dsh-foo","registryId":"dsh-foo","version":"1.0.0","kind":"npm","trust":"verified"}"#,
+        )
+        .unwrap();
+    }
+
+    let lf = facts_for(&root, "left", &left).await;
+    let rf = facts_for(&root, "right", &right).await;
+    assert_eq!(lf.plugins[0].source, "phl");
+    // 左 = 预发布绑定（npm 门控拒绝 ^0.1.0）；右 = 稳定绑定（通过）。
+    assert!(
+        lf.plugins[0]
+            .engine
+            .value
+            .as_deref()
+            .unwrap()
+            .starts_with("不兼容"),
+        "{}",
+        lf.plugins[0].engine.value.as_deref().unwrap()
+    );
+    assert!(rf.plugins[0]
+        .engine
+        .value
+        .as_deref()
+        .unwrap()
+        .starts_with("兼容"));
+
+    let diff = build_diff(&lf, &rf);
+    // 行键是 catalog id（marker 的 pluginId），不是 registry id。
+    let row = diff
+        .items
+        .iter()
+        .find(|i| i.key == "plugin.x/dsh-foo")
+        .unwrap();
+    assert_eq!(row.state, "different");
+    assert!(row.note.as_deref().unwrap().contains("engines.dsh"));
+    assert_eq!(row.source.as_deref(), Some("安装记录"));
+    assert!(row.left.as_deref().unwrap().contains("engines.dsh 不兼容"));
+    assert!(row.right.as_deref().unwrap().contains("engines.dsh 兼容"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Issue #12: every diff row names where its fact comes from.
+#[tokio::test]
+async fn diff_rows_carry_their_source() {
+    let root = scratch("sources");
+    seed_version(&root, "0.1.5-rc.3", "0.1.5-rc.3", "sha512-abc");
+    let manifest = base_manifest("a");
+    let dir = crate::instances::instance_dir(&root, "a").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let facts = collect_facts(&root, &dir, &manifest).await;
+    let diff = build_diff(&facts, &facts);
+    assert!(
+        diff.items.iter().all(|i| i.source.is_some()),
+        "every row names its source"
+    );
+    let binding = diff.items.iter().find(|i| i.key == "dsh.binding").unwrap();
+    assert_eq!(binding.source.as_deref(), Some("manifest"));
+    let installed = diff
+        .items
+        .iter()
+        .find(|i| i.key == "dsh.installed")
+        .unwrap();
+    assert_eq!(installed.source.as_deref(), Some("安装记录"));
+    let _ = std::fs::remove_dir_all(&root);
+}
