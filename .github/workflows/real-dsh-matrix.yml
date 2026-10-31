@@ -1,0 +1,92 @@
+# Issue #7 — the real-DSH compatibility matrix, as a MANUAL workflow.
+#
+# Why manual-only: the lane downloads real packages from registry.npmjs.org
+# and runs real `npm install`s. Flaky upstream networks must not block every
+# push, so this is a dispatchable evidence generator, not a gate (issue #7's
+# own caveat). Run it from the Actions tab before a release, then copy the
+# `[matrix leg …]` lines into
+# internal/acceptance/2026-10-31-issue-7-dsh-matrix/MATRIX.md with the run
+# date and the runner's exact DSH/PHL/Node/OS versions.
+#
+# Platform rows follow what the runners can exercise: windows-latest and
+# macos-latest. Any platform/step not executed stays 未验证 in the matrix —
+# a green CI elsewhere is never evidence for it.
+
+name: real-dsh-matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      with-runtime:
+        description: '也运行真实 Node Runtime 通道（从 nodejs.org 下载两个大版本）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-dsh-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: real-DSH matrix (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # The lane drives real DSH with the host Node (see real_dsh.rs).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # `tauri::generate_context!` reads ../dist at compile time — the lib
+      # test binary needs it even though the lane never opens a window.
+      - run: npm ci
+        working-directory: .
+
+      - run: npm run build
+        working-directory: .
+
+      - name: Real-DSH compatibility lane (opt-in; not a gate)
+        env:
+          PHL_REAL_DSH: '1'
+        shell: bash
+        run: >
+          cargo test --lib --locked
+          ${{ inputs.with-runtime && 'real_' || 'real_dsh' }}
+          -- --ignored --nocapture --test-threads=1
+
+      # The launch logs live under the session's throwaway temp root and are
+      # cleaned up on success; the job log IS the evidence. Persist it so a
+      # failed run's classification lines survive.
+      - name: Persist job log
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p matrix-evidence
+          echo "os: $(uname -a)" > matrix-evidence/run-info.txt
+          echo "node: $(node --version)" >> matrix-evidence/run-info.txt
+          echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> matrix-evidence/run-info.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-dsh-matrix-${{ matrix.os }}
+          path: src-tauri/matrix-evidence
+          if-no-files-found: warn
