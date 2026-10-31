@@ -39,6 +39,7 @@ pub(crate) mod env_policy;
 pub(crate) mod import_state;
 pub(crate) mod manifest;
 pub(crate) mod snapshot;
+pub(crate) mod template;
 pub(crate) mod trial;
 
 pub(crate) use copy::{

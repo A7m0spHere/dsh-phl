@@ -156,8 +156,11 @@ async function createInstance(
     lastRunAt: null,
     totalRuntime: 0,
     favorite: false,
-    env: {},
-    args: [],
+    // Wizard drafts leave these empty; a template-created draft carries the
+    // source instance's non-sensitive settings (values already filtered at
+    // export time — issue #13).
+    env: draft.env ?? {},
+    args: draft.args ?? [],
     // 'default' inherits every enabled provider; anything else leaves the
     // instance's config entirely to DSH. create_instance applies the
     // materialization inside the same Rust call.

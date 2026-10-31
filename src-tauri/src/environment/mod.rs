@@ -343,19 +343,15 @@ pub(crate) async fn collect_facts(
                     let engine = match verdict {
                         crate::plugins::engines::EngineVerdict::Unknown => known(&reason),
                         other => {
-                            let label = if other
-                                == crate::plugins::engines::EngineVerdict::Compatible
-                            {
-                                "兼容"
-                            } else {
-                                "不兼容"
-                            };
+                            let label =
+                                if other == crate::plugins::engines::EngineVerdict::Compatible {
+                                    "兼容"
+                                } else {
+                                    "不兼容"
+                                };
                             known(
-                                format!(
-                                    "{label}（声明 {}）",
-                                    range.as_deref().unwrap_or("?")
-                                )
-                                .as_str(),
+                                format!("{label}（声明 {}）", range.as_deref().unwrap_or("?"))
+                                    .as_str(),
                             )
                         }
                     };
