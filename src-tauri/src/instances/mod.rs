@@ -2176,6 +2176,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Issue #11: a refused import must leave the data root exactly as it
+    /// was — no half instance, no staging residue — and never disturb an
+    /// existing, unrelated instance.
+    #[tokio::test]
+    async fn refused_bundle_import_leaves_no_residue_and_touches_nothing() {
+        let root = temp_root("bundlebad");
+        // An existing, unrelated instance the import must not disturb.
+        create_instance_inner(root.as_path(), manifest("kept-1", "保留实例"))
+            .await
+            .unwrap();
+
+        // Corrupt payloads in every shape the reader refuses.
+        let cases: Vec<(&str, &str)> = vec![
+            ("garbage.json", "not json at all"),
+            ("empty.json", ""),
+            (
+                "wrongver.json",
+                r#"{"phlBundle":99,"exportedAt":"","instance":{},"plugins":[]}"#,
+            ),
+        ];
+        for (name, body) in &cases {
+            let path = root.join(name);
+            std::fs::write(&path, body).unwrap();
+            let result = import_instance_bundle_inner(
+                root.as_path(),
+                &path.to_string_lossy(),
+                manifest("new-1", "新实例"),
+            )
+            .await;
+            assert!(result.is_err(), "{name} must be refused");
+        }
+
+        // Exactly the pre-existing instance remains; nothing staged remains.
+        let listed = list_instances_inner(root.as_path()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].manifest.id, "kept-1");
+        let entries: Vec<String> = std::fs::read_dir(root.join("instances"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().all(|n| !n.starts_with(".phl")),
+            "no staging residue: {entries:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// T-110 Windows 专项：中文 / 空格 / Unicode 数据根下的完整实例生命周期。
     /// 每一段路径都直接进入文件系统调用，正是历史上一堆“莫名失败”的来源。
     #[tokio::test]
