@@ -25,7 +25,8 @@ import {
   type PluginTransferState,
 } from '@/stores'
 import { useShallow } from 'zustand/react/shallow'
-import { latestRelease, type Plugin } from '@/types'
+import { latestRelease, type Plugin, type PluginEngineCompat } from '@/types'
+import { repository } from '@/services'
 import { Button, Chip, Dropdown, EmptyState, Input } from '@/components/ui'
 import { PageShell } from '@/components/layout/Page'
 import { PanelDivider, PanelGroup, PanelItem, PanelShell } from '@/components/layout/Panel'
@@ -266,6 +267,30 @@ export function PluginsPage() {
     return 'unknown' as const
   }
 
+  // engines.dsh verdicts (issue #10): read-only backend evaluation of every
+  // installed package's own claim against this instance's DSH binding. The
+  // list is keyed by registry id — the id the marker and cordis.patch.yml
+  // agree on — so rows join without guessing from display names.
+  const [engineCompat, setEngineCompat] = useState<PluginEngineCompat[]>([])
+  useEffect(() => {
+    if (!instance) {
+      setEngineCompat([])
+      return
+    }
+    let alive = true
+    void repository.installedPluginCompat(instance.id).then((rows) => {
+      if (alive) setEngineCompat(rows)
+    })
+    return () => {
+      alive = false
+    }
+  }, [instance?.id])
+  const compatByRegistry = useMemo(() => {
+    const map = new Map<string, PluginEngineCompat>()
+    for (const row of engineCompat) map.set(row.registryId, row)
+    return map
+  }, [engineCompat])
+
   const registry = useMemo(() => {
     const q = deferredQuery.trim().toLowerCase()
     const filtered = plugins.filter((p) => {
@@ -355,12 +380,13 @@ export function PluginsPage() {
           outdated,
           check,
           compat: meta ? compatibility(meta, ip.version) : ('unknown' as const),
+          engine: compatByRegistry.get(ip.registryId ?? ''),
         }
       })
       .filter((p) => !q || p.name.toLowerCase().includes(q))
     // `compatibility` closes over the scoped instance deliberately.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instance, plugins, latestVersions, query])
+  }, [instance, plugins, latestVersions, query, compatByRegistry])
 
   // Update-check health across the instance's checkable plugins (§R5), driven
   // by the explicit state — used for the re-check affordance and to stop the

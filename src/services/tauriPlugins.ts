@@ -117,14 +117,32 @@ async function latestPluginVersion(plugin: Plugin): Promise<string | null> {
   return version
 }
 
+/** Read-only engines.dsh verdicts (issue #10) — straight from the backend. */
+async function installedPluginCompat(instanceId: string) {
+  try {
+    return await desktop.installedPluginCompat(instanceId)
+  } catch (err) {
+    // A read-only diagnostic must never take the plugin page down with it:
+    // an empty list falls the rows back to the legacy catalog-list badge.
+    console.warn('[phl] installed_plugin_compat unavailable:', parseThrownError(err).message)
+    return []
+  }
+}
+
 /** The repository overrides, spread into the desktop repository selection. */
 export const tauriPluginOverrides: Pick<
   PhlRepository,
-  'listPlugins' | 'installPlugin' | 'setPluginEnabled' | 'uninstallPlugin' | 'latestPluginVersion'
+  | 'listPlugins'
+  | 'installPlugin'
+  | 'setPluginEnabled'
+  | 'uninstallPlugin'
+  | 'latestPluginVersion'
+  | 'installedPluginCompat'
 > = {
   listPlugins,
   installPlugin,
   latestPluginVersion,
+  installedPluginCompat,
   setPluginEnabled: async (instance, installed, enabled) => {
     await desktop.setPluginEnabled(instance.id, fallbackRegistryId(installed), enabled)
   },

@@ -146,6 +146,7 @@ export type { RemoteVersionMeta, InstalledVersionInfo, DownloadArgs } from './de
 export {
   listDshPlugins,
   installPlugin,
+  installedPluginCompat,
   pluginLatestVersion,
   setPluginEnabled,
   uninstallPlugin,

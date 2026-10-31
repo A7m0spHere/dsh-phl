@@ -1,6 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { isDesktop } from './desktopCore'
-import type { PluginSource } from '@/types'
+import type { PluginSource, PluginEngineCompat } from '@/types'
 
 /**
  * The plugin half of the desktop bridge (§M2 domain split): catalog listing,
@@ -80,8 +80,24 @@ export async function installPlugin(args: InstallPluginArgs): Promise<{
   registryId: string
   /** The trust the Rust transaction recorded with this commit (T-107). */
   trust: string
+  /** The package's `engines.dsh` claim vs this instance's DSH (issue #10). */
+  engineCompat: PluginEngineCompat
 }> {
-  if (!isDesktop) return { version: '', registryId: '', trust: 'unknown' }
+  if (!isDesktop) {
+    return {
+      version: '',
+      registryId: '',
+      trust: 'unknown',
+      engineCompat: {
+        pluginId: '',
+        registryId: '',
+        installedVersion: '',
+        engineRange: null,
+        verdict: 'unknown',
+        reason: '浏览器模式下没有真实安装，不产生 engines.dsh 结论',
+      },
+    }
+  }
   const channel = new Channel<Parameters<InstallPluginArgs['onProgress']>[0]>()
   channel.onmessage = args.onProgress
   return invoke('install_plugin', {
@@ -93,6 +109,16 @@ export async function installPlugin(args: InstallPluginArgs): Promise<{
     instanceId: args.instanceId,
     onProgress: channel,
   })
+}
+
+/**
+ * Read-only per-plugin `engines.dsh` verdicts (issue #10) for one instance's
+ * installed plugins, evaluated backend-side against the instance's bound DSH
+ * version. Mirrors the Rust `installed_plugin_compat` command.
+ */
+export async function installedPluginCompat(instanceId: string): Promise<PluginEngineCompat[]> {
+  if (!isDesktop) return []
+  return invoke<PluginEngineCompat[]>('installed_plugin_compat', { instanceId })
 }
 
 export async function pluginLatestVersion(

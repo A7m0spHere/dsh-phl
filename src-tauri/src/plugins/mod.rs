@@ -20,6 +20,7 @@ pub(crate) mod catalog;
 pub(crate) mod conflicts;
 pub(crate) mod cordis;
 pub(crate) mod deps;
+pub(crate) mod engines;
 pub(crate) mod install;
 pub(crate) mod resolve;
 pub(crate) mod security;
@@ -137,6 +138,10 @@ pub struct PluginInstallOutcome {
     pub registry_id: String,
     /// verified | pinned | unverified — from install-time facts (T-107).
     pub trust: String,
+    /// The just-installed package's `engines.dsh` claim evaluated against
+    /// the instance's DSH binding (issue #10). Advisory only — the install
+    /// itself is never gated on it; the decision stays with the user.
+    pub engine_compat: crate::plugins::engines::PluginEngineCompat,
 }
 
 #[derive(Debug, Serialize)]

@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowUpCircle, Blocks, Link2, Package2, RefreshCw, Trash
 import { cn } from '@/lib/cn'
 import { useMotion } from '@/lib/motion'
 import { useUIStore, type PluginTransferState } from '@/stores'
-import type { InstalledPlugin, Plugin } from '@/types'
+import type { InstalledPlugin, Plugin, PluginEngineCompat } from '@/types'
 import type { LatestVersionState } from '@/stores/catalogStore'
 import { Badge, Button, EmptyState, Notice, Switch, Tooltip } from '@/components/ui'
 import { STAGE_LABEL, SourceBadge, TransferInline, compatHint } from './visuals'
@@ -17,6 +17,12 @@ export type InstalledPluginRow = InstalledPlugin & {
   outdated: boolean
   check?: LatestVersionState
   compat: 'ok' | 'bad' | 'unknown'
+  /**
+   * The package's own `engines.dsh` claim vs this instance's DSH (issue #10).
+   * Takes precedence over the legacy `compat` list whenever the package
+   * declares the field; absent/undeclared falls back to the list badge.
+   */
+  engine?: PluginEngineCompat
 }
 
 const TRUST_LABEL: Record<string, string> = {
@@ -187,12 +193,31 @@ export function PluginInstalledView(p: PluginInstalledViewProps) {
                           </Badge>
                         </Tooltip>
                       )}
-                      {row.compat === 'bad' && (
+                      {/* engines.dsh is the official primary claim (issue #10):
+                          it overrides the catalog lists whenever declared. */}
+                      {row.engine?.verdict === 'incompatible' && (
+                        <Tooltip content={row.engine.reason}>
+                          <Badge tone="danger">engines.dsh 不兼容</Badge>
+                        </Tooltip>
+                      )}
+                      {row.engine?.verdict === 'compatible' && (
+                        <Tooltip content={row.engine.reason}>
+                          <Badge tone="ok">engines.dsh 兼容</Badge>
+                        </Tooltip>
+                      )}
+                      {row.engine?.verdict === 'unknown' && row.engine.engineRange && (
+                        <Tooltip content={row.engine.reason}>
+                          <Badge tone="warn">engines.dsh 无法解析</Badge>
+                        </Tooltip>
+                      )}
+                      {/* Legacy catalog-list rule — only when the package
+                          declares no engines.dsh of its own. */}
+                      {!row.engine?.engineRange && row.compat === 'bad' && (
                         <Tooltip content={compatHint('bad')}>
                           <Badge tone="danger">不兼容当前版本</Badge>
                         </Tooltip>
                       )}
-                      {row.compat === 'unknown' && !row.linked && (
+                      {!row.engine?.engineRange && row.compat === 'unknown' && !row.linked && (
                         <Tooltip content={compatHint('unknown')}>
                           <Badge tone="warn">兼容性未知</Badge>
                         </Tooltip>

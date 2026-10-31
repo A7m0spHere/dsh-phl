@@ -429,6 +429,39 @@ export function TrialDialog() {
                         </ul>
                       </Notice>
                     )}
+                    {/* #10: the packages' own engines.dsh claims, evaluated
+                        against the TARGET version. Only declared claims are
+                        listed — undeclared ones stay on the legacy lists. */}
+                    {(preview.pluginCompat ?? []).filter((c) => c.engineRange).length > 0 && (
+                      <Notice
+                        tone={
+                          preview.pluginCompat.some((c) => c.verdict === 'incompatible')
+                            ? 'warn'
+                            : 'info'
+                        }
+                      >
+                        <p className="font-medium">
+                          插件自述的 engines.dsh 兼容性（对目标 dsh-{preview.targetVersion}）：
+                        </p>
+                        <ul className="mt-1 list-disc pl-5">
+                          {preview.pluginCompat
+                            .filter((c) => c.engineRange)
+                            .slice(0, 4)
+                            .map((c) => (
+                              <li key={c.registryId} className="break-all">
+                                {c.verdict === 'compatible' ? '✓' : c.verdict === 'incompatible' ? '✕' : '?'}{' '}
+                                {c.registryId} · {c.engineRange} — {c.reason}
+                              </li>
+                            ))}
+                        </ul>
+                        {preview.pluginCompat.filter((c) => !c.engineRange).length > 0 && (
+                          <p className="mt-1 text-ink-faint">
+                            其余 {preview.pluginCompat.filter((c) => !c.engineRange).length}{' '}
+                            个插件未声明 engines.dsh，沿用兼容性记录判定。
+                          </p>
+                        )}
+                      </Notice>
+                    )}
                     {preview.sessionCount !== null && (
                       <Notice tone={preview.sessionCwds.length ? 'warn' : 'info'}>
                         将携带 {preview.sessionCount} 个会话。

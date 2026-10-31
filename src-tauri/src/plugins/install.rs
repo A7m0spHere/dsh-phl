@@ -53,9 +53,11 @@ pub async fn install_plugin(
     // bound runtime (see `deps`), so the manifest is read for that binding.
     // `writable_profile_dir` already proved the manifest loads.
     let instance_dir = crate::instances::instance_dir(&phl.root(), &instance_id)?;
-    let runtime_id = crate::instances::manifest::load_manifest(&instance_dir, &instance_id)
-        .await?
-        .runtime_id;
+    let manifest = crate::instances::manifest::load_manifest(&instance_dir, &instance_id).await?;
+    let runtime_id = manifest.runtime_id.clone();
+    // engines.dsh verdicts (issue #10) evaluate against the instance's own
+    // DSH binding; an unbound/unparseable one stays "unknown", never a guess.
+    let dsh = crate::plugins::engines::bare_dsh_version(&manifest.version_id);
     let deps = DependencyEnv::new(&phl.root(), &runtime_id, Some(&registry_base));
     // A committed install changes the tree the disk-usage cache measured.
     let profile_for_cache = profile.clone();
@@ -81,6 +83,7 @@ pub async fn install_plugin(
                 &registry_base,
                 &profile,
                 &deps,
+                dsh,
                 &on_progress,
             )
             .await
@@ -104,6 +107,7 @@ async fn run_plugin_install(
     registry_base: &str,
     instance_root: &Path,
     deps: &DependencyEnv,
+    dsh: Option<semver::Version>,
     on_progress: &Channel<PluginProgressEvent>,
 ) -> Result<PluginInstallOutcome, String> {
     if instance_root.as_os_str().is_empty() {
@@ -285,10 +289,26 @@ async fn run_plugin_install(
     recover_profile_transaction(instance_root).await?;
     let _ = tokio::fs::remove_file(&part_path).await;
 
+    // engines.dsh claim of the freshly installed package (issue #10),
+    // evaluated AFTER the commit against what actually landed on disk.
+    // Advisory only: the install is never gated on it.
+    let engine_range = super::engines::package_engine_range(&dest).await;
+    let (engine_verdict, engine_reason) =
+        super::engines::evaluate(engine_range.as_deref(), dsh.as_ref());
+    let engine_registry_id = registry_id.clone();
+
     Ok(PluginInstallOutcome {
-        version: resolved.version,
+        version: resolved.version.clone(),
         registry_id,
         trust: trust.to_string(),
+        engine_compat: super::engines::PluginEngineCompat {
+            plugin_id: plugin_id.to_string(),
+            registry_id: engine_registry_id,
+            installed_version: resolved.version,
+            engine_range,
+            verdict: engine_verdict.as_str().to_string(),
+            reason: engine_reason,
+        },
     })
 }
 

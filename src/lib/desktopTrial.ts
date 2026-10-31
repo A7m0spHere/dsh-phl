@@ -1,5 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core'
 import type { RemoteInstanceRecord } from './desktopInstances'
+import type { PluginEngineCompat } from '@/types'
 
 /**
  * Copy & trial upgrade bridge (R1 · M3). The preview is a backend-computed,
@@ -60,6 +61,12 @@ export interface TrialPreview {
    * refuse it at boot. Surfaced before the user commits.
    */
   mismatchedPackages: string[]
+  /**
+   * Per-plugin `engines.dsh` verdicts (issue #10) of the source profile's
+   * installed plugins evaluated against the TARGET version — the official
+   * compatibility claim, shown before the user commits.
+   */
+  pluginCompat: PluginEngineCompat[]
   /** Plan identity the create must send back verbatim. */
   planId: string
   targetId: string

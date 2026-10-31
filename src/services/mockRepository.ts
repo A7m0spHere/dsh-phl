@@ -13,6 +13,7 @@ import type {
   LaunchPhase,
   OfficialDesktopInfo,
   Plugin,
+  PluginEngineCompat,
   PluginTrust,
   Runtime,
   Snapshot,
@@ -532,6 +533,9 @@ class MockRepository implements PhlRepository {
       conflicts: [],
       blocked: [],
       mismatchedPackages: [],
+      // No real package.json in browser mode — an empty list keeps the
+      // preview honest instead of fabricating engines.dsh verdicts.
+      pluginCompat: [],
       // A mock preview issues no executable plan, and it cannot: createTrial
       // refuses in browser mode. The empty identity is what disables the
       // dialog's create button instead of pretending a plan exists.
@@ -654,6 +658,17 @@ class MockRepository implements PhlRepository {
     // bridge returns null for them too.
     if (plugin.source.kind !== 'npm') return null
     return plugin.releases[0]?.version ?? null
+  }
+
+  /**
+   * Browser mode has no real package.json on disk to read (issue #10), so
+   * the mock returns an empty list — the installed rows fall back to the
+   * legacy catalog-list badge instead of a fabricated engines verdict.
+   */
+  async installedPluginCompat(instanceId: string): Promise<PluginEngineCompat[]> {
+    await sleep(120)
+    void instanceId
+    return []
   }
 
   /**

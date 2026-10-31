@@ -142,6 +142,10 @@ pub struct TrialPreview {
     /// copied into an 0.1.7-rc.2 trial and the new typert-loader rejected it
     /// at boot with "codec has no create() factory").
     pub mismatched_packages: Vec<String>,
+    /// Per-plugin `engines.dsh` verdicts (issue #10) of the source profile's
+    /// installed plugins evaluated against the TARGET version — the official
+    /// compatibility claim, shown before the user commits. Read-only.
+    pub plugin_compat: Vec<crate::plugins::engines::PluginEngineCompat>,
 }
 
 /// Stable fingerprint of the source environment a plan was built from, and
@@ -270,6 +274,19 @@ async fn preview_shell(
         Vec::new()
     };
 
+    // engines.dsh verdicts (issue #10) against the TARGET version. Unlike the
+    // tree comparison above this needs no installed target — the claim is
+    // evaluated from the version string alone, so the preview can warn even
+    // before the target is downloaded.
+    let source_profile = profile_root(&instance_dir(root, &req.source_id)?, &manifest.profile);
+    let source_plugins = crate::instances::scan_plugins(&source_profile).await;
+    let plugin_compat = crate::plugins::engines::compat_for_installed(
+        &source_plugins,
+        &source_profile,
+        semver::Version::parse(target_version.trim()).ok(),
+    )
+    .await;
+
     let source_version = manifest.version_id.clone();
     // CR-07: the copy gets its own port at plan time, with the SAME
     // allocation rule create uses — otherwise the recomputed plan id could
@@ -324,6 +341,7 @@ async fn preview_shell(
         auto_port,
         blocked: Vec::new(),
         mismatched_packages,
+        plugin_compat,
     })
 }
 

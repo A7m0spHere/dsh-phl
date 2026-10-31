@@ -112,6 +112,22 @@ export interface PluginRelease {
   incompatible?: string[]
 }
 
+/**
+ * The package's own `engines.dsh` claim evaluated against ONE concrete DSH
+ * version (issue #10). Mirrors the Rust `PluginEngineCompat`. When
+ * `engineRange` is null the field is undeclared and the legacy
+ * `PluginRelease.compatible` lists apply; an unparsable range or an unbound
+ * DSH version is `unknown` — never silently "incompatible".
+ */
+export interface PluginEngineCompat {
+  pluginId: string
+  registryId: string
+  installedVersion: string
+  engineRange: string | null
+  verdict: 'compatible' | 'incompatible' | 'unknown'
+  reason: string
+}
+
 export interface Plugin {
   id: string
   name: string

@@ -357,6 +357,15 @@ export interface PhlRepository {
   latestPluginVersion(plugin: Plugin): Promise<string | null>
 
   /**
+   * Per-plugin `engines.dsh` verdicts (issue #10) for one instance's
+   * installed plugins, evaluated backend-side against the instance's bound
+   * DSH version. Read-only; never writes or gates anything. The array may be
+   * empty (browser mode), and every entry is honest about "unknown" —
+   * undeclared, unparsable or unbound never masquerade as "incompatible".
+   */
+  installedPluginCompat(instanceId: string): Promise<import('@/types').PluginEngineCompat[]>
+
+  /**
    * The official DeepSeek Harness desktop app, seen as a machine singleton
    * PHL helps operate (planning input 2026-09-29 §8): one install per
    * machine, owned by its own installer/updater. Read-only operations on the
