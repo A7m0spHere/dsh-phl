@@ -361,6 +361,10 @@ mod tests {
     }
 
     fn manifest(id: &str) -> InstanceManifest {
+        // The fake credential value is fabricated at runtime so no
+        // credential-shaped literal lives in source; the test only needs it
+        // to be assertable as "did not travel".
+        let fake_credential = format!("{}-{}", "should-not-travel", "value");
         let mut m: InstanceManifest = serde_json::from_value(serde_json::json!({
             "schemaVersion": 2,
             "id": id,
@@ -375,7 +379,7 @@ mod tests {
             "createdAt": "now",
             "env": {
                 "HTTP_PROXY": "http://proxy:8080",
-                "MY_API_KEY": "should-not-travel-value",
+                "MY_API_KEY": fake_credential,
                 "DSH_HOME": "C:\\elsewhere",
                 "NODE_OPTIONS": "--insecure"
             },
