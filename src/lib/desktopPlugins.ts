@@ -145,7 +145,9 @@ export interface PluginHealthReport {
 /** Issue #9: read-only plugin-environment diagnosis for one instance. */
 export async function pluginHealthCheck(instanceId: string): Promise<PluginHealthReport> {
   if (!isDesktop) {
-    return { instanceId, managed: false, generatedAt: '', findings: [] }
+    // Same contract the browser-mode mock answers with (managed + clean):
+    // the two fallbacks must not disagree about what "browser" means.
+    return { instanceId, managed: true, generatedAt: '', findings: [] }
   }
   return invoke<PluginHealthReport>('plugin_health_check', { instanceId })
 }

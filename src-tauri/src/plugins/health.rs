@@ -191,19 +191,39 @@ async fn check_declared(
 pub(crate) async fn collect_findings(profile: &Path) -> Vec<PluginHealthFinding> {
     let mut findings = Vec::new();
 
-    // 1. Install-transaction residue (安装事务残留).
-    if let Some(id) = transaction_residue(profile).await {
-        findings.push(PluginHealthFinding {
-            kind: "transaction-residue".into(),
-            severity: "warning".into(),
-            plugin: id,
-            evidence: "profile 下存在未完成的 .phl-plugin-txn 安装事务日志".into(),
-            impact: "下一次安装/启停会先自动恢复该事务；忽略可能在磁盘上留下旧版本备份或半安装目录"
-                .into(),
-            suggestion: "执行「恢复安装事务」（复用既有恢复入口，失败时保留旧版本、可重试）".into(),
-            repairable: true,
-            action: Some(REPAIR_RECOVER_TRANSACTION.into()),
-        });
+    // 1. Install-transaction residue (安装事务残留). A journal the recovery
+    //    entry cannot read gets its own finding WITHOUT a repair button —
+    //    offering one that is guaranteed to fail would be a lie.
+    match transaction_residue(profile).await {
+        super::install::TransactionResidue::Recoverable(id) => {
+            findings.push(PluginHealthFinding {
+                kind: "transaction-residue".into(),
+                severity: "warning".into(),
+                plugin: id,
+                evidence: "profile 下存在未完成的 .phl-plugin-txn 安装事务日志".into(),
+                impact:
+                    "下一次安装/启停会先自动恢复该事务；忽略可能在磁盘上留下旧版本备份或半安装目录"
+                        .into(),
+                suggestion: "执行「恢复安装事务」（复用既有恢复入口，失败时保留旧版本、可重试）"
+                    .into(),
+                repairable: true,
+                action: Some(REPAIR_RECOVER_TRANSACTION.into()),
+            });
+        }
+        super::install::TransactionResidue::Unreadable => {
+            findings.push(PluginHealthFinding {
+                kind: "transaction-journal-unreadable".into(),
+                severity: "warning".into(),
+                plugin: "-".into(),
+                evidence: "profile 下存在 .phl-plugin-txn 事务日志，但当前版本无法解析它".into(),
+                impact: "可能来自更新版本的 PHL 或已损坏的 journal；自动恢复入口对它必然失败".into(),
+                suggestion: "保留现场（不要手动删除 .phl-plugin-txn 及其中的备份目录），升级 PHL 后重新体检或人工处理"
+                    .into(),
+                repairable: false,
+                action: None,
+            });
+        }
+        super::install::TransactionResidue::None => {}
     }
 
     // 2. Known conflicts (已知会导致 WebUI 启动失败的组合).
@@ -584,6 +604,28 @@ mod tests {
         // …and the fresh diagnosis is clean again.
         let findings = collect_findings(&profile).await;
         assert_eq!(findings, Vec::new(), "{findings:?}");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_journal_is_reported_without_a_repair_button() {
+        let profile = temp_profile("txnbad");
+        std::fs::create_dir_all(profile.join(".phl-plugin-txn")).unwrap();
+        // version != 1: the recovery entry refuses it by design, so the
+        // health check must NOT offer the recover button (review R1).
+        std::fs::write(
+            profile.join(".phl-plugin-txn").join("journal.json"),
+            r#"{"version":2,"registry_id":"dsh-foo","had_previous":false,"registration_before":null,"phase":"Prepared"}"#,
+        )
+        .unwrap();
+        let findings = collect_findings(&profile).await;
+        assert_eq!(
+            kinds(&findings),
+            vec!["transaction-journal-unreadable"],
+            "{findings:?}"
+        );
+        assert!(!findings[0].repairable);
+        assert!(findings[0].action.is_none());
         let _ = std::fs::remove_dir_all(&profile);
     }
 

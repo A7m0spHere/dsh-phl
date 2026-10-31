@@ -281,8 +281,12 @@ async fn preview_shell(
     // before the target is downloaded.
     let source_profile = profile_root(&instance_dir(root, &req.source_id)?, &manifest.profile);
     let source_plugins = crate::instances::scan_plugins(&source_profile).await;
+    let triples: Vec<(String, String, String)> = source_plugins
+        .into_iter()
+        .map(|p| (p.plugin_id, p.registry_id, p.version))
+        .collect();
     let plugin_compat = crate::plugins::engines::compat_for_installed(
-        &source_plugins,
+        &triples,
         &source_profile,
         semver::Version::parse(target_version.trim()).ok(),
     )

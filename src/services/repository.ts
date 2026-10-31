@@ -339,7 +339,14 @@ export interface PhlRepository {
     instance: Instance,
     onProgress: (p: TransferProgress) => void,
     signal: AbortSignal,
-  ): Promise<{ version: string; registryId?: string; trust?: import('@/types').PluginTrust }>
+  ): Promise<{
+    version: string
+    registryId?: string
+    trust?: import('@/types').PluginTrust
+    /** The package's engines.dsh claim vs this DSH (issue #10) — consumed
+     *  by the install success toast. */
+    engineCompat?: import('@/types').PluginEngineCompat
+  }>
 
   /**
    * Flags the plugin disabled/enabled in the profile's `cordis.patch.yml`.

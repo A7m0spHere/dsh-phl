@@ -464,18 +464,36 @@ async fn read_transaction(profile: &Path) -> Result<PluginTransaction, String> {
 }
 
 /// Read-only residue probe for the plugin health check (issue #9): does this
-/// profile carry an unfinished install transaction? Returns the stalled
-/// registry id when a journal exists and parses; `None` = no residue (or a
-/// journal this build cannot read — which the caller surfaces as its own
-/// finding rather than pretending the profile is clean). Deliberately does
-/// NOT recover: 修复由用户明确选择，走 `recover_profile_transaction`。
-pub(crate) async fn transaction_residue(profile: &Path) -> Option<String> {
-    let raw = tokio::fs::read(transaction_dir(profile).join("journal.json"))
+/// profile carry an unfinished install transaction, and can the EXISTING
+/// recovery entry actually read it? Three states on purpose:
+///
+/// * `None` — no journal, nothing to do;
+/// * `Recoverable(id)` — the journal parses and validates, so
+///   `recover_profile_transaction` (the repair the health check offers) will
+///   accept it;
+/// * `Unreadable` — a journal file exists that this build refuses (unknown
+///   version, corrupt, path-unsafe id): the health check must surface this
+///   as its OWN finding with a keep-the-scene suggestion instead of offering
+///   a repair button that is guaranteed to fail.
+///
+/// Deliberately does NOT recover: 修复由用户明确选择。
+pub(crate) enum TransactionResidue {
+    None,
+    Recoverable(String),
+    Unreadable,
+}
+
+pub(crate) async fn transaction_residue(profile: &Path) -> TransactionResidue {
+    if tokio::fs::metadata(transaction_dir(profile).join("journal.json"))
         .await
-        .ok()?;
-    serde_json::from_slice::<PluginTransaction>(&raw)
-        .ok()
-        .map(|t| t.registry_id)
+        .is_err()
+    {
+        return TransactionResidue::None;
+    }
+    match read_transaction(profile).await {
+        Ok(t) => TransactionResidue::Recoverable(t.registry_id),
+        Err(_) => TransactionResidue::Unreadable,
+    }
 }
 
 async fn begin_transaction(profile: &Path, registry_id: &str) -> Result<(), String> {

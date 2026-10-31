@@ -173,19 +173,13 @@ struct NpmDist {
 /// honest than trying to invert the range: `>=18.17` has to keep counting 18
 /// as supported, which a naive lower-bound read would get wrong.
 ///
-/// The `||` split is not optional. node's range syntax allows alternatives,
-/// the `semver` crate's `VersionReq` only understands `,`-separated
-/// comparators, and a failed parse here reads as "unknown" — so without this
-/// a perfectly ordinary `"^20 || >=22"` would silently declare no supported
-/// runtime at all.
+/// The npm syntax expansion lives in ONE place (`range::parse_npm_range`) —
+/// `||` alternatives, partial operands like `>=18.17` and wildcards all
+/// work here for the same reason they work in the plugin engines check.
 pub(crate) fn majors_from_engines(range: &str) -> Vec<u32> {
-    let reqs: Vec<semver::VersionReq> = range
-        .split("||")
-        .filter_map(|part| semver::VersionReq::parse(part.trim()).ok())
-        .collect();
-    if reqs.is_empty() {
+    let Some(reqs) = super::range::parse_npm_range(range) else {
         return Vec::new();
-    }
+    };
     (14u32..=34)
         .filter(|major| {
             [0u64, 12, 17, 99].iter().any(|&minor| {

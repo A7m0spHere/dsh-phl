@@ -192,9 +192,13 @@ pub(crate) async fn build_report(
     // Plugins as they are NOW on the copy, with their own engines.dsh claim
     // evaluated against the TARGET version (#10).
     let profile = crate::instances::profile_dir(root, instance_id).await?;
-    let plugins_scan = crate::instances::scan_plugins(&profile).await;
+    let scanned = crate::instances::scan_plugins(&profile).await;
+    let triples: Vec<(String, String, String)> = scanned
+        .into_iter()
+        .map(|p| (p.plugin_id, p.registry_id, p.version))
+        .collect();
     let plugins = crate::plugins::engines::compat_for_installed(
-        &plugins_scan,
+        &triples,
         &profile,
         crate::plugins::engines::bare_dsh_version(&marker.target_version),
     )
@@ -458,6 +462,55 @@ mod tests {
             .expect("config+sessions copies get a summary");
         assert_eq!(sessions.count, 0);
         assert!(sessions.unreadable.is_empty());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn a_live_port_with_a_token_url_reports_pass_end_to_end() {
+        // A REAL listener on an OS-assigned port: the reachable=true leg of
+        // build_report runs end to end with no assumption about which ports
+        // this machine keeps closed (review R7).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = std::env::temp_dir().join(format!(
+            "phl-trial-report-live-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dest = root.join("instances").join("t-live");
+        tokio::fs::create_dir_all(dest.join("profiles").join("web"))
+            .await
+            .unwrap();
+        write_manifest(&dest, &manifest("t-live", u32::from(port)))
+            .await
+            .unwrap();
+        super::super::marker::write_trial_marker(&dest, &marker("plan-live", "config"))
+            .await
+            .unwrap();
+        let logs = dest.join("logs");
+        tokio::fs::create_dir_all(&logs).await.unwrap();
+        tokio::fs::write(
+            logs.join("launch-2026-10-31T00-00-00.log"),
+            format!("dsh web: http://127.0.0.1:{port}/?token=LIVETOKEN\n"),
+        )
+        .await
+        .unwrap();
+
+        let report = build_report(&root, &dest, "t-live", &marker("plan-live", "config"))
+            .await
+            .unwrap();
+        assert_eq!(report.webui, "pass", "{}", report.webui_detail);
+        assert_eq!(report.overall, "pass");
+        assert!(report.error_lines.is_empty());
+        // The token must not leak into the persisted page.
+        let persisted = tokio::fs::read_to_string(report.report_path.clone().unwrap())
+            .await
+            .unwrap();
+        assert!(!persisted.contains("LIVETOKEN"));
+        drop(listener);
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

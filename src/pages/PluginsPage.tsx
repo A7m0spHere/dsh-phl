@@ -285,7 +285,10 @@ export function PluginsPage() {
     return () => {
       alive = false
     }
-  }, [instance?.id])
+    // Depends on the instance OBJECT, not just its id: an install/uninstall
+    // swaps the store's instance record, and the verdicts must follow without
+    // a scope round-trip (review R6).
+  }, [instance])
   const compatByRegistry = useMemo(() => {
     const map = new Map<string, PluginEngineCompat>()
     for (const row of engineCompat) map.set(row.registryId, row)

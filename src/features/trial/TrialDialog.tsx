@@ -483,7 +483,7 @@ export function TrialDialog() {
                     {/* #10: the packages' own engines.dsh claims, evaluated
                         against the TARGET version. Only declared claims are
                         listed — undeclared ones stay on the legacy lists. */}
-                    {(preview.pluginCompat ?? []).filter((c) => c.engineRange).length > 0 && (
+                    {preview.pluginCompat.filter((c) => c.engineRange).length > 0 && (
                       <Notice
                         tone={
                           preview.pluginCompat.some((c) => c.verdict === 'incompatible')

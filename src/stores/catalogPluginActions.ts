@@ -97,7 +97,7 @@ export function createPluginActions(
       try {
         if (!(await acquireTransferSlot(key, controller.signal))) throw new Cancelled()
         patch({ stage: 'preparing', progress: 0, bytesDone: 0, bytesPerSec: 0 })
-        const { version, registryId, trust } = await repository.installPlugin(
+        const { version, registryId, trust, engineCompat } = await repository.installPlugin(
           plugin,
           instance,
           (progress) =>
@@ -128,12 +128,23 @@ export function createPluginActions(
             : [...plugins, { pluginId, version, registryId, enabled: true, ...(trust ? { trust } : {}) }],
         )
         const live = processLive(instanceId)
+        // Issue #10: the package's own engines.dsh claim, evaluated by Rust
+        // against this instance's DSH binding — surfaced at the moment the
+        // user just acted, not buried in the installed list. Advisory only:
+        // the install already happened and stays the user's decision.
+        const engineNote =
+          engineCompat?.verdict === 'incompatible'
+            ? ` · 注意：插件自述 engines.dsh「${engineCompat.engineRange}」与当前 DSH 不兼容`
+            : engineCompat?.verdict === 'unknown' && engineCompat.engineRange
+              ? ` · 注意：插件自述 engines.dsh「${engineCompat.engineRange}」无法解析，请自行确认`
+              : ''
         useUIStore.getState().toast({
           kind: 'success',
           title: `已安装到「${instance.name}」`,
-          message: live
-            ? `${plugin.name} ${version} · 实例正在运行，重启后才会加载新插件`
-            : `${plugin.name} ${version}`,
+          message:
+            (live
+              ? `${plugin.name} ${version} · 实例正在运行，重启后才会加载新插件`
+              : `${plugin.name} ${version}`) + engineNote,
         })
       } catch (err) {
         if (err instanceof Cancelled) {
