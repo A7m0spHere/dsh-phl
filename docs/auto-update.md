@@ -58,3 +58,8 @@ npx tauri signer generate -w $env:USERPROFILE\.phl\updater.key --ci
 - 安装包仍未做 Authenticode 签名，首次下载与运行仍有 SmartScreen 提示（见 [code-signing.md](./code-signing.md)）。
 - 更新包的下载走 GitHub Releases 直链；网络受限的环境可能很慢（版本下载已有镜像逻辑，更新包暂未接）。
 - 目前只在 Windows 上验证；其它平台的更新需要各自的安装包形态。
+- **macOS（及其它非 Windows 平台）没有应用内更新链**：更新清单只有 `windows-x86_64` 条目，macOS 版把 DMG 作为普通 Release 资产发布。
+  Tauri updater 在决定「是否有新版本」之前就要求清单里有当前平台键，缺失时会直接报错（即使版本相同），
+  所以这些平台上不再调用插件，而是由 PHL 自己读取同一份清单：有新版本时只在 设置 → 关于 提示版本并提供
+  下载页入口，安装仍是手动下载 DMG 覆盖（见 [install-note.md](./install-note.md)）。
+  要打通 macOS 应用内更新，需要先有签名、公证和 macOS 的 `.app.tar.gz` 更新产物。

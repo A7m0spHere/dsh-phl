@@ -1,6 +1,7 @@
 import { formatBytes } from '@/lib/format'
-import { isDesktop } from '@/lib/desktop'
-import { appVersion } from '@/lib/desktopUpdate'
+import { isDesktop, openExternal } from '@/lib/desktop'
+import { appVersion, updateMode } from '@/lib/desktopUpdate'
+import { releaseUrl } from '@/lib/updateManifest'
 import { useSettingsStore, useUpdateStore } from '@/stores'
 import { Button, ProgressBar, SettingRow, Switch } from '@/components/ui'
 import { PageSection } from '@/components/layout/Page'
@@ -27,12 +28,17 @@ export function UpdateSection() {
 
   const current = appVersion()
   const busy = status === 'checking' || status === 'downloading' || status === 'installing'
+  // The published manifest is Windows-only: everywhere else the check only
+  // notifies and the install step is a manual download (see desktopUpdate.ts).
+  const manualUpdates = isDesktop && updateMode() === 'manual'
 
   const statusText = () => {
     if (!isDesktop) return '浏览器模式下没有更新器，桌面端才会检查。'
     if (status === 'checking') return '正在检查…'
     if (status === 'available' && info)
-      return '发现新版本 ' + info.version + '（当前 ' + info.currentVersion + '）'
+      return info.manual
+        ? '发现新版本 ' + info.version + '（当前 ' + info.currentVersion + '）；当前平台暂不支持应用内更新，请下载安装包手动安装。'
+        : '发现新版本 ' + info.version + '（当前 ' + info.currentVersion + '）'
     if (status === 'downloading')
       return total
         ? '正在下载 ' + formatBytes(downloaded) + ' / ' + formatBytes(total)
@@ -47,7 +53,11 @@ export function UpdateSection() {
   return (
     <PageSection
       title="应用更新"
-      description="从 GitHub 上的签名清单检查新版本；清单经过签名校验，只有你点了「下载并安装」才会下载。"
+      description={
+        manualUpdates
+          ? '从 GitHub 上的更新清单检查新版本；当前平台没有应用内更新链，只提示版本并提供下载入口。'
+          : '从 GitHub 上的签名清单检查新版本；清单经过签名校验，只有你点了「下载并安装」才会下载。'
+      }
     >
       <div className="rounded-lg bg-surface p-4 ring-1 ring-inset ring-line">
         <div className="flex items-start justify-between gap-4">
@@ -58,10 +68,20 @@ export function UpdateSection() {
             <div className="mt-1 text-sm leading-relaxed text-ink-muted">{statusText()}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {status === 'available' ? (
-              <Button size="sm" variant="primary" onClick={() => void install()}>
-                下载并安装
-              </Button>
+            {status === 'available' && info ? (
+              info.manual ? (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={() => void openExternal(releaseUrl(info.version))}
+                >
+                  前往下载
+                </Button>
+              ) : (
+                <Button size="sm" variant="primary" onClick={() => void install()}>
+                  下载并安装
+                </Button>
+              )
             ) : (
               <Button size="sm" variant="secondary" disabled={busy || !isDesktop} onClick={() => void check()}>
                 {status === 'checking' ? '检查中…' : '检查更新'}
@@ -91,7 +111,7 @@ export function UpdateSection() {
       <div className="mt-2 rounded-lg bg-surface px-4 ring-1 ring-inset ring-line">
         <SettingRow
           title="启动后自动检查更新"
-          description="只读取签名清单，不会自动下载或安装"
+          description="只读取更新清单，不会自动下载或安装"
           control={
             <Switch
               checked={autoCheck}

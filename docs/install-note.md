@@ -21,10 +21,23 @@ Get-FileHash .\PHL_*_x64-setup.exe -Algorithm SHA256
 
 - 下载 `PHL_<version>_aarch64.dmg`，校验方式同上（macOS 用 `shasum -a 256 PHL_*_aarch64.dmg`）。
   当前仅提供 Apple Silicon 版本，Intel Mac 未做真机验收。
-- 安装包**未签名未公证**：首次打开会被 Gatekeeper 拦下（「无法打开，因为无法验证开发者」）。
-  **这不是检测到恶意软件，而是缺少签名与公证**。处理：在 Finder 中对 PHL **右键 →「打开」→ 再点「打开」**；
+- 安装包**未做 Developer ID 签名、未公证**，但会做 ad-hoc 签名（从下一次发布起；早期构建只有
+  链接器写入的可执行文件签名，App 包本身没有签名）。首次打开被 Gatekeeper 拦下属于预期：
+  「无法打开，因为无法验证开发者」。**这不是检测到恶意软件，而是缺少签名与公证**。
+  处理：在 Finder 中对 PHL **右键 →「打开」→ 再点「打开」**；
   若仍被拦，到「系统设置 → 隐私与安全性」底部点「仍要打开」。
-- 挂载 DMG 后把 PHL 拖入「应用程序」即可。macOS 版**暂无应用内自动更新**，升级需手动下载新 DMG 覆盖。
+- 如果提示的是 **「PHL 已损坏，无法打开。你应该将它移到废纸篓」**：这不是文件损坏，而是早期构建
+  缺少 App 包签名时 Gatekeeper 验签失败的说法。先核对 SHA-256 与发布页一致，然后任选一种修复：
+  ```bash
+  # 解除下载隔离后正常打开（不需要 sudo）
+  xattr -dr com.apple.quarantine /Applications/PHL.app
+
+  # 或给已安装副本补一个 ad-hoc 签名（权限不足时加 sudo）
+  codesign --force --deep --sign - /Applications/PHL.app
+  ```
+  重新下载「下一次发布」的 DMG 即可避免这个问题。
+- 挂载 DMG 后把 PHL 拖入「应用程序」即可。macOS 版**暂无应用内自动更新**，升级需手动下载新 DMG 覆盖；
+  应用内的「检查更新」只读取清单提示版本并给出下载入口，不会自动下载或安装。
 
 ## 反馈
 

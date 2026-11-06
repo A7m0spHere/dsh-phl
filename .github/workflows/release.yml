@@ -260,10 +260,12 @@ jobs:
   # created. It runs after `release` on purpose: a failing Windows gate must
   # not leave a half-populated release, and the updater manifest stays
   # Windows-only until the macOS side has signing, notarization and an updater
-  # chain of its own (the DMG below is ad-hoc signed only; Gatekeeper handling
-  # lives in docs/install-note.md, which the release body already carries).
+  # chain of its own (the app below is ad-hoc signed through
+  # `bundle.macOS.signingIdentity` in tauri.macos.conf.json — no Developer ID
+  # yet; Gatekeeper handling lives in docs/install-note.md, which the release
+  # body already carries).
   release-macos:
-    name: macOS DMG (unsigned, Apple Silicon)
+    name: macOS DMG (ad-hoc signed, Apple Silicon)
     runs-on: macos-latest
     needs: release
     steps:
@@ -325,9 +327,24 @@ jobs:
       - name: Build macOS app bundle and DMG
         shell: bash
         # `tauri.macos.conf.json` is merged in by tauri-build itself (Overlay
-        # titlebar, traffic lights); no updater config is merged, so the build
-        # never asks for the updater signing key that macOS does not use yet.
+        # titlebar, traffic lights, ad-hoc signing); no updater config is
+        # merged, so the build never asks for the updater signing key that
+        # macOS does not use yet.
         run: npm run app:build:mac -- -- --locked
+
+      # An unsigned or half-signed bundle is what makes Gatekeeper report
+      # 「PHL 已损坏」 instead of the documented unidentified-developer prompt.
+      # The DMG was produced by the previous step, so fail loudly here rather
+      # than attach an artifact that cannot be opened.
+      - name: Verify the app bundle is signed
+        shell: bash
+        run: |
+          app=$(ls -d src-tauri/target/release/bundle/macos/*.app | head -1)
+          if [ -z "$app" ]; then
+            echo "::error::the build produced no .app bundle"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Hash artifacts (SHA256)
         shell: bash

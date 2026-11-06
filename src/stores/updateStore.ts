@@ -65,7 +65,9 @@ export const useUpdateStore = create<UpdateState>()((set, get) => ({
         useUIStore.getState().toast({
           kind: 'info',
           title: '有新版本 ' + info.version,
-          message: '设置 → 关于 里可以下载并安装。',
+          message: info.manual
+            ? '当前平台暂不支持应用内更新，请到 设置 → 关于 前往下载页手动安装。'
+            : '设置 → 关于 里可以下载并安装。',
           duration: 6000,
         })
       } else if (!silent) {
@@ -92,6 +94,16 @@ export const useUpdateStore = create<UpdateState>()((set, get) => ({
     const info = get().info
     const status = get().status
     if (!info || status === 'downloading' || status === 'installing') return
+    // Manual-notice platforms have no update handle behind `info`; the panel
+    // shows a download button instead, so this is only a defensive guard.
+    if (info.manual) {
+      useUIStore.getState().toast({
+        kind: 'info',
+        title: '请手动下载安装包',
+        message: '当前平台暂不支持应用内更新，请到 GitHub Releases 下载后覆盖安装。',
+      })
+      return
+    }
     set({ status: 'downloading', downloaded: 0, total: null, error: null })
     try {
       await installAppUpdate((progress) => {

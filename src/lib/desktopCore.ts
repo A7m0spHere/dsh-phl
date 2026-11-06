@@ -37,6 +37,16 @@ export const isMac =
     // form factor, so this cannot false-positive on macOS itself.
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
 
+/**
+ * Windows probe for the updater split. The published updater manifest carries
+ * a single `windows-x86_64` entry, so only Windows drives the in-app updater
+ * chain; every other platform reads the manifest itself and points at the
+ * manual download (see `desktopUpdate.ts`). Same UA-based reasoning as
+ * `isMac`: feature selection only, no trust rides on it.
+ */
+export const isWindows =
+  typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+
 /** A teardown handle returned by a Tauri event listener. */
 export type Unlisten = () => void
 
