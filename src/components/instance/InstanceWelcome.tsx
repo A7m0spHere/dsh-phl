@@ -1,6 +1,7 @@
-import { Boxes, FolderInput, Package, Plus } from 'lucide-react'
+import { Boxes, Download, FolderInput, Package, Plus } from 'lucide-react'
 import { Button } from '@/components/ui'
 import { useUIStore } from '@/stores'
+import { useSetupStore } from '@/features/setup/setupStore'
 
 /** First-run choices use the same routes as the populated page's toolbar. */
 export function InstanceWelcome() {
@@ -15,9 +16,14 @@ export function InstanceWelcome() {
         <p className="mt-2 max-w-md text-base leading-relaxed text-ink-muted">
           为不同项目保留各自的 DSH 版本、运行时与插件。升级或试验新配置时，也能保留原来的工作环境。
         </p>
-        <Button variant="primary" size="lg" className="mt-5" onClick={() => push({ name: 'create' })}>
-          <Plus size={14} />新建实例
-        </Button>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Button variant="primary" size="lg" onClick={() => useSetupStore.getState().show()}>
+            <Download size={14} />一键装好
+          </Button>
+          <Button size="lg" onClick={() => push({ name: 'create' })}>
+            <Plus size={14} />手动创建实例
+          </Button>
+        </div>
       </div>
       <div className="grid gap-4 border-t border-line bg-surface-sunken p-5 sm:grid-cols-2">
         <div>

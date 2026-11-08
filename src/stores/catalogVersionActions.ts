@@ -1,6 +1,6 @@
 import { Cancelled, repository } from '@/services'
 import type { DshVersion } from '@/types'
-import { keepVersionStateOnRefresh } from '@/types/version'
+import { isVersionBusy, keepVersionStateOnRefresh } from '@/types/version'
 import { parseThrownError } from '@/lib/errorCodes'
 import { acquireTransferSlot, releaseTransferSlot } from './transferCoordinator'
 import { maybeHintMirror, observePendingReleases, officialRegistryLooksSlow } from './catalogNotifications'
@@ -58,7 +58,7 @@ export function createVersionActions(
 
     async installVersion(id) {
       const version = get().versions.find((candidate) => candidate.id === id)
-      if (!version) return
+      if (!version || isVersionBusy(version) || version.state.kind === 'installed') return
       const controller = new AbortController()
       const key = `v:${id}`
       controllers.set(key, controller)

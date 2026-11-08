@@ -17,6 +17,8 @@ import { useMotion, MODAL_SCRIM, MODAL_Z } from '@/lib/motion'
 import { useIsDark, useSettingsStore, useUIStore } from '@/stores'
 import { Badge, Button, Chip } from '@/components/ui'
 import { InstanceTile } from '@/components/instance/InstanceTile'
+import { useSetupStore } from '@/features/setup/setupStore'
+import { useInstanceStore } from '@/stores/instanceStore'
 import { Logo } from './Logo'
 
 /* ------------------------------------------------------------------ *
@@ -162,10 +164,9 @@ function StartArt() {
     <div className="space-y-2">
       <ol className="space-y-1.5">
         {[
-          '在「版本」里装一个 DSH 版本',
-          '回到「实例」，点右上角「新建实例」',
-          '按向导选版本、选 Runtime、选模板',
-          '创建完成后，点底部那条栏上的「启动」',
+          '在空实例首页选择「一键装好」',
+          '确认 DSH 版本、Node 和实例名称',
+          '等待环境准备完成，自动启动并打开 WebUI',
         ].map((step, i) => (
           <li
             key={step}
@@ -238,7 +239,7 @@ const STEPS: Step[] = [
   {
     id: 'start',
     title: '从这里开始',
-    lead: '四步就能跑起第一个实例。',
+    lead: '通过一键装好向导准备首个实例，也可以手动配置。',
     art: <StartArt />,
   },
 ]
@@ -254,6 +255,7 @@ export function GuideOverlay() {
   const markSeen = useSettingsStore((s) => s.markGuideSeen)
   const [index, setIndex] = useState(0)
   const { t, overlay, pop, scale } = useMotion()
+  const needsSetup = useInstanceStore((s) => s.instances.length === 0)
 
   const step = STEPS[index]
   const last = index === STEPS.length - 1
@@ -352,11 +354,17 @@ export function GuideOverlay() {
                   variant="primary"
                   size="md"
                   className="min-w-[74px]"
-                  onClick={() => (last ? finish() : setIndex(index + 1))}
+                  onClick={() => {
+                    if (!last) setIndex(index + 1)
+                    else {
+                      finish()
+                      if (needsSetup) useSetupStore.getState().show()
+                    }
+                  }}
                 >
                   {last ? (
                     <>
-                      <Check size={12} /> 开始使用
+                      <Check size={12} /> {needsSetup ? '一键装好' : '开始使用'}
                     </>
                   ) : (
                     <>

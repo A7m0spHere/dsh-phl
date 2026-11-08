@@ -7,6 +7,7 @@ import type {
   LaunchPhase,
   OfficialDesktopInfo,
   Plugin,
+  ProcessSample,
   Runtime,
   Snapshot,
 } from '@/types'
@@ -265,6 +266,8 @@ export interface PhlRepository {
   ): Promise<LaunchOutcome>
 
   stop(instance: Instance, signal: AbortSignal): Promise<void>
+
+  sampleProcesses(): Promise<ProcessSample[]>
 
   installVersion(
     version: DshVersion,

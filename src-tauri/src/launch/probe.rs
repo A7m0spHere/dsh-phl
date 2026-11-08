@@ -440,6 +440,8 @@ mod win {
             let mut user = FileTime::default();
             if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
                 out.created_at_ms = Some(filetime_to_ms(creation));
+                out.process_start_token =
+                    Some(format!("windows:{}:{}", creation.high, creation.low));
             }
             CloseHandle(handle);
         }

@@ -254,9 +254,12 @@ export type {
   DroppedProcess,
   AdoptReport,
   WebuiPageError,
+  WebUiOpenResult,
 } from './desktopLaunch'
 
 /* ------------------------------ task centre ------------------------------ */
+export { sampleInstanceProcesses } from './desktopProcesses'
+
 
 // Moved to `desktopTasks.ts` (roadmap O-13, first domain unit out of this
 // bridge): task types + listTasks re-exported unchanged.

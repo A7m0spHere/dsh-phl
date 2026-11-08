@@ -10,6 +10,7 @@ import { useUIStore } from './uiStore'
 import { STOPPED, createLifecycleActions } from './instanceLifecycleActions'
 import { abortSnapshotCopy, createSnapshotActions } from './instanceSnapshotActions'
 import type { CopyProgress } from '@/services/repository'
+import type { InstanceProcessControls } from './instanceTypes'
 
 /**
  * The instance store: one public surface (`useInstanceStore`) composed from
@@ -22,7 +23,7 @@ import type { CopyProgress } from '@/services/repository'
  * - this file — the instance list, adoption, CRUD, the optimistic save
  *   queue, and the selectors everyone else reads.
  */
-export interface InstanceState {
+export interface InstanceState extends InstanceProcessControls {
   instances: Instance[]
   /** Live status keyed by instance id; kept apart from the persisted model. */
   states: Record<string, InstanceRuntimeState>
@@ -81,13 +82,6 @@ export interface InstanceState {
    * the latch inside makes repeat calls no-ops. Internal seam, not UI-facing.
    */
   ensureExitListener: () => void
-
-  launch: (id: string) => Promise<void>
-  cancelLaunch: (id: string) => void
-  stop: (id: string) => Promise<boolean>
-  toggle: (id: string) => void
-  /** Opens (or focuses) the instance's WebUI, reporting a double failure. */
-  openWebUi: (id: string) => Promise<void>
 
   createSnapshot: (id: string) => Promise<Snapshot | null>
   restoreSnapshot: (id: string, snapshotId: string) => Promise<void>

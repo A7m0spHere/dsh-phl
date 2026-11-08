@@ -16,6 +16,7 @@ mod operations;
 mod pack;
 mod paths;
 mod plugins;
+mod process_monitor;
 mod repair;
 mod resources;
 mod runtimes;
@@ -346,6 +347,14 @@ macro_rules! phl_command_handler {
 /// the desktop entry point and the contract tests.
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
+        .plugin(
+            tauri::plugin::Builder::<R, ()>::new("process-monitor")
+                .invoke_handler(tauri::generate_handler![
+                    process_monitor::sample_instance_processes
+                ])
+                .build(),
+        )
+        .manage(process_monitor::Monitor::default())
         .plugin(
             tauri::plugin::Builder::<R, ()>::new("model-metadata")
                 .invoke_handler(tauri::generate_handler![

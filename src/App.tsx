@@ -1,5 +1,5 @@
 import { parseThrownError } from '@/lib/errorCodes'
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MotionConfig } from 'motion/react'
 import { desktop, migrationStatus } from '@/lib/desktop'
 import { startTaskPolling } from '@/stores/taskStore'
@@ -24,6 +24,8 @@ import { TitleBar } from '@/components/layout/TitleBar'
 import { Router } from '@/components/layout/Router'
 import { QuickSwitcher } from '@/components/layout/QuickSwitcher'
 import { GuideOverlay } from '@/components/layout/GuideOverlay'
+import { SetupDialog } from '@/features/setup/SetupDialog'
+import { setupIsBusy, useSetupStore } from '@/features/setup/setupStore'
 
 export default function App() {
   const loadInstances = useInstanceStore((s) => s.load)
@@ -37,6 +39,11 @@ export default function App() {
   const overlayDepth = useUIStore((s) => s.overlayDepth)
   const syncSystemTheme = useUIStore((s) => s.syncSystemTheme)
   const motionLevel = useUIStore((s) => s.motion)
+  const setupOpen = useSetupStore((s) => s.open)
+  const instancesLoaded = useInstanceStore((s) => s.loaded)
+  const catalogLoaded = useCatalogStore((s) => s.loaded)
+  const [startupReady, setStartupReady] = useState(false)
+  const firstRunOffered = useRef(false)
 
   useEffect(() => {
     // The real data root must be known before the catalog queries the
@@ -57,7 +64,10 @@ export default function App() {
         // whose pointer switch never landed is the other recovery shape —
         // the data is complete at the new root, one click adopts it.
         const journal = await migrationStatus()
-        if (!journal) return
+        if (!journal) {
+          setStartupReady(true)
+          return
+        }
         const ui = useUIStore.getState()
         ui.toast({
           kind: 'warn',
@@ -152,6 +162,10 @@ export default function App() {
     void desktop
       .onCloseRequested(async () => {
         const ui = useUIStore.getState()
+        if (setupIsBusy(useSetupStore.getState().status)) {
+          ui.toast({ kind: 'info', title: '请先取消一键装好，等待当前操作结束后再退出' })
+          return
+        }
         const instances = useInstanceStore.getState()
         const stopOnExit = useSettingsStore.getState().closeStopsInstances
         if (stopOnExit && Object.values(instances.states).some((s) => s.status === 'starting' || s.status === 'stopping')) {
@@ -219,25 +233,25 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange)
   }, [syncSystemTheme])
 
-  // First run opens the guide. It is the answer to "what is this thing" —
-  // an instance manager is not self-evident from a list of cards.
-  const guideSeen = useSettingsStore((s) => s.guideSeen)
+  // Choose the root before the first-run flow starts downloading or creating.
+  // Existing installs keep their guide and data. Empty installs get setup.
   useEffect(() => {
-    if (useSettingsStore.getState().guideSeen) return
-    const id = window.setTimeout(() => useUIStore.getState().setGuideOpen(true), 450)
-    return () => window.clearTimeout(id)
-  }, [])
-
-  // The one-time storage-location prompt waits until the guide is out of the
-  // way — two full-screen first-run surfaces at once would fight over focus.
-  useEffect(() => {
-    if (guideSeen) void maybeOfferRootChoice()
-  }, [guideSeen])
+    if (!startupReady || !instancesLoaded || !catalogLoaded || firstRunOffered.current) return
+    firstRunOffered.current = true
+    if (useSetupStore.getState().open) return
+    void maybeOfferRootChoice().then(() => {
+      if (useSettingsStore.getState().guideSeen) return
+      if (useInstanceStore.getState().instances.length === 0) useSetupStore.getState().show()
+      else useUIStore.getState().setGuideOpen(true)
+    }).catch((err) => {
+      useUIStore.getState().toast({ kind: 'error', title: '首次运行引导失败', message: parseThrownError(err).message })
+    })
+  }, [startupReady, instancesLoaded, catalogLoaded])
 
   // The global bindings live in the shared shortcut catalogue
   // (`lib/shortcuts.ts`), which also drives the settings reference — so the
   // list on screen and what actually fires can never drift apart.
-  useGlobalShortcut(shortcutById('palette'), () => setPaletteOpen(!paletteOpen))
+  useGlobalShortcut(shortcutById('palette'), () => setPaletteOpen(!paletteOpen), !setupOpen)
   useGlobalShortcut(
     shortcutById('go-back'),
     () => {
@@ -252,7 +266,7 @@ export default function App() {
     // the page behind the overlay.
     !paletteOpen && !dialogOpen && overlayDepth === 0,
   )
-  useGlobalShortcut(shortcutById('settings'), () => navigate({ name: 'settings' }))
+  useGlobalShortcut(shortcutById('settings'), () => navigate({ name: 'settings' }), !setupOpen)
 
   return (
     <MotionConfig reducedMotion={motionLevel === 'off' ? 'always' : 'never'}>
@@ -261,6 +275,7 @@ export default function App() {
         <Router />
       </div>
       <Toaster />
+      <SetupDialog />
       <DialogHost />
       <EnvironmentCompareDialog />
       <TrialDialog />

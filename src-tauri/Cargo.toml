@@ -57,6 +57,8 @@ base64 = "0.22"
 semver = "1"
 dirs = "5"
 fs2 = "0.4"
+# Targeted process CPU/RSS sampling. Keep optional disk/network/user probes off.
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 # Session migration (P1-1): DSH persists session logs as `<session>.jsonl.zstd`
 # — one checksummed Zstandard frame per append batch. Reading needs a decoder
 # and writing the re-identified header needs an encoder, so PHL handles the

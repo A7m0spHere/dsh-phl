@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "model-metadata:allow-enrich-model-metadata",
+    "process-monitor:allow-sample-instance-processes",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
     "core:window:allow-maximize",

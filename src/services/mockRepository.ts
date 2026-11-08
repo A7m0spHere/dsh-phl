@@ -278,6 +278,11 @@ class MockRepository implements PhlRepository {
 
   /* ---------------- launch / stop ---------------- */
 
+  async sampleProcesses() {
+    // Browser preview has no OS process measurements.
+    return []
+  }
+
   async launch(
     instance: Instance,
     ctx: LaunchContext,

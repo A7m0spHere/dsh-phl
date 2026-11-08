@@ -47,14 +47,85 @@ beforeEach(async () => {
   mocks.listInstances.mockResolvedValue([instance])
   mocks.openDshWebUi.mockResolvedValue({ ok: true, how: 'window' })
   await useInstanceStore.getState().reload()
-  useInstanceStore.setState({ instances: [{ ...instance }], states: { test: { ...running } } })
+  useInstanceStore.setState({ instances: [{ ...instance }], states: { test: { ...running } }, restarting: {}, stoppingAll: false })
+})
+
+describe('process panel controls', () => {
+  it('restarts only after confirmed stop and deduplicates repeated restart clicks', async () => {
+    let finishStop!: () => void
+    mocks.stop.mockImplementation(() => new Promise<void>((resolve) => { finishStop = resolve }))
+    mocks.launch.mockResolvedValue({ pid: 200, port: 3080, webUrl: 'http://localhost:3080/?token=new' })
+    const first = useInstanceStore.getState().restart('test')
+    const second = useInstanceStore.getState().restart('test')
+    expect(useInstanceStore.getState().restarting.test).toBe(true)
+    expect(mocks.launch).not.toHaveBeenCalled()
+    finishStop()
+    expect(await first).toBe(true)
+    expect(await second).toBe(true)
+    expect(mocks.stop).toHaveBeenCalledTimes(1)
+    expect(mocks.launch).toHaveBeenCalledTimes(1)
+    expect(useInstanceStore.getState().stateOf('test').pid).toBe(200)
+    expect(useInstanceStore.getState().restarting).toEqual({})
+  })
+
+  it('keeps a failed stop tracked and refuses to spawn a second process on restart', async () => {
+    mocks.stop.mockRejectedValue(new Error('access denied'))
+    mocks.launch.mockClear()
+    expect(await useInstanceStore.getState().restart('test')).toBe(false)
+    expect(mocks.launch).not.toHaveBeenCalled()
+    expect(useInstanceStore.getState().stateOf('test')).toMatchObject({ ...running, error: { title: '停止失败' } })
+  })
+
+  it('cancels an in-flight launch before stopping all remaining running instances', async () => {
+    const { Cancelled } = await import('@/services/repository')
+    useInstanceStore.setState({
+      instances: [instance, { ...instance, id: 'mate' }],
+      states: { mate: { ...running, pid: 222 } },
+    })
+    mocks.stop.mockResolvedValue(undefined)
+    mocks.launch.mockImplementation((_instance, _ctx, _progress, signal: AbortSignal) =>
+      new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Cancelled()))),
+    )
+    const launch = useInstanceStore.getState().launch('test')
+    expect(await useInstanceStore.getState().stopAll()).toEqual([])
+    await launch
+    expect(useInstanceStore.getState().stateOf('test').status).toBe('stopped')
+    expect(useInstanceStore.getState().stateOf('mate').status).toBe('stopped')
+    expect(mocks.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('prevents a queued restart from relaunching after stop-all begins', async () => {
+    let finishStop!: () => void
+    mocks.stop.mockImplementation(() => new Promise<void>((resolve) => { finishStop = resolve }))
+    mocks.launch.mockClear()
+    const restart = useInstanceStore.getState().restart('test')
+    const stopping = useInstanceStore.getState().stopAll()
+    await useInstanceStore.getState().launch('test')
+    finishStop()
+    expect(await restart).toBe(false)
+    expect(await stopping).toEqual([])
+    expect(mocks.launch).not.toHaveBeenCalled()
+    expect(useInstanceStore.getState().stoppingAll).toBe(false)
+  })
+
+  it('reports partial stop-all failure without clearing the surviving process', async () => {
+    useInstanceStore.setState({ instances: [instance, { ...instance, id: 'mate' }], states: { test: running, mate: { ...running, pid: 222 } } })
+    mocks.stop.mockImplementation(async (target: Instance) => {
+      if (target.id === 'test') throw new Error('access denied')
+    })
+    expect(await useInstanceStore.getState().stopAll()).toEqual(['test'])
+    expect(useInstanceStore.getState().stateOf('test')).toMatchObject({ status: 'running', pid: 123 })
+    expect(useInstanceStore.getState().stateOf('mate').status).toBe('stopped')
+  })
 })
 
 describe('instance lifecycle', () => {
   it('keeps a failed stop tracked with its URL, port and original start time', async () => {
     mocks.stop.mockRejectedValue(new Error('access denied'))
     expect(await useInstanceStore.getState().stop('test')).toBe(false)
-    expect(useInstanceStore.getState().stateOf('test')).toEqual(running)
+    expect(useInstanceStore.getState().stateOf('test')).toMatchObject({
+      ...running, error: { title: '停止失败', detail: 'access denied' },
+    })
     expect(useInstanceStore.getState().portsInUse().has(3080)).toBe(true)
     expect(mocks.saveInstance).not.toHaveBeenCalled()
     expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ kind: 'error' }))

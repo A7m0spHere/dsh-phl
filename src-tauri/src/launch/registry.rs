@@ -96,6 +96,15 @@ pub fn decide(rec: &PersistedProcess, probe: &Probe) -> Adoption {
                     };
                 }
             }
+            #[cfg(windows)]
+            if rec.process_start_token.is_some()
+                && rec.process_start_token != probe.process_start_token
+            {
+                return Adoption::Forget {
+                    reason: "进程创建标识不匹配或无法读取".into(),
+                    keep_running: true,
+                };
+            }
             if let Some(created) = probe.created_at_ms {
                 let delta = (created - rec.started_at_ms).abs();
                 if delta > CREATION_TOLERANCE_MS {

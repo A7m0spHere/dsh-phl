@@ -11,6 +11,7 @@
 | `lib/tauri-cdp.mjs` | 两条 GUI 车道共用的 raw-CDP 客户端、按文本/状态等待的页面助手、IPC 录制器（`POST http://ipc.localhost/<cmd>` 的原始请求体）。 |
 | `dependency-retry-cdp.mjs` | **依赖重试失败路径证据**（R4-01）：真实窗口打开待补依赖实例 → 记录里的历史原因可见 → 点「重试依赖安装」→ 断言出现失败提示与真实原因、**绝不出现成功**、实例保持原状态、新原因已持久化；`--scenario=corrupt` 另跑损坏记录：卡片明示不可本地重建 + 「重新导入整合包」真的到达整合包安装页。 |
 | `trial-copy-cdp.mjs` | **试升级页面链路证据**（R1·M3 / R3-01）：在隔离 `PHL_ROOT` 里预置两个版本 + Runtime + 源实例，起窗后点真实 UI（实例菜单 → 复制并试用新版 → 创建副本 → 打开副本），从 IPC 传输（`POST http://ipc.localhost/<cmd>`）**原样记录**页面发出的 `preview_trial`/`create_trial` 请求，最后落证据 JSON + 截图。 |
+| `process-panel-cdp.mjs` | **原 Issue #22 进程总览**：真实 Windows Tauri 窗口 + 受控 Node HTTP 进程，验证 CPU/RSS、启动时间、505 个实例分页、停止/重启父子进程、异常退出、日志、端口冲突、筛选外全部停止与启动中取消。先构建前端和 debug 壳，再运行 `node e2e/process-panel-cdp.mjs`。支持 `--exe`、`--out`、`--keep`，自动管理固定页面 preview 服务及隔离目录。 |
 
 统一入口：`npm run test:e2e:smoke -- --installer=<setup.exe> --expect-version=<V>`；
 页面链路证据：`npm run test:trial-cdp` 与 `npm run test:dep-retry`（均支持

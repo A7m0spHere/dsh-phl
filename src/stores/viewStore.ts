@@ -22,6 +22,8 @@ export type SettingsSection =
   | 'about'
 
 interface ViewState {
+  instanceView: 'instances' | 'processes'
+  setInstanceView: (view: 'instances' | 'processes') => void
   instanceQuery: string
   instanceFilter: InstanceFilter
   instanceSort: InstanceSort
@@ -72,6 +74,8 @@ interface ViewState {
 const PICK_MEMORY = 36
 
 export const useViewStore = create<ViewState>()((set) => ({
+  instanceView: 'instances',
+  setInstanceView: (instanceView) => set({ instanceView }),
   instanceQuery: '',
   instanceFilter: 'all',
   instanceSort: 'recent',

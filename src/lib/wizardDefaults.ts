@@ -1,4 +1,5 @@
-import type { DshVersion } from '@/types'
+import type { DshVersion, Runtime } from '@/types'
+import { isRuntimeInstallable, isVersionInstallable } from '@/types'
 
 /**
  * The wizard's default DSH version, seeded once the catalog is available.
@@ -23,4 +24,38 @@ export function pickDefaultVersion(
     versions.find((v) => v.state.kind === 'installed' && !v.legacy) ??
     versions.find((v) => !v.pendingPublish)
   )
+}
+
+/** Prefer an existing compatible Node, then a downloadable LTS build. */
+export function pickDefaultRuntime(
+  runtimes: readonly Runtime[],
+  version: DshVersion,
+): Runtime | undefined {
+  return runtimes
+    .filter((runtime) => !runtime.legacy && isRuntimeCompatible(runtime, version))
+    .filter((runtime) => runtime.state.kind === 'installed' || isRuntimeInstallable(runtime))
+    .sort((a, b) =>
+      Number(b.state.kind === 'installed') - Number(a.state.kind === 'installed') ||
+      Number(b.lts) - Number(a.lts) ||
+      b.version.localeCompare(a.version, undefined, { numeric: true }),
+    )[0]
+}
+
+export function isRuntimeCompatible(runtime: Runtime, version: DshVersion): boolean {
+  return version.requiresNode.length === 0 || version.requiresNode.includes(runtime.major)
+}
+
+/** A first-run recommendation must have both a usable release and a Node. */
+export function pickSetupVersion(
+  versions: readonly DshVersion[],
+  runtimes: readonly Runtime[],
+): DshVersion | undefined {
+  const candidates = versions
+    .filter((version) => !version.pendingPublish && !version.legacy)
+    .filter((version) => version.state.kind === 'installed' || isVersionInstallable(version))
+    .filter((version) => !!pickDefaultRuntime(runtimes, version))
+    .sort((a, b) => b.releasedAt.localeCompare(a.releasedAt))
+  return candidates.find((version) => version.state.kind === 'installed') ??
+    candidates.find((version) => version.channel === 'stable') ??
+    candidates.find((version) => version.channel !== 'nightly') ?? candidates[0]
 }
