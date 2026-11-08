@@ -9,6 +9,19 @@ const JOURNAL: &str = "transaction.json";
 const LOCK: &str = ".phl-restore.lock";
 const KEEP: [&str; 2] = ["sessions", "attachments"];
 
+pub(super) struct RestoreLock {
+    file: std::fs::File,
+}
+
+impl Drop for RestoreLock {
+    fn drop(&mut self) {
+        // flock is shared by duplicated/inherited descriptors. End this
+        // transaction explicitly even if another thread forked a subprocess
+        // while its descriptor was open.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
@@ -73,7 +86,7 @@ fn is_link(meta: &std::fs::Metadata) -> bool {
 
 /// Keep the inode/file name after unlocking: unlinking a lock file would
 /// allow two processes to lock different files under the same name.
-pub(super) async fn lock(dir: &Path) -> Result<std::fs::File, String> {
+pub(super) async fn lock(dir: &Path) -> Result<RestoreLock, String> {
     if !plain_dir(dir).await? {
         return Err(uncertain(dir, "实例目录不存在"));
     }
@@ -94,7 +107,7 @@ pub(super) async fn lock(dir: &Path) -> Result<std::fs::File, String> {
         .map_err(|e| uncertain(dir, e))?;
     fs2::FileExt::try_lock_exclusive(&file)
         .map_err(|e| format!("无法取得快照事务独占锁，请等待其他 PHL 操作结束：{e}"))?;
-    Ok(file)
+    Ok(RestoreLock { file })
 }
 
 pub(super) async fn pending(dir: &Path) -> Result<bool, String> {

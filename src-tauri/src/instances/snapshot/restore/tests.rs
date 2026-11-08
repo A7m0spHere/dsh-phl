@@ -8,6 +8,21 @@ const ID: &str = "restore-p0";
 const SNAP: &str = "snap-p0";
 const WORKER: &str = "instances::snapshot::restore::tests::crash_worker";
 
+#[tokio::test]
+async fn transaction_lock_releases_before_a_duplicate_descriptor_is_closed() {
+    let fixture = Fixture::new("duplicate-lock").await;
+    let held = lock(&fixture.dir()).await.unwrap();
+    let inherited = held.file.try_clone().unwrap();
+    assert!(lock(&fixture.dir()).await.is_err());
+    drop(held);
+    let next = lock(&fixture.dir()).await.expect(
+        "a completed transaction must release its lock while a duplicate descriptor remains open",
+    );
+    assert!(fixture.dir().join(LOCK).is_file());
+    drop(next);
+    drop(inherited);
+}
+
 struct Fixture {
     root: PathBuf,
 }
