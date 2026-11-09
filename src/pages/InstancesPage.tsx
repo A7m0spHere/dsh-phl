@@ -3,6 +3,7 @@ import { useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Boxes,
+  Activity,
   ChevronDown,
   CirclePause,
   CirclePlay,
@@ -35,6 +36,7 @@ import { InstanceCard } from '@/components/instance/InstanceCard'
 import { InstanceWelcome } from '@/components/instance/InstanceWelcome'
 import { LaunchDock } from '@/components/instance/LaunchDock'
 import { OfficialDesktopCard } from '@/components/instance/OfficialDesktopCard'
+import { InstanceProcessPanel } from '@/features/processes/InstanceProcessPanel'
 
 /* ------------------------------------------------------------------ *
  * context panel
@@ -137,6 +139,8 @@ export function InstancesPanel() {
  * ------------------------------------------------------------------ */
 
 export function InstancesPage() {
+  const instanceView = useViewStore((state) => state.instanceView)
+  const setInstanceView = useViewStore((state) => state.setInstanceView)
   const instances = useInstanceStore((s) => s.instances)
   const states = useInstanceStore((s) => s.states)
   const loaded = useInstanceStore((s) => s.loaded)
@@ -298,11 +302,15 @@ export function InstancesPage() {
               <div className="ml-auto">
                 <Segmented
                   size="sm"
-                  value={layout}
-                  onChange={(v) => setLayout(v as 'grid' | 'list')}
+                  value={instanceView === 'processes' ? 'processes' : layout}
+                  onChange={(value) => {
+                    setInstanceView(value === 'processes' ? 'processes' : 'instances')
+                    if (value !== 'processes') setLayout(value as 'grid' | 'list')
+                  }}
                   options={[
                     { value: 'grid', label: '', icon: <LayoutGrid size={12} />, hint: '卡片视图' },
                     { value: 'list', label: '', icon: <Rows3 size={12} />, hint: '列表视图' },
+                    { value: 'processes', label: '进程', icon: <Activity size={12} />, hint: '进程总览' },
                   ]}
                 />
               </div>
@@ -321,6 +329,8 @@ export function InstancesPage() {
               </div>
             ) : instances.length === 0 ? (
               <InstanceWelcome />
+            ) : instanceView === 'processes' ? (
+              <InstanceProcessPanel instances={visible} />
             ) : visible.length === 0 ? (
               <EmptyState
                 icon={<Boxes size={20} />}

@@ -148,7 +148,8 @@ async function launch(
 }
 
 /** The process module's overrides, spread into the desktop repository. */
-export const tauriLaunchOverrides: Pick<PhlRepository, 'launch' | 'stop'> = {
+export const tauriLaunchOverrides: Pick<PhlRepository, 'launch' | 'stop' | 'sampleProcesses'> = {
+  sampleProcesses: () => desktop.sampleInstanceProcesses(),
   launch,
   stop: async (instance) => {
     await desktop.stopInstance(instance.id)

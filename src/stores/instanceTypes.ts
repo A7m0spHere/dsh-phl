@@ -1,4 +1,18 @@
 import type { InstanceState } from './instanceStore'
+import type { WebUiOpenResult } from '@/lib/desktop'
+
+export interface InstanceProcessControls {
+  restarting: Record<string, true>
+  stoppingAll: boolean
+  launch: (id: string, options?: { autoOpenWebUi?: boolean }) => Promise<void>
+  cancelLaunch: (id: string) => void
+  stop: (id: string) => Promise<boolean>
+  restart: (id: string) => Promise<boolean>
+  /** Returns instance IDs whose processes could not be confirmed stopped. */
+  stopAll: () => Promise<string[]>
+  toggle: (id: string) => void
+  openWebUi: (id: string) => Promise<WebUiOpenResult>
+}
 
 /**
  * The zustand `set`/`get` pair the instance domain-action creators compose

@@ -1,6 +1,7 @@
 import { Cancelled, repository } from '@/services'
 import { parseThrownError } from '@/lib/errorCodes'
 import type { Runtime } from '@/types'
+import { isRuntimeBusy } from '@/types/runtime'
 import { acquireTransferSlot, releaseTransferSlot } from './transferCoordinator'
 import { maybeHintMirror, officialRegistryLooksSlow } from './catalogNotifications'
 import { useUIStore } from './uiStore'
@@ -14,7 +15,7 @@ export function createRuntimeActions(
   return {
     async installRuntime(id) {
       const runtime = get().runtimes.find((candidate) => candidate.id === id)
-      if (!runtime) return
+      if (!runtime || isRuntimeBusy(runtime) || runtime.state.kind === 'installed') return
       const controller = new AbortController()
       const key = `r:${id}`
       controllers.set(key, controller)
@@ -55,8 +56,10 @@ export function createRuntimeActions(
         if (err instanceof Cancelled) {
           patch({ kind: 'available' })
         } else {
-          patch({ kind: 'failed', reason: '下载失败' })
-          useUIStore.getState().toast({ kind: 'error', title: `${runtime.name} 安装失败` })
+          const parsed = parseThrownError(err)
+          const reason = parsed.code ? `${parsed.message}（${parsed.hint}）` : parsed.message || '下载失败'
+          patch({ kind: 'failed', reason })
+          useUIStore.getState().toast({ kind: 'error', title: `${runtime.name} 安装失败`, message: reason })
         }
       } finally {
         releaseTransferSlot(key)

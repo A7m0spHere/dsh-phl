@@ -234,6 +234,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | ndk-sys 0.6.0+11769913 | 未在本地缓存中找到（cargo about 可补全） |
 | new_debug_unreachable 1.0.6 | MIT |
 | nix 0.31.3 | MIT |
+| ntapi 0.4.3 | Apache-2.0 OR MIT |
 | num-conv 0.2.2 | MIT OR Apache-2.0 |
 | num-traits 0.2.19 | MIT OR Apache-2.0 |
 | num_enum 0.7.6 | 未在本地缓存中找到（cargo about 可补全） |
@@ -250,6 +251,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | objc2-encode 4.1.0 | 未在本地缓存中找到（cargo about 可补全） |
 | objc2-exception-helper 0.1.1 | 未在本地缓存中找到（cargo about 可补全） |
 | objc2-foundation 0.3.2 | 未在本地缓存中找到（cargo about 可补全） |
+| objc2-io-kit 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | objc2-io-surface 0.3.2 | 未在本地缓存中找到（cargo about 可补全） |
 | objc2-quartz-core 0.3.2 | 未在本地缓存中找到（cargo about 可补全） |
 | objc2-ui-kit 0.3.2 | 未在本地缓存中找到（cargo about 可补全） |
@@ -361,6 +363,7 @@ PHL 依赖下列第三方组件。此清单由 `package.json` 与 `src-tauri/Car
 | syn 3.0.4 | MIT OR Apache-2.0 |
 | sync_wrapper 1.0.2 | Apache-2.0 |
 | synstructure 0.13.2 | MIT |
+| sysinfo 0.37.2 | MIT |
 | system-deps 6.2.2 | 未在本地缓存中找到（cargo about 可补全） |
 | tao 0.35.3 | Apache-2.0 |
 | tao-macros 0.1.4 | 未在本地缓存中找到（cargo about 可补全） |
